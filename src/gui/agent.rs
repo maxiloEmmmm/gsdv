@@ -1,0 +1,202 @@
+use std::env;
+use std::fmt;
+use std::str::FromStr;
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentKind {
+    Codex,
+    Claude,
+}
+
+impl AgentKind {
+    pub fn integration(self) -> &'static dyn AgentIntegration {
+        match self {
+            Self::Codex => &CODEX_INTEGRATION,
+            Self::Claude => &CLAUDE_INTEGRATION,
+        }
+    }
+
+    pub fn command(self) -> &'static str {
+        self.integration().command()
+    }
+
+    pub fn title(self) -> &'static str {
+        self.integration().title()
+    }
+
+    pub fn env_name(self) -> &'static str {
+        self.integration().env_name()
+    }
+
+    pub fn args(self, session_id: Option<&str>) -> Vec<String> {
+        self.integration().args(session_id)
+    }
+
+    pub fn all() -> [Self; 2] {
+        [Self::Codex, Self::Claude]
+    }
+}
+
+pub trait AgentIntegration: Sync {
+    fn command(&self) -> &'static str;
+    fn title(&self) -> &'static str;
+    fn env_name(&self) -> &'static str;
+    fn args(&self, session_id: Option<&str>) -> Vec<String>;
+}
+
+struct CodexIntegration;
+struct ClaudeIntegration;
+
+static CODEX_INTEGRATION: CodexIntegration = CodexIntegration;
+static CLAUDE_INTEGRATION: ClaudeIntegration = ClaudeIntegration;
+
+impl AgentIntegration for CodexIntegration {
+    fn command(&self) -> &'static str {
+        "codex"
+    }
+
+    fn title(&self) -> &'static str {
+        "codex"
+    }
+
+    fn env_name(&self) -> &'static str {
+        "codex"
+    }
+
+    fn args(&self, session_id: Option<&str>) -> Vec<String> {
+        if let Some(session_id) = session_id.filter(|value| !value.is_empty()) {
+            vec![
+                "resume".to_string(),
+                "--dangerously-bypass-approvals-and-sandbox".to_string(),
+                session_id.to_string(),
+            ]
+        } else {
+            vec!["--dangerously-bypass-approvals-and-sandbox".to_string()]
+        }
+    }
+}
+
+impl AgentIntegration for ClaudeIntegration {
+    fn command(&self) -> &'static str {
+        "claude"
+    }
+
+    fn title(&self) -> &'static str {
+        "claude"
+    }
+
+    fn env_name(&self) -> &'static str {
+        "claude"
+    }
+
+    fn args(&self, session_id: Option<&str>) -> Vec<String> {
+        let mut args = vec!["--dangerously-skip-permissions".to_string()];
+        if let Some(session_id) = session_id.filter(|value| !value.is_empty()) {
+            args.push("--resume".to_string());
+            args.push(session_id.to_string());
+        }
+        args
+    }
+}
+
+impl Default for AgentKind {
+    fn default() -> Self {
+        Self::Codex
+    }
+}
+
+impl FromStr for AgentKind {
+    type Err = AgentKindParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "codex" => Ok(Self::Codex),
+            "claude" => Ok(Self::Claude),
+            _ => Err(AgentKindParseError {
+                value: value.to_string(),
+            }),
+        }
+    }
+}
+
+impl fmt::Display for AgentKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.env_name())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentKindParseError {
+    value: String,
+}
+
+impl fmt::Display for AgentKindParseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "unsupported agent kind {}", self.value)
+    }
+}
+
+impl std::error::Error for AgentKindParseError {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AgentLaunchConfig {
+    pub kind: AgentKind,
+    pub kind_explicit: bool,
+    pub coder_args: Vec<String>,
+}
+
+impl AgentLaunchConfig {
+    pub fn from_env_args() -> Self {
+        Self::from_args(env::args().skip(1))
+    }
+
+    pub fn from_args(args: impl IntoIterator<Item = String>) -> Self {
+        let mut config = Self::default();
+        let mut args = args.into_iter();
+        while let Some(arg) = args.next() {
+            if let Some(value) = arg.strip_prefix("--agent=") {
+                if let Ok(kind) = value.parse() {
+                    config.kind = kind;
+                    config.kind_explicit = true;
+                }
+                continue;
+            }
+            if arg == "--agent" {
+                if let Some(value) = args.next()
+                    && let Ok(kind) = value.parse()
+                {
+                    config.kind = kind;
+                    config.kind_explicit = true;
+                }
+                continue;
+            }
+            if let Some(value) = arg.strip_prefix("--coder-arg=") {
+                config.coder_args.push(value.to_string());
+                continue;
+            }
+            if arg == "--coder-arg" {
+                if let Some(value) = args.next() {
+                    config.coder_args.push(value);
+                }
+            }
+        }
+        config
+    }
+
+    pub fn args(&self, session_id: Option<&str>) -> Vec<String> {
+        self.args_for(self.kind, session_id)
+    }
+
+    pub fn args_for(&self, kind: AgentKind, session_id: Option<&str>) -> Vec<String> {
+        let mut args = kind.args(session_id);
+        args.extend(self.coder_args.iter().cloned());
+        args
+    }
+}
+
+#[cfg(test)]
+#[path = "agent_test.rs"]
+mod agent_test;
