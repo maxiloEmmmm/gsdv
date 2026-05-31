@@ -24,8 +24,8 @@ use crate::gui::terminal_host::{
 use crate::gui::theme;
 use crate::gui::workflow::{
     WorkflowMutationRequest, WorkflowProjectNode, WorkflowSaveRequest, WorkflowSaveSuccess,
-    WorkflowSelectionTarget, WorkflowStepEditor, WorkflowStepEditorMode, WorkflowStepNode,
-    WorkflowTaskNode, WorkflowTree, workflow_step_editor_from_node,
+    WorkflowSelectionTarget, WorkflowStepEditor, WorkflowStepNode, WorkflowTaskEditor,
+    WorkflowTaskNode, WorkflowTree, workflow_step_editor_from_node, workflow_task_editor_from_node,
 };
 use crate::reviewer::app::{GuiReviewerRowTone, ReviewerGitDataResult};
 use eframe::egui::text_edit::{TextEditOutput, TextEditState};
@@ -1089,6 +1089,8 @@ struct WorkflowUiState {
     load_error: Option<String>,
     /// 当前选中的 workflow 目标。
     selected: Option<WorkflowSelectionTarget>,
+    /// 当前 task 说明编辑器。
+    task_editor: Option<WorkflowTaskEditor>,
     /// 当前叶子 step 片段编辑器。
     editor: Option<WorkflowStepEditor>,
     /// 片段保存成功后要继续打开的目标。
@@ -1920,7 +1922,6 @@ enum AppDialog {
     },
     WorkflowAddStep {
         task_path: PathBuf,
-        parent_step_path: Option<Vec<usize>>,
         key: String,
         desc: String,
     },

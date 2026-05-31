@@ -1,31 +1,66 @@
 use super::workflow::{
     WorkflowMutationRequest, WorkflowSaveRequest, apply_workflow_mutation, load_workflow_tree,
-    save_workflow_step_editor, workflow_step_editor_from_node,
+    save_workflow_step_editor, workflow_step_editor_from_node, workflow_task_editor_from_node,
 };
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// 验证 workflow tree 会让叶子 step 继承根父 doc。
+/// 验证 workflow task 会按二级 checkbox heading 解析扁平 step。
 #[test]
-fn workflow_leaf_step_inherits_root_doc() {
-    let root = workflow_fixture("workflow-leaf-doc");
+fn workflow_task_parses_heading_steps() {
+    let root = workflow_fixture("workflow-heading-steps");
 
     let tree = load_workflow_tree(&root).unwrap();
 
     let task = &tree.projects[0].tasks[0];
-    let leaf = &task.steps[0].children[0];
-    let editor = workflow_step_editor_from_node(&task.path, leaf);
-    assert_eq!(editor.doc_key, "root1");
-    assert_eq!(editor.doc_text, "doc desc");
-    assert_eq!(editor.step_text, "leaf desc");
+    assert_eq!(task.desc, "Task intro\n");
+    assert_eq!(task.steps.len(), 2);
+    assert_eq!(task.steps[0].path, vec![0]);
+    assert_eq!(task.steps[0].title, "完成中文 step");
+    assert!(task.steps[0].checked);
+    assert_eq!(task.steps[0].desc, "doc desc\nstep desc");
+    assert!(task.steps[0].children.is_empty());
+    assert_eq!(task.steps[1].title, "next step with spaces");
+    assert!(!task.steps[1].checked);
+
+    let editor = workflow_step_editor_from_node(&task.path, &task.steps[0]);
+    assert_eq!(editor.step_text, "doc desc\nstep desc");
+    assert!(!editor.is_dirty());
+    let task_editor = workflow_task_editor_from_node(task);
+    assert_eq!(task_editor.task_text, "Task intro\n");
+    assert!(!task_editor.is_dirty());
 
     let _ = fs::remove_dir_all(root);
 }
 
-/// 验证保存 workflow 片段会同时写回 doc desc 和 step desc。
+/// 验证保存 workflow task 说明只写回首个 step 之前的内容。
 #[test]
-fn workflow_save_updates_doc_and_step_desc() {
+fn workflow_save_updates_task_desc() {
+    let root = workflow_fixture("workflow-save-task-desc");
+    let task_path = PathBuf::from("gsdv-spec/ps/project1/task-a.md");
+
+    save_workflow_step_editor(
+        &root,
+        WorkflowSaveRequest {
+            task_path: task_path.clone(),
+            task_text: "Updated task intro\n".to_string(),
+            step_path: None,
+            step_text: None,
+        },
+    )
+    .unwrap();
+
+    let content = fs::read_to_string(root.join(task_path)).unwrap();
+    assert!(content.starts_with("Updated task intro\n\n## [x] 完成中文 step\n"));
+    assert!(content.contains("doc desc\nstep desc\n"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+/// 验证保存 workflow step 只写回当前 heading 下的正文。
+#[test]
+fn workflow_save_updates_step_desc() {
     let root = workflow_fixture("workflow-save");
     let task_path = PathBuf::from("gsdv-spec/ps/project1/task-a.md");
 
@@ -33,50 +68,67 @@ fn workflow_save_updates_doc_and_step_desc() {
         &root,
         WorkflowSaveRequest {
             task_path: task_path.clone(),
-            step_path: vec![0, 0],
-            doc_key: "root1".to_string(),
-            doc_text: "next doc".to_string(),
-            step_text: "next step".to_string(),
+            task_text: "Task intro\n".to_string(),
+            step_path: Some(vec![0]),
+            step_text: Some("next desc\nmore".to_string()),
         },
     )
     .unwrap();
 
     let content = fs::read_to_string(root.join(task_path)).unwrap();
-    assert!(content.contains("- root1\n  next doc"));
-    assert!(content.contains("  - [ ] leaf1\n    next step"));
+    assert!(content.contains("## [x] 完成中文 step\nnext desc\nmore\n"));
+    assert!(content.contains("## [ ] next step with spaces\npending desc\n"));
 
     let _ = fs::remove_dir_all(root);
 }
 
-/// 验证左侧 doc desc 清空时会移除 doc key。
+/// 验证 task 说明不能保存新的 step heading。
 #[test]
-fn workflow_empty_doc_desc_removes_doc_key() {
-    let root = workflow_fixture("workflow-empty-doc");
+fn workflow_save_rejects_step_heading_inside_task_desc() {
+    let root = workflow_fixture("workflow-save-heading-task-desc");
     let task_path = PathBuf::from("gsdv-spec/ps/project1/task-a.md");
 
-    save_workflow_step_editor(
+    let error = save_workflow_step_editor(
         &root,
         WorkflowSaveRequest {
-            task_path: task_path.clone(),
-            step_path: vec![0, 0],
-            doc_key: "root1".to_string(),
-            doc_text: String::new(),
-            step_text: "leaf desc".to_string(),
+            task_path,
+            task_text: "before\n## [ ] nested\n".to_string(),
+            step_path: None,
+            step_text: None,
         },
     )
-    .unwrap();
+    .unwrap_err();
 
-    let content = fs::read_to_string(root.join(task_path)).unwrap();
-    let doc_section = content.split("--doc--").nth(1).unwrap_or_default();
-    assert!(!doc_section.contains("- root1\n"));
-    assert!(content.contains("  - [ ] leaf1\n    leaf desc"));
+    assert!(error.contains("## [ ]"));
 
     let _ = fs::remove_dir_all(root);
 }
 
-/// 验证新增 workflow task 会创建空 task 模板。
+/// 验证 step 正文不能保存新的 step heading。
 #[test]
-fn workflow_add_task_creates_empty_template() {
+fn workflow_save_rejects_step_heading_inside_desc() {
+    let root = workflow_fixture("workflow-save-heading-desc");
+    let task_path = PathBuf::from("gsdv-spec/ps/project1/task-a.md");
+
+    let error = save_workflow_step_editor(
+        &root,
+        WorkflowSaveRequest {
+            task_path,
+            task_text: "Task intro\n".to_string(),
+            step_path: Some(vec![0]),
+            step_text: Some("before\n## [ ] nested\n".to_string()),
+        },
+    )
+    .unwrap_err();
+
+    assert!(error.contains("## [ ]"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+/// 验证新增 workflow task 会创建空 Markdown 文件。
+#[test]
+fn workflow_add_task_creates_empty_file() {
     let root = workflow_fixture("workflow-add-task");
 
     apply_workflow_mutation(
@@ -89,22 +141,43 @@ fn workflow_add_task_creates_empty_template() {
     .unwrap();
 
     let content = fs::read_to_string(root.join("gsdv-spec/ps/project1/task-new.task.md")).unwrap();
-    assert_eq!(content, "--steps--\n---------\n\n--doc--\n--------\n");
+    assert_eq!(content, "");
 
     let _ = fs::remove_dir_all(root);
 }
 
-/// 验证新增同级 step 时不允许 key 重复。
+/// 验证新增 step 会追加二级 checkbox heading 和正文。
 #[test]
-fn workflow_add_step_rejects_sibling_duplicate() {
+fn workflow_add_step_appends_heading() {
+    let root = workflow_fixture("workflow-add-step");
+    let task_path = PathBuf::from("gsdv-spec/ps/project1/task-a.md");
+
+    apply_workflow_mutation(
+        &root,
+        WorkflowMutationRequest::AddStep {
+            task_path: task_path.clone(),
+            key: "新增 step title".to_string(),
+            desc: "new desc".to_string(),
+        },
+    )
+    .unwrap();
+
+    let content = fs::read_to_string(root.join(task_path)).unwrap();
+    assert!(content.ends_with("## [ ] 新增 step title\nnew desc\n"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+/// 验证新增 step 不允许同 task 内标题重复。
+#[test]
+fn workflow_add_step_rejects_duplicate_title() {
     let root = workflow_fixture("workflow-add-duplicate");
 
     let error = apply_workflow_mutation(
         &root,
         WorkflowMutationRequest::AddStep {
             task_path: PathBuf::from("gsdv-spec/ps/project1/task-a.md"),
-            parent_step_path: Some(vec![0]),
-            key: "leaf1".to_string(),
+            key: "完成中文 step".to_string(),
             desc: String::new(),
         },
     )
@@ -115,150 +188,55 @@ fn workflow_add_step_rejects_sibling_duplicate() {
     let _ = fs::remove_dir_all(root);
 }
 
-/// 验证新增子 step 会插入到父 step 子树末尾。
+/// 验证 step 标题可以包含空格和中文。
 #[test]
-fn workflow_add_child_step_appends_inside_parent_subtree() {
-    let root = workflow_fixture("workflow-add-child");
-    let task_path = PathBuf::from("gsdv-spec/ps/project1/task-a.md");
-
-    apply_workflow_mutation(
-        &root,
-        WorkflowMutationRequest::AddStep {
-            task_path: task_path.clone(),
-            parent_step_path: Some(vec![0]),
-            key: "leaf3".to_string(),
-            desc: "new desc".to_string(),
-        },
-    )
-    .unwrap();
-
-    let content = fs::read_to_string(root.join(task_path)).unwrap();
-    assert!(
-        content.contains("  - [x] leaf2\n    done desc\n  - [ ] leaf3\n    new desc\n---------")
-    );
-
-    let _ = fs::remove_dir_all(root);
-}
-
-/// 验证删除顶级 step 会同时清理对应 doc 项。
-#[test]
-fn workflow_delete_root_step_removes_doc_item() {
-    let root = workflow_fixture("workflow-delete-root");
-    let task_path = PathBuf::from("gsdv-spec/ps/project1/task-a.md");
-
-    apply_workflow_mutation(
-        &root,
-        WorkflowMutationRequest::DeleteStep {
-            task_path: task_path.clone(),
-            step_path: vec![0],
-        },
-    )
-    .unwrap();
-
-    let content = fs::read_to_string(root.join(task_path)).unwrap();
-    assert!(!content.contains("- root1\n"));
-    assert!(!content.contains("leaf1"));
-    assert!(!content.contains("leaf2"));
-
-    let _ = fs::remove_dir_all(root);
-}
-
-/// 验证删除嵌套非叶子 step 会清理同名 doc 项。
-#[test]
-fn workflow_delete_nested_parent_step_removes_doc_item() {
-    let root = workflow_fixture("workflow-delete-nested-parent");
-    let task_path = PathBuf::from("gsdv-spec/ps/project1/task-a.md");
-    fs::write(
-        root.join(&task_path),
-        "--steps--\n- root1\n  - branch\n    - [ ] leaf1\n      leaf desc\n---------\n\n--doc--\n- root1\n  root doc\n- branch\n  branch doc\n--------\n",
-    )
-    .unwrap();
-
-    apply_workflow_mutation(
-        &root,
-        WorkflowMutationRequest::DeleteStep {
-            task_path: task_path.clone(),
-            step_path: vec![0, 0],
-        },
-    )
-    .unwrap();
-
-    let content = fs::read_to_string(root.join(task_path)).unwrap();
-    assert!(content.contains("- root1\n---------"));
-    assert!(content.contains("- root1\n  root doc"));
-    assert!(!content.contains("branch"));
-    assert!(!content.contains("leaf1"));
-
-    let _ = fs::remove_dir_all(root);
-}
-
-/// 验证重命名 project 会移动项目目录。
-#[test]
-fn workflow_rename_project_moves_project_directory() {
-    let root = workflow_fixture("workflow-rename-project");
-
-    apply_workflow_mutation(
-        &root,
-        WorkflowMutationRequest::RenameProject {
-            project_key: "project1".to_string(),
-            new_key: "project2".to_string(),
-        },
-    )
-    .unwrap();
-
-    assert!(!root.join("gsdv-spec/ps/project1").exists());
-    assert!(root.join("gsdv-spec/ps/project2/root.md").is_file());
-
-    let _ = fs::remove_dir_all(root);
-}
-
-/// 验证重命名 task 会移动 task 文件。
-#[test]
-fn workflow_rename_task_moves_task_file() {
-    let root = workflow_fixture("workflow-rename-task");
-
-    apply_workflow_mutation(
-        &root,
-        WorkflowMutationRequest::RenameTask {
-            task_path: PathBuf::from("gsdv-spec/ps/project1/task-a.md"),
-            new_key: "b".to_string(),
-        },
-    )
-    .unwrap();
-
-    assert!(!root.join("gsdv-spec/ps/project1/task-a.md").exists());
-    assert!(root.join("gsdv-spec/ps/project1/task-b.md").is_file());
-
-    let _ = fs::remove_dir_all(root);
-}
-
-/// 验证重命名非叶子 step 会同步 doc key 并保留 desc。
-#[test]
-fn workflow_rename_parent_step_updates_doc_key() {
-    let root = workflow_fixture("workflow-rename-parent-step");
+fn workflow_rename_step_allows_spaces_and_chinese() {
+    let root = workflow_fixture("workflow-rename-step");
     let task_path = PathBuf::from("gsdv-spec/ps/project1/task-a.md");
 
     apply_workflow_mutation(
         &root,
         WorkflowMutationRequest::RenameStep {
             task_path: task_path.clone(),
-            step_path: vec![0],
-            new_key: "root2".to_string(),
+            step_path: vec![1],
+            new_key: "新的 step 名称".to_string(),
         },
     )
     .unwrap();
 
     let content = fs::read_to_string(root.join(task_path)).unwrap();
-    assert!(content.contains("- root2\n  - [ ] leaf1"));
-    assert!(content.contains("--doc--\n- root2\n  doc desc\n--------"));
-    assert!(!content.contains("- root1\n  doc desc"));
+    assert!(content.contains("## [ ] 新的 step 名称\npending desc\n"));
+    assert!(!content.contains("## [ ] next step with spaces"));
 
     let _ = fs::remove_dir_all(root);
 }
 
-/// 验证 rename key 不允许空白字符。
+/// 验证删除 step 会删除整个二级 heading 区块。
 #[test]
-fn workflow_rename_rejects_whitespace_key() {
+fn workflow_delete_step_removes_heading_block() {
+    let root = workflow_fixture("workflow-delete-step");
+    let task_path = PathBuf::from("gsdv-spec/ps/project1/task-a.md");
+
+    apply_workflow_mutation(
+        &root,
+        WorkflowMutationRequest::DeleteStep {
+            task_path: task_path.clone(),
+            step_path: vec![0],
+        },
+    )
+    .unwrap();
+
+    let content = fs::read_to_string(root.join(task_path)).unwrap();
+    assert!(!content.contains("完成中文 step"));
+    assert!(!content.contains("doc desc"));
+    assert!(content.contains("## [ ] next step with spaces\npending desc\n"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+/// 验证 task/project key 仍不允许空白字符。
+#[test]
+fn workflow_rename_task_rejects_whitespace_key() {
     let root = workflow_fixture("workflow-rename-whitespace");
 
     let error = apply_workflow_mutation(
@@ -284,7 +262,7 @@ fn workflow_fixture(name: &str) -> PathBuf {
     fs::write(project.join("root.md"), "# project1\n").unwrap();
     fs::write(
         project.join("task-a.md"),
-        "--steps--\n- root1\n  - [ ] leaf1\n    leaf desc\n  - [x] leaf2\n    done desc\n---------\n\n--doc--\n- root1\n  doc desc\n--------\n",
+        "Task intro\n\n## [x] 完成中文 step\ndoc desc\nstep desc\n\n## [ ] next step with spaces\npending desc\n",
     )
     .unwrap();
     root

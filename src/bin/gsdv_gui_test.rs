@@ -149,7 +149,7 @@ fn install_skill_writes_gsdv_wf_skill() {
 
     let content = fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
     assert!(content.contains("name: gsdv-wf"));
-    assert!(content.contains("description: \"轻量级任务管理\""));
+    assert!(content.contains("description: \"Lightweight task management\""));
 
     let _ = fs::remove_dir_all(root);
 }

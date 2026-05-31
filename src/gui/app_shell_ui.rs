@@ -637,7 +637,6 @@ impl GsdvGuiApp {
             {
                 *context_dialog = Some(AppDialog::WorkflowAddStep {
                     task_path: task.path.clone(),
-                    parent_step_path: None,
                     key: String::new(),
                     desc: String::new(),
                 });
@@ -682,11 +681,9 @@ impl GsdvGuiApp {
         let mut step_path_parts = path_parts.to_vec();
         step_path_parts.push(step.title.clone());
         let selected = selected_target == Some(&step_target);
-        let badge =
-            (depth == 0 && step.checkable).then_some(if step.checked { "DONE" } else { "STEP" });
         let label_left_override =
             parent_child_base_left.map(|left| left + workflow_step_child_indent(ui));
-        let (response, _, child_base_left) = workflow_tree_row(
+        let (response, _, _) = workflow_tree_row(
             ui,
             depth,
             None,
@@ -695,7 +692,7 @@ impl GsdvGuiApp {
             step.checked,
             &step.title,
             selected,
-            badge,
+            None,
         );
         response.context_menu(|ui| {
             if ui.button(i18n::text(language, "Copy path")).clicked() {
@@ -710,22 +707,6 @@ impl GsdvGuiApp {
                 });
                 ui.close_menu();
             }
-            if depth == 0 {
-                if ui.button(i18n::text(language, "Add child step")).clicked() {
-                    let desc = if step.children.is_empty() && !step.desc.trim().is_empty() {
-                        step.desc.clone()
-                    } else {
-                        String::new()
-                    };
-                    *context_dialog = Some(AppDialog::WorkflowAddStep {
-                        task_path: task.path.clone(),
-                        parent_step_path: Some(step.path.clone()),
-                        key: String::new(),
-                        desc,
-                    });
-                    ui.close_menu();
-                }
-            }
             if ui.button(i18n::text(language, "Delete step")).clicked() {
                 *context_dialog = Some(AppDialog::WorkflowDeleteConfirm {
                     target: WorkflowDeleteTarget::Step {
@@ -739,21 +720,6 @@ impl GsdvGuiApp {
         });
         if response.clicked() {
             *target = Some(step_target);
-        }
-        for child in &step.children {
-            Self::render_workflow_step_node(
-                ui,
-                task,
-                child,
-                depth + 1,
-                Some(child_base_left),
-                selected_target,
-                target,
-                context_dialog,
-                copy_path,
-                &step_path_parts,
-                language,
-            );
         }
     }
 
@@ -1056,26 +1022,41 @@ impl GsdvGuiApp {
         }
         let mut copy_path = None;
         let left_width = (ui.available_width() * 0.32).clamp(220.0, 360.0);
+        let desc_height = (available.y * 0.28)
+            .clamp(110.0, 220.0)
+            .min((available.y - 160.0).max(80.0));
         StripBuilder::new(ui)
-            .size(Size::exact(left_width))
+            .size(Size::exact(desc_height))
             .size(Size::exact(10.0))
             .size(Size::remainder())
-            .horizontal(|mut strip| {
+            .vertical(|mut strip| {
                 strip.cell(|ui| {
-                    workflow_task_step_tree_panel(
-                        ui,
-                        &task,
-                        selected.as_ref(),
-                        &mut target,
-                        &mut context_dialog,
-                        &mut copy_path,
-                        &project_label,
-                        self.app_language,
-                    );
+                    self.workflow_task_desc_editor_surface(ui);
                 });
                 strip.empty();
-                strip.cell(|ui| {
-                    self.workflow_step_editor_surface(ui);
+                strip.strip(|builder| {
+                    builder
+                        .size(Size::exact(left_width))
+                        .size(Size::exact(10.0))
+                        .size(Size::remainder())
+                        .horizontal(|mut strip| {
+                            strip.cell(|ui| {
+                                workflow_task_step_tree_panel(
+                                    ui,
+                                    &task,
+                                    selected.as_ref(),
+                                    &mut target,
+                                    &mut context_dialog,
+                                    &mut copy_path,
+                                    &project_label,
+                                    self.app_language,
+                                );
+                            });
+                            strip.empty();
+                            strip.cell(|ui| {
+                                self.workflow_step_editor_surface(ui);
+                            });
+                        });
                 });
             });
         if let Some(dialog) = context_dialog {
@@ -1110,18 +1091,17 @@ impl GsdvGuiApp {
         })
     }
 
-    /// 绘制 workflow step 片段编辑器。
-    pub(super) fn workflow_step_editor_surface(&mut self, ui: &mut Ui) {
+    /// 绘制 workflow task 说明编辑器。
+    pub(super) fn workflow_task_desc_editor_surface(&mut self, ui: &mut Ui) {
         let Some(editor) = self
             .workflow_states
             .get(self.active_workspace)
-            .and_then(|state| state.editor.as_ref())
+            .and_then(|state| state.task_editor.as_ref())
             .cloned()
         else {
-            empty_document_panel(
+            workflow_empty_editor_message(
                 ui,
-                i18n::text(self.app_language, "Select a workflow step to edit."),
-                self.app_language,
+                i18n::text(self.app_language, "Select a workflow task."),
             );
             return;
         };
@@ -1130,7 +1110,57 @@ impl GsdvGuiApp {
             &self.font_settings.editor,
         ));
         let interactive = self.center_surface_accepts_keyboard_input();
-        let mut next_doc_text = editor.doc_text.clone();
+        let mut next_task_text = editor.task_text.clone();
+        let save_error = editor.save_error.clone();
+        let available = ui.available_size();
+        if available.x <= 1.0 || available.y <= 1.0 {
+            return;
+        }
+        if let Some(error) = save_error {
+            document_error_strip(ui, &error);
+            ui.add_space(8.0);
+        }
+        let ime_dirty = workflow_fragment_editor(
+            ui,
+            (
+                "workflow-task-desc-editor",
+                self.active_workspace,
+                editor.task_path.clone(),
+            ),
+            &mut next_task_text,
+            editor_font,
+            interactive,
+            ui.available_height().max(1.0),
+        );
+        if ime_dirty {
+            self.pending_input_repaint = true;
+        }
+        if let Some(state) = self.workflow_states.get_mut(self.active_workspace)
+            && let Some(current) = state.task_editor.as_mut()
+        {
+            current.task_text = next_task_text;
+        }
+    }
+
+    /// 绘制 workflow step 片段编辑器。
+    pub(super) fn workflow_step_editor_surface(&mut self, ui: &mut Ui) {
+        let Some(editor) = self
+            .workflow_states
+            .get(self.active_workspace)
+            .and_then(|state| state.editor.as_ref())
+            .cloned()
+        else {
+            workflow_empty_editor_message(
+                ui,
+                i18n::text(self.app_language, "Select a workflow step to edit."),
+            );
+            return;
+        };
+        let editor_font = editor_font_id(&effective_font_surface_settings(
+            &self.font_settings,
+            &self.font_settings.editor,
+        ));
+        let interactive = self.center_surface_accepts_keyboard_input();
         let mut next_step_text = editor.step_text.clone();
         let save_error = editor.save_error.clone();
         let available = ui.available_size();
@@ -1141,66 +1171,25 @@ impl GsdvGuiApp {
             document_error_strip(ui, &error);
             ui.add_space(8.0);
         }
-        match editor.mode {
-            WorkflowStepEditorMode::DocOnly => {
-                workflow_fragment_editor(
-                    ui,
-                    (
-                        "workflow-doc-editor",
-                        self.active_workspace,
-                        editor.task_path.clone(),
-                        editor.step_path.clone(),
-                    ),
-                    &mut next_doc_text,
-                    editor_font,
-                    interactive,
-                    ui.available_height().max(120.0),
-                );
-            }
-            WorkflowStepEditorMode::DocAndStep => {
-                StripBuilder::new(ui)
-                    .size(Size::remainder())
-                    .size(Size::exact(10.0))
-                    .size(Size::remainder())
-                    .vertical(|mut strip| {
-                        strip.cell(|ui| {
-                            workflow_fragment_editor(
-                                ui,
-                                (
-                                    "workflow-doc-editor",
-                                    self.active_workspace,
-                                    editor.task_path.clone(),
-                                    editor.step_path.clone(),
-                                ),
-                                &mut next_doc_text,
-                                editor_font.clone(),
-                                interactive,
-                                ui.available_height().max(80.0),
-                            );
-                        });
-                        strip.empty();
-                        strip.cell(|ui| {
-                            workflow_fragment_editor(
-                                ui,
-                                (
-                                    "workflow-step-editor",
-                                    self.active_workspace,
-                                    editor.task_path.clone(),
-                                    editor.step_path.clone(),
-                                ),
-                                &mut next_step_text,
-                                editor_font,
-                                interactive,
-                                ui.available_height().max(80.0),
-                            );
-                        });
-                    });
-            }
+        let ime_dirty = workflow_fragment_editor(
+            ui,
+            (
+                "workflow-step-editor",
+                self.active_workspace,
+                editor.task_path.clone(),
+                editor.step_path.clone(),
+            ),
+            &mut next_step_text,
+            editor_font,
+            interactive,
+            ui.available_height().max(1.0),
+        );
+        if ime_dirty {
+            self.pending_input_repaint = true;
         }
         if let Some(state) = self.workflow_states.get_mut(self.active_workspace)
             && let Some(current) = state.editor.as_mut()
         {
-            current.doc_text = next_doc_text;
             current.step_text = next_step_text;
         }
     }
@@ -1530,28 +1519,74 @@ fn workflow_fragment_editor(
     editor_font: egui::FontId,
     interactive: bool,
     height: f32,
-) {
+) -> bool {
     let width = ui.available_width().max(120.0);
+    let height = height.min(ui.available_height().max(1.0)).max(1.0);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
+    let radius = CornerRadius::same(6);
+    ui.painter().rect_filled(rect, radius, theme::surface());
+    ui.painter().rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, theme::border()),
+        egui::StrokeKind::Inside,
+    );
+    let inner_rect = rect.shrink(8.0);
+    if inner_rect.width() <= 1.0 || inner_rect.height() <= 1.0 {
+        return false;
+    }
+    let mut editor_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt(("workflow-fragment-inner", id_salt.clone()))
+            .max_rect(inner_rect)
+            .layout(Layout::top_down(Align::Min)),
+    );
+    editor_ui.set_clip_rect(inner_rect);
+    let text_before_ime =
+        GsdvGuiApp::markdown_editor_has_ime_commit(&editor_ui).then(|| text.clone());
+    let inner_width = inner_rect.width();
+    let inner_height = inner_rect.height();
     let row_height = ui.fonts(|fonts| fonts.row_height(&editor_font)).max(1.0);
-    let desired_rows = ((height / row_height).floor() as usize).max(4);
+    let desired_rows = (inner_height / row_height).floor().max(1.0) as usize;
+    let mut ime_dirty = false;
     ScrollArea::both()
         .id_salt(("workflow-fragment-scroll", id_salt.clone()))
-        .max_width(width)
-        .max_height(height)
+        .max_width(inner_width)
+        .max_height(inner_height)
         .auto_shrink([false, false])
-        .show(ui, |ui| {
-            ui.set_min_width(width);
-            let output = egui::TextEdit::multiline(text)
+        .show(&mut editor_ui, |ui| {
+            ui.set_min_width(inner_width);
+            ui.set_max_width(inner_width);
+            let mut output = egui::TextEdit::multiline(text)
                 .id_salt(id_salt)
                 .font(editor_font.clone())
                 .text_color(theme::markdown_text())
-                .desired_width(width)
+                .desired_width(inner_width)
                 .desired_rows(desired_rows)
                 .lock_focus(true)
                 .interactive(interactive)
+                .frame(false)
                 .show(ui);
             stabilize_text_edit_ime_output(ui, &output, &editor_font);
+            let text_unchanged_after_edit = text_before_ime
+                .as_deref()
+                .is_some_and(|before| before == text.as_str());
+            ime_dirty = GsdvGuiApp::apply_markdown_editor_ime_commit_fallback(
+                ui,
+                &mut output.state,
+                &output.response,
+                text_unchanged_after_edit,
+                text,
+            );
         });
+    ime_dirty
+}
+
+/// 绘制 workflow editor 的轻量空态，不复用 Markdown 主视图卡片。
+fn workflow_empty_editor_message(ui: &mut Ui, message: &str) {
+    ui.centered_and_justified(|ui| {
+        ui.label(muted(message));
+    });
 }
 
 /// 绘制 task 工作台左侧 step tree。
@@ -1568,7 +1603,7 @@ fn workflow_task_step_tree_panel(
     let path_parts = vec![project_label.to_string(), task.label.clone()];
     ScrollArea::vertical()
         .id_salt(("workflow-task-step-tree", task.path.clone()))
-        .max_height(ui.available_height().max(120.0))
+        .max_height(ui.available_height().max(1.0))
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;

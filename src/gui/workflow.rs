@@ -15,10 +15,6 @@ const PROJECTS_DIR: &str = "ps";
 const TASK_PREFIX: &str = "task-";
 /// Markdown 文件扩展名。
 const MARKDOWN_EXT: &str = "md";
-/// steps 区块标记。
-const STEPS_MARKER: &str = "--steps--";
-/// doc 区块标记。
-const DOC_MARKER: &str = "--doc--";
 
 /// workflow 树加载结果。
 #[derive(Debug, Clone, Default)]
@@ -49,6 +45,8 @@ pub(super) struct WorkflowTaskNode {
     pub label: String,
     /// task 文档相对 workspace 的路径。
     pub path: PathBuf,
+    /// 首个合法 step heading 之前的 task 说明。
+    pub desc: String,
     /// task 文档内的 step 树。
     pub steps: Vec<WorkflowStepNode>,
 }
@@ -66,10 +64,6 @@ pub(super) struct WorkflowStepNode {
     pub checkable: bool,
     /// step 自己的 desc 文本，不包含 step 行。
     pub desc: String,
-    /// 叶子 step 继承的根父 step 标题。
-    pub root_doc_key: String,
-    /// 叶子 step 继承的根父 doc desc。
-    pub root_doc_text: String,
     /// 子 step 列表。
     pub children: Vec<WorkflowStepNode>,
 }
@@ -88,13 +82,24 @@ pub(super) enum WorkflowSelectionTarget {
     },
 }
 
-/// workflow step 编辑器展示模式。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum WorkflowStepEditorMode {
-    /// 只编辑根 step 对应的 doc desc。
-    DocOnly,
-    /// 同时编辑 doc desc 和 step 自身 desc。
-    DocAndStep,
+/// workflow task 说明编辑状态。
+#[derive(Debug, Clone)]
+pub(super) struct WorkflowTaskEditor {
+    /// task 文档相对 workspace 的路径。
+    pub task_path: PathBuf,
+    /// task 说明当前文本。
+    pub task_text: String,
+    /// task 说明已保存文本。
+    pub saved_task_text: String,
+    /// 最近一次保存错误。
+    pub save_error: Option<String>,
+}
+
+impl WorkflowTaskEditor {
+    /// 判断 task 说明是否有未保存修改。
+    pub(super) fn is_dirty(&self) -> bool {
+        self.task_text != self.saved_task_text
+    }
 }
 
 /// workflow 片段编辑状态。
@@ -108,14 +113,6 @@ pub(super) struct WorkflowStepEditor {
     pub step_path: Vec<usize>,
     /// step 标题。
     pub step_title: String,
-    /// 当前 step 编辑器展示模式。
-    pub mode: WorkflowStepEditorMode,
-    /// 左侧 doc editor 对应的根父 key。
-    pub doc_key: String,
-    /// 左侧 doc desc 当前文本。
-    pub doc_text: String,
-    /// 左侧 doc desc 已保存文本。
-    pub saved_doc_text: String,
     /// 右侧叶子 step desc 当前文本。
     pub step_text: String,
     /// 右侧叶子 step desc 已保存文本。
@@ -127,7 +124,7 @@ pub(super) struct WorkflowStepEditor {
 impl WorkflowStepEditor {
     /// 判断左右任意片段是否有未保存修改。
     pub(super) fn is_dirty(&self) -> bool {
-        self.doc_text != self.saved_doc_text || self.step_text != self.saved_step_text
+        self.step_text != self.saved_step_text
     }
 }
 
@@ -136,23 +133,21 @@ impl WorkflowStepEditor {
 pub(super) struct WorkflowSaveRequest {
     /// task 文档相对 workspace 的路径。
     pub task_path: PathBuf,
+    /// 需要写入的 task 说明。
+    pub task_text: String,
     /// step 在 task 文档中的索引路径。
-    pub step_path: Vec<usize>,
-    /// 左侧 doc desc 对应的 key。
-    pub doc_key: String,
-    /// 需要写入的左侧 doc desc。
-    pub doc_text: String,
+    pub step_path: Option<Vec<usize>>,
     /// 需要写入的右侧 step desc。
-    pub step_text: String,
+    pub step_text: Option<String>,
 }
 
 /// workflow 片段保存成功结果。
 #[derive(Debug, Clone)]
 pub(super) struct WorkflowSaveSuccess {
-    /// 保存后的左侧 doc desc。
-    pub doc_text: String,
+    /// 保存后的 task 说明。
+    pub task_text: String,
     /// 保存后的右侧 step desc。
-    pub step_text: String,
+    pub step_text: Option<String>,
 }
 
 /// workflow tree 右键菜单触发的文件修改请求。
@@ -169,8 +164,6 @@ pub(super) enum WorkflowMutationRequest {
     AddStep {
         /// task 文档相对 workspace 的路径。
         task_path: PathBuf,
-        /// 父 step 路径；为空表示新增顶级 step。
-        parent_step_path: Option<Vec<usize>>,
         /// 新 step key。
         key: String,
         /// 新 step desc。
@@ -218,6 +211,16 @@ pub(super) enum WorkflowMutationRequest {
     },
 }
 
+/// 从已解析的 task 节点创建 task 说明编辑器状态。
+pub(super) fn workflow_task_editor_from_node(node: &WorkflowTaskNode) -> WorkflowTaskEditor {
+    WorkflowTaskEditor {
+        task_path: node.path.clone(),
+        task_text: node.desc.clone(),
+        saved_task_text: node.desc.clone(),
+        save_error: None,
+    }
+}
+
 /// 从已解析的 step 节点创建片段编辑器状态。
 pub(super) fn workflow_step_editor_from_node(
     task_path: &Path,
@@ -232,22 +235,9 @@ pub(super) fn workflow_step_editor_from_node(
         task_path: task_path.to_path_buf(),
         step_path: node.path.clone(),
         step_title: node.title.clone(),
-        mode: workflow_step_editor_mode(node),
-        doc_key: node.root_doc_key.clone(),
-        doc_text: node.root_doc_text.clone(),
-        saved_doc_text: node.root_doc_text.clone(),
         step_text: node.desc.clone(),
         saved_step_text: node.desc.clone(),
         save_error: None,
-    }
-}
-
-/// 根据 step 层级和子节点决定 editor 展示模式。
-fn workflow_step_editor_mode(node: &WorkflowStepNode) -> WorkflowStepEditorMode {
-    if node.path.len() == 1 && !node.children.is_empty() {
-        WorkflowStepEditorMode::DocOnly
-    } else {
-        WorkflowStepEditorMode::DocAndStep
     }
 }
 
@@ -299,6 +289,7 @@ fn load_project_tasks(
         tasks.push(WorkflowTaskNode {
             label,
             path: relative_to_workspace(workspace_root, &path),
+            desc: parse_task_desc(&content),
             steps,
         });
     }
@@ -374,12 +365,6 @@ pub(super) fn build_workflow_step_editor(
     let Some(record) = records.iter().find(|record| record.path == step_path) else {
         return Err("step not found".to_string());
     };
-    let docs = parse_doc_items(&content);
-    let doc_text = docs
-        .iter()
-        .find(|doc| doc.key == record.root_doc_key)
-        .map(|doc| doc.desc.clone())
-        .unwrap_or_default();
     let target = WorkflowSelectionTarget::Step {
         task_path: task_path.to_path_buf(),
         step_path: step_path.to_vec(),
@@ -389,17 +374,6 @@ pub(super) fn build_workflow_step_editor(
         task_path: task_path.to_path_buf(),
         step_path: step_path.to_vec(),
         step_title: record.title.clone(),
-        mode: if record.path.len() == 1
-            && records.iter().any(|candidate| {
-                candidate.path.starts_with(&record.path) && candidate.path.len() > 1
-            }) {
-            WorkflowStepEditorMode::DocOnly
-        } else {
-            WorkflowStepEditorMode::DocAndStep
-        },
-        doc_key: record.root_doc_key.clone(),
-        doc_text: doc_text.clone(),
-        saved_doc_text: doc_text,
         step_text: record.desc.clone(),
         saved_step_text: record.desc.clone(),
         save_error: None,
@@ -411,19 +385,45 @@ pub(super) fn save_workflow_step_editor(
     workspace_root: &Path,
     request: WorkflowSaveRequest,
 ) -> Result<WorkflowSaveSuccess, String> {
+    validate_workflow_task_desc(&request.task_text)?;
+    if let Some(step_text) = request.step_text.as_deref() {
+        validate_workflow_step_desc(step_text)?;
+    }
     let absolute = workspace_root.join(&request.task_path);
     let content = fs::read_to_string(&absolute)
         .map_err(|error| format!("failed to read {}: {error}", absolute.display()))?;
     let mut lines = markdown_lines(&content);
-    replace_step_desc(&mut lines, &request.step_path, &request.step_text)?;
-    replace_doc_desc(&mut lines, &request.doc_key, &request.doc_text);
+    replace_task_desc(&mut lines, &request.task_text);
+    if let (Some(step_path), Some(step_text)) = (&request.step_path, request.step_text.as_deref()) {
+        replace_step_desc(&mut lines, step_path, step_text)?;
+    }
     let next_content = join_markdown_lines(&lines);
     fs::write(&absolute, next_content.as_bytes())
         .map_err(|error| format!("failed to write {}: {error}", absolute.display()))?;
     Ok(WorkflowSaveSuccess {
-        doc_text: request.doc_text,
+        task_text: request.task_text,
         step_text: request.step_text,
     })
+}
+
+/// 校验 task 说明，避免说明伪装成新的 step heading。
+fn validate_workflow_task_desc(text: &str) -> Result<(), String> {
+    if text.lines().any(|line| parse_step_line(line).is_some()) {
+        return Err(
+            "Task description cannot contain lines starting with `## [ ]` or `## [x]`".to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// 校验 step 正文，避免正文伪装成新的 step heading。
+fn validate_workflow_step_desc(text: &str) -> Result<(), String> {
+    if text.lines().any(|line| parse_step_line(line).is_some()) {
+        return Err(
+            "Step description cannot contain lines starting with `## [ ]` or `## [x]`".to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// 应用 workflow tree 右键菜单触发的文件修改。
@@ -438,16 +438,9 @@ pub(super) fn apply_workflow_mutation(
         } => add_workflow_task(workspace_root, &project_key, &task_key),
         WorkflowMutationRequest::AddStep {
             task_path,
-            parent_step_path,
             key,
             desc,
-        } => add_workflow_step(
-            workspace_root,
-            &task_path,
-            parent_step_path.as_deref(),
-            &key,
-            &desc,
-        ),
+        } => add_workflow_step(workspace_root, &task_path, &key, &desc),
         WorkflowMutationRequest::RenameProject {
             project_key,
             new_key,
@@ -487,6 +480,18 @@ pub(super) fn validate_workflow_key(key: &str) -> Result<&str, String> {
     Ok(key)
 }
 
+/// 校验 workflow step 标题是否能作为单行 Markdown heading。
+pub(super) fn validate_workflow_step_title(title: &str) -> Result<&str, String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("Step title is required".to_string());
+    }
+    if title.contains('\n') || title.contains('\r') {
+        return Err("Step title must be one line".to_string());
+    }
+    Ok(title)
+}
+
 /// 在项目目录下创建空 task Markdown 文件。
 fn add_workflow_task(
     workspace_root: &Path,
@@ -506,60 +511,35 @@ fn add_workflow_task(
     if task_path.exists() {
         return Err(format!("task already exists: {task_key}"));
     }
-    let content = "--steps--\n---------\n\n--doc--\n--------\n";
-    fs::write(&task_path, content.as_bytes())
+    fs::write(&task_path, [])
         .map_err(|error| format!("failed to write {}: {error}", task_path.display()))
 }
 
-/// 在 task 文档中新增顶级 step 或子 step。
+/// 在 task 文档中新增扁平 step。
 fn add_workflow_step(
     workspace_root: &Path,
     task_path: &Path,
-    parent_step_path: Option<&[usize]>,
     key: &str,
     desc: &str,
 ) -> Result<(), String> {
-    let key = validate_workflow_key(key)?;
+    let key = validate_workflow_step_title(key)?;
     let absolute = workspace_root.join(task_path);
     let content = fs::read_to_string(&absolute)
         .map_err(|error| format!("failed to read {}: {error}", absolute.display()))?;
     let mut lines = markdown_lines(&content);
-    let section = ensure_steps_section(&mut lines);
-    let content = join_markdown_lines(&lines);
-    let records = parse_step_records(&content);
-    let (insert_at, indent) = if let Some(parent_path) = parent_step_path {
-        // 触发条件：外部入口尝试给子 step 新增子节点。
-        // 不能只靠 UI 隐藏菜单：mutation 也可能从其他入口调用。
-        // 防止回归：workflow 退化成多级 step tree。
-        if parent_path.len() > 1 {
-            return Err("child step cannot have child steps".to_string());
-        }
-        let parent_index = records
-            .iter()
-            .position(|record| record.path == parent_path)
-            .ok_or_else(|| "parent step not found".to_string())?;
-        if records.iter().any(|record| {
-            record.path.len() == parent_path.len() + 1
-                && record.path.starts_with(parent_path)
-                && record.title == key
-        }) {
-            return Err(format!("step already exists at this level: {key}"));
-        }
-        let parent = &records[parent_index];
-        let insert_at = step_subtree_end(&records, parent_index, section.content_end);
-        (insert_at, parent.indent + 2)
-    } else {
-        if records
-            .iter()
-            .any(|record| record.path.len() == 1 && record.title == key)
-        {
-            return Err(format!("step already exists at this level: {key}"));
-        }
-        (section.content_end, 0)
-    };
-    let mut replacement = vec![format!("{}- [ ] {key}", " ".repeat(indent))];
-    replacement.extend(indent_text_lines(desc, indent + 2));
-    lines.splice(insert_at..insert_at, replacement);
+    if parse_step_records(&content)
+        .iter()
+        .any(|record| record.title == key)
+    {
+        return Err(format!("step already exists at this level: {key}"));
+    }
+    if !lines.is_empty() && lines.last().is_some_and(|line| !line.trim().is_empty()) {
+        lines.push(String::new());
+    }
+    lines.push(format!("## [ ] {key}"));
+    if !desc.trim().is_empty() {
+        lines.extend(desc.lines().map(str::to_string));
+    }
     let next_content = join_markdown_lines(&lines);
     fs::write(&absolute, next_content.as_bytes())
         .map_err(|error| format!("failed to write {}: {error}", absolute.display()))
@@ -632,7 +612,7 @@ fn rename_workflow_step(
     step_path: &[usize],
     new_key: &str,
 ) -> Result<(), String> {
-    let new_key = validate_workflow_key(new_key)?;
+    let new_key = validate_workflow_step_title(new_key)?;
     let absolute = workspace_root.join(task_path);
     let content = fs::read_to_string(&absolute)
         .map_err(|error| format!("failed to read {}: {error}", absolute.display()))?;
@@ -646,19 +626,13 @@ fn rename_workflow_step(
     if record.title == new_key {
         return Ok(());
     }
-    if records.iter().any(|candidate| {
-        candidate.path != record.path
-            && candidate.path.len() == record.path.len()
-            && candidate.path[..candidate.path.len().saturating_sub(1)]
-                == record.path[..record.path.len().saturating_sub(1)]
-            && candidate.title == new_key
-    }) {
+    if records
+        .iter()
+        .any(|candidate| candidate.path != record.path && candidate.title == new_key)
+    {
         return Err(format!("step already exists at this level: {new_key}"));
     }
     lines[record.line_index] = renamed_step_line(&record, new_key);
-    if step_has_children(&records, index) {
-        rename_doc_item_key_if_exists(&mut lines, &record.title, new_key)?;
-    }
     let next_content = join_markdown_lines(&lines);
     fs::write(&absolute, next_content.as_bytes())
         .map_err(|error| format!("failed to write {}: {error}", absolute.display()))
@@ -698,112 +672,52 @@ fn delete_workflow_step(
     let content = fs::read_to_string(&absolute)
         .map_err(|error| format!("failed to read {}: {error}", absolute.display()))?;
     let mut lines = markdown_lines(&content);
-    let section =
-        find_section(&lines, STEPS_MARKER).ok_or_else(|| "steps section not found".to_string())?;
     let records = parse_step_records(&content);
     let index = records
         .iter()
         .position(|record| record.path == step_path)
         .ok_or_else(|| "step not found".to_string())?;
     let record = records[index].clone();
-    let delete_end = step_subtree_end(&records, index, section.content_end);
+    let delete_end = records
+        .get(index + 1)
+        .map(|record| record.line_index)
+        .unwrap_or(lines.len());
     lines.splice(record.line_index..delete_end, Vec::<String>::new());
-    if step_has_children(&records, index) {
-        delete_doc_item_if_exists(&mut lines, &record.title);
-    }
     let next_content = join_markdown_lines(&lines);
     fs::write(&absolute, next_content.as_bytes())
         .map_err(|error| format!("failed to write {}: {error}", absolute.display()))
 }
 
-/// 计算一个 step 及其子树结束行。
-fn step_subtree_end(records: &[StepRecord], index: usize, fallback_end: usize) -> usize {
-    let parent_indent = records[index].indent;
-    records[index + 1..]
+/// 解析 task 文档首个 step 前的 task 说明。
+fn parse_task_desc(content: &str) -> String {
+    let lines = markdown_lines(content);
+    let desc_end = lines
         .iter()
-        .find(|record| record.indent <= parent_indent)
-        .map(|record| record.line_index)
-        .unwrap_or(fallback_end)
+        .position(|line| parse_step_line(line).is_some())
+        .unwrap_or(lines.len());
+    lines[..desc_end].join("\n")
 }
 
 /// 解析 task 文档中的 step 树。
 fn parse_task_steps(content: &str) -> Vec<WorkflowStepNode> {
     let records = parse_step_records(content);
-    let docs = parse_doc_items(content);
-    let mut roots = Vec::new();
-    let mut stack: Vec<(usize, Vec<usize>)> = Vec::new();
-    for record in records {
-        while stack
-            .last()
-            .is_some_and(|(indent, _)| *indent >= record.indent)
-        {
-            stack.pop();
-        }
-        let mut path = stack
-            .last()
-            .map(|(_, path)| path.clone())
-            .unwrap_or_default();
-        let sibling_index = children_len_at_path(&roots, &path);
-        path.push(sibling_index);
-        let node = WorkflowStepNode {
-            path: path.clone(),
+    records
+        .into_iter()
+        .map(|record| WorkflowStepNode {
+            path: record.path,
             title: record.title,
             checked: record.checked,
             checkable: record.checkable,
             desc: record.desc,
-            root_doc_text: docs
-                .iter()
-                .find(|doc| doc.key == record.root_doc_key)
-                .map(|doc| doc.desc.clone())
-                .unwrap_or_default(),
-            root_doc_key: record.root_doc_key,
             children: Vec::new(),
-        };
-        push_step_node_at_path(&mut roots, &path, node);
-        stack.push((record.indent, path));
-    }
-    roots
-}
-
-/// 统计指定路径下已有子节点数量。
-fn children_len_at_path(nodes: &[WorkflowStepNode], parent_path: &[usize]) -> usize {
-    let Some((first, rest)) = parent_path.split_first() else {
-        return nodes.len();
-    };
-    let Some(node) = nodes.get(*first) else {
-        return 0;
-    };
-    children_len_at_path(&node.children, rest)
-}
-
-/// 将 step 节点插入到指定路径。
-fn push_step_node_at_path(
-    nodes: &mut Vec<WorkflowStepNode>,
-    path: &[usize],
-    node: WorkflowStepNode,
-) {
-    if path.len() == 1 {
-        nodes.push(node);
-        return;
-    }
-    let Some((first, rest)) = path.split_first() else {
-        return;
-    };
-    if let Some(parent) = nodes.get_mut(*first) {
-        push_step_node_at_path(&mut parent.children, rest, node);
-    }
+        })
+        .collect()
 }
 
 /// 解析 task 文档中的扁平 step 记录。
 fn parse_step_records(content: &str) -> Vec<StepRecord> {
     let lines = markdown_lines(content);
-    let section = find_section(&lines, STEPS_MARKER).unwrap_or(Section {
-        content_start: 0,
-        content_end: 0,
-        marker_line: None,
-        end_line: 0,
-    });
-    let step_lines = collect_step_lines(&lines, &section);
+    let step_lines = collect_step_lines(&lines);
     step_lines
         .iter()
         .enumerate()
@@ -811,44 +725,31 @@ fn parse_step_records(content: &str) -> Vec<StepRecord> {
             let desc_end = step_lines
                 .get(index + 1)
                 .map(|next| next.line_index)
-                .unwrap_or(section.content_end);
-            let flat_path = step_path_for_index(&step_lines, index);
-            let root_doc_key = flat_path
-                .first()
-                .and_then(|root_index| step_lines.get(*root_index))
-                .map(|root| root.title.clone())
-                .unwrap_or_else(|| step.title.clone());
+                .unwrap_or(lines.len());
             StepRecord {
-                path: flat_path
-                    .iter()
-                    .enumerate()
-                    .map(|(depth, _)| sibling_index_for_flat_path(&step_lines, &flat_path, depth))
-                    .collect(),
+                path: vec![index],
                 line_index: step.line_index,
-                indent: step.indent,
                 title: step.title.clone(),
                 checked: step.checked,
                 checkable: step.checkable,
                 desc_start: step.line_index + 1,
                 desc_end,
-                desc: unindent_lines(&lines[step.line_index + 1..desc_end], step.indent + 2),
-                root_doc_key,
+                desc: lines[step.line_index + 1..desc_end]
+                    .join("\n")
+                    .trim_end_matches('\n')
+                    .to_string(),
             }
         })
         .collect()
 }
 
-/// 收集 steps 区块中的 step 行。
-fn collect_step_lines(lines: &[String], section: &Section) -> Vec<StepLine> {
+/// 收集 task 文档中的二级 checkbox step 标题行。
+fn collect_step_lines(lines: &[String]) -> Vec<StepLine> {
     let mut steps = Vec::new();
-    for (offset, line) in lines[section.content_start..section.content_end]
-        .iter()
-        .enumerate()
-    {
+    for (line_index, line) in lines.iter().enumerate() {
         if let Some(parsed) = parse_step_line(line) {
             steps.push(StepLine {
-                line_index: section.content_start + offset,
-                indent: parsed.indent,
+                line_index,
                 title: parsed.title,
                 checked: parsed.checked,
                 checkable: parsed.checkable,
@@ -858,56 +759,34 @@ fn collect_step_lines(lines: &[String], section: &Section) -> Vec<StepLine> {
     steps
 }
 
-/// 计算 step flat index 的祖先 flat index 路径。
-fn step_path_for_index(steps: &[StepLine], index: usize) -> Vec<usize> {
-    let mut path = Vec::new();
-    let mut current_indent = steps[index].indent;
-    path.push(index);
-    for previous in (0..index).rev() {
-        if steps[previous].indent < current_indent {
-            path.push(previous);
-            current_indent = steps[previous].indent;
-        }
-    }
-    path.reverse();
-    path
-}
-
-/// 将 flat path 的指定深度转换成同级索引。
-fn sibling_index_for_flat_path(steps: &[StepLine], flat_path: &[usize], depth: usize) -> usize {
-    let flat_index = flat_path[depth];
-    let parent_flat_path = &flat_path[..depth];
-    (0..flat_index)
-        .filter(|candidate| {
-            let candidate_path = step_path_for_index(steps, *candidate);
-            candidate_path.len() == depth + 1
-                && &candidate_path[..depth] == parent_flat_path
-                && steps[*candidate].indent == steps[flat_index].indent
-        })
-        .count()
-}
-
-/// 解析单行 step。
+/// 解析单行 Markdown 二级 checkbox step 标题。
 fn parse_step_line(line: &str) -> Option<ParsedStepLine> {
-    let indent = leading_spaces(line);
-    let trimmed = line.get(indent..)?;
-    let rest = trimmed.strip_prefix("- ")?;
-    let (checkable, checked, title) = if let Some(title) = rest.strip_prefix("[ ] ") {
-        (true, false, title)
+    let rest = line.strip_prefix("## ")?;
+    let (checked, title) = if let Some(title) = rest.strip_prefix("[ ] ") {
+        (false, title)
     } else if let Some(title) = rest.strip_prefix("[x] ") {
-        (true, true, title)
+        (true, title)
     } else if let Some(title) = rest.strip_prefix("[X] ") {
-        (true, true, title)
+        (true, title)
     } else {
-        (false, false, rest)
+        return None;
     };
     let title = title.trim().to_string();
     (!title.is_empty()).then_some(ParsedStepLine {
-        indent,
         title,
         checked,
-        checkable,
+        checkable: true,
     })
+}
+
+/// 替换首个合法 step heading 之前的 task 说明。
+fn replace_task_desc(lines: &mut Vec<String>, next_text: &str) {
+    let desc_end = lines
+        .iter()
+        .position(|line| parse_step_line(line).is_some())
+        .unwrap_or(lines.len());
+    let replacement = editor_text_lines(next_text);
+    lines.splice(0..desc_end, replacement);
 }
 
 /// 替换指定 step 的 desc 行。
@@ -921,79 +800,15 @@ fn replace_step_desc(
     let Some(record) = records.iter().find(|record| record.path == step_path) else {
         return Err("step not found".to_string());
     };
-    let replacement = indent_text_lines(next_text, record.indent + 2);
+    let replacement = editor_text_lines(next_text);
     lines.splice(record.desc_start..record.desc_end, replacement);
     Ok(())
 }
 
-/// 替换、创建或删除 doc desc。
-fn replace_doc_desc(lines: &mut Vec<String>, key: &str, next_text: &str) {
-    let section = ensure_doc_section(lines);
-    let docs = parse_doc_items_from_lines(lines, &section);
-    if let Some(doc) = docs.iter().find(|doc| doc.key == key) {
-        if next_text.trim().is_empty() {
-            lines.splice(doc.item_start..doc.item_end, Vec::<String>::new());
-        } else {
-            let replacement = indent_text_lines(next_text, 2);
-            lines.splice(doc.desc_start..doc.desc_end, replacement);
-        }
-        return;
-    }
-    if next_text.trim().is_empty() {
-        return;
-    }
-    let mut replacement = vec![format!("- {key}")];
-    replacement.extend(indent_text_lines(next_text, 2));
-    lines.splice(section.content_end..section.content_end, replacement);
-}
-
-/// 删除已有 doc 项；不存在时不创建 doc 区块。
-fn delete_doc_item_if_exists(lines: &mut Vec<String>, key: &str) {
-    let Some(section) = find_section(lines, DOC_MARKER) else {
-        return;
-    };
-    let docs = parse_doc_items_from_lines(lines, &section);
-    if let Some(doc) = docs.iter().find(|doc| doc.key == key) {
-        lines.splice(doc.item_start..doc.item_end, Vec::<String>::new());
-    }
-}
-
-/// 重命名已有 doc key；不存在时不创建 doc 项。
-fn rename_doc_item_key_if_exists(
-    lines: &mut [String],
-    old_key: &str,
-    new_key: &str,
-) -> Result<(), String> {
-    let Some(section) = find_section(lines, DOC_MARKER) else {
-        return Ok(());
-    };
-    let docs = parse_doc_items_from_lines(lines, &section);
-    let Some(doc) = docs.iter().find(|doc| doc.key == old_key) else {
-        return Ok(());
-    };
-    if docs.iter().any(|doc| doc.key == new_key) {
-        return Err(format!("doc key already exists: {new_key}"));
-    }
-    lines[doc.item_start] = format!("- {new_key}");
-    Ok(())
-}
-
-/// 判断一个 step 记录是否存在子 step。
-fn step_has_children(records: &[StepRecord], index: usize) -> bool {
-    records
-        .get(index + 1)
-        .is_some_and(|next| next.indent > records[index].indent)
-}
-
 /// 生成重命名后的 step 行，保留 checkbox 状态。
 fn renamed_step_line(record: &StepRecord, new_key: &str) -> String {
-    let prefix = " ".repeat(record.indent);
-    if record.checkable {
-        let checkbox = if record.checked { "[x]" } else { "[ ]" };
-        format!("{prefix}- {checkbox} {new_key}")
-    } else {
-        format!("{prefix}- {new_key}")
-    }
+    let checkbox = if record.checked { "[x]" } else { "[ ]" };
+    format!("## {checkbox} {new_key}")
 }
 
 /// 从 task 路径提取不带 `task-` 前缀的 key。
@@ -1008,115 +823,18 @@ fn task_key_from_path(task_path: &Path) -> Result<String, String> {
         .unwrap_or(stem))
 }
 
-/// 确保文档存在 steps 区块。
-fn ensure_steps_section(lines: &mut Vec<String>) -> Section {
-    if let Some(section) = find_section(lines, STEPS_MARKER) {
-        return section;
-    }
-    let mut prefix = vec![
-        STEPS_MARKER.to_string(),
-        "---------".to_string(),
-        String::new(),
-    ];
-    prefix.append(lines);
-    *lines = prefix;
-    Section {
-        marker_line: Some(0),
-        content_start: 1,
-        content_end: 1,
-        end_line: 1,
-    }
-}
-
-/// 确保文档存在 doc 区块。
-fn ensure_doc_section(lines: &mut Vec<String>) -> Section {
-    if let Some(section) = find_section(lines, DOC_MARKER) {
-        return section;
-    }
-    if !lines.last().is_none_or(|line| line.trim().is_empty()) {
-        lines.push(String::new());
-    }
-    let marker_line = lines.len();
-    lines.push(DOC_MARKER.to_string());
-    let end_line = lines.len() + 1;
-    lines.push("--------".to_string());
-    Section {
-        marker_line: Some(marker_line),
-        content_start: marker_line + 1,
-        content_end: marker_line + 1,
-        end_line,
-    }
-}
-
-/// 解析 task 文档中的 doc 项。
-fn parse_doc_items(content: &str) -> Vec<DocItem> {
-    let lines = markdown_lines(content);
-    let Some(section) = find_section(&lines, DOC_MARKER) else {
-        return Vec::new();
-    };
-    parse_doc_items_from_lines(&lines, &section)
-}
-
-/// 从已切分行中解析 doc 项。
-fn parse_doc_items_from_lines(lines: &[String], section: &Section) -> Vec<DocItem> {
-    let mut item_lines = Vec::new();
-    for (offset, line) in lines[section.content_start..section.content_end]
-        .iter()
-        .enumerate()
-    {
-        if leading_spaces(line) == 0
-            && let Some(key) = line.trim_start().strip_prefix("- ")
-        {
-            let key = key.trim().to_string();
-            if !key.is_empty() {
-                item_lines.push((section.content_start + offset, key));
-            }
-        }
-    }
-    let mut docs = Vec::new();
-    for (index, (line_index, key)) in item_lines.iter().enumerate() {
-        let item_end = item_lines
-            .get(index + 1)
-            .map(|(next_line, _)| *next_line)
-            .unwrap_or(section.content_end);
-        docs.push(DocItem {
-            key: key.clone(),
-            item_start: *line_index,
-            item_end,
-            desc_start: *line_index + 1,
-            desc_end: item_end,
-            desc: unindent_lines(&lines[*line_index + 1..item_end], 2),
-        });
-    }
-    docs
-}
-
-/// 查找一个标记区块。
-fn find_section(lines: &[String], marker: &str) -> Option<Section> {
-    let marker_line = lines.iter().position(|line| line.trim() == marker)?;
-    let content_start = marker_line + 1;
-    let end_line = lines[content_start..]
-        .iter()
-        .position(|line| is_section_separator(line))
-        .map(|offset| content_start + offset)
-        .unwrap_or(lines.len());
-    Some(Section {
-        marker_line: Some(marker_line),
-        content_start,
-        content_end: end_line,
-        end_line,
-    })
-}
-
-/// 判断一行是否是区块分隔线。
-fn is_section_separator(line: &str) -> bool {
-    let trimmed = line.trim();
-    trimmed.len() >= 3 && trimmed.chars().all(|character| character == '-')
-}
-
 /// 将 Markdown 文本切成不带换行符的行。
 fn markdown_lines(content: &str) -> Vec<String> {
     content.lines().map(str::to_string).collect()
+}
+
+/// 将 editor 文本切成行，保留用户在末尾输入的空行。
+fn editor_text_lines(text: &str) -> Vec<String> {
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        text.split('\n').map(str::to_string).collect()
+    }
 }
 
 /// 将行重新合并为 Markdown 文本。
@@ -1128,80 +846,11 @@ fn join_markdown_lines(lines: &[String]) -> String {
     }
 }
 
-/// 移除一组 desc 行的公共语义缩进。
-fn unindent_lines(lines: &[String], indent: usize) -> String {
-    lines
-        .iter()
-        .map(|line| strip_indent(line, indent))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim_end_matches('\n')
-        .to_string()
-}
-
-/// 给用户输入的 desc 行补回 Markdown 缩进。
-fn indent_text_lines(text: &str, indent: usize) -> Vec<String> {
-    if text.trim().is_empty() {
-        return Vec::new();
-    }
-    let prefix = " ".repeat(indent);
-    text.lines()
-        .map(|line| {
-            if line.is_empty() {
-                String::new()
-            } else {
-                format!("{prefix}{line}")
-            }
-        })
-        .collect()
-}
-
-/// 移除指定数量的前导空格。
-fn strip_indent(line: &str, indent: usize) -> String {
-    let mut remaining = indent;
-    let mut byte_index = 0;
-    for (index, character) in line.char_indices() {
-        if remaining == 0 || character != ' ' {
-            byte_index = index;
-            break;
-        }
-        remaining -= 1;
-        byte_index = index + character.len_utf8();
-    }
-    if remaining > 0 && byte_index >= line.len() {
-        String::new()
-    } else {
-        line.get(byte_index..).unwrap_or_default().to_string()
-    }
-}
-
-/// 统计行首空格数量。
-fn leading_spaces(line: &str) -> usize {
-    line.chars()
-        .take_while(|character| *character == ' ')
-        .count()
-}
-
-/// 一个 Markdown 区块的位置。
-#[derive(Debug, Clone)]
-struct Section {
-    /// marker 所在行。
-    marker_line: Option<usize>,
-    /// 内容起始行。
-    content_start: usize,
-    /// 内容结束行，排除分隔线。
-    content_end: usize,
-    /// 分隔线所在行或文档末尾。
-    end_line: usize,
-}
-
 /// 解析后的 step 行。
 #[derive(Debug, Clone)]
 struct StepLine {
     /// step 行号。
     line_index: usize,
-    /// step 行缩进。
-    indent: usize,
     /// step 标题。
     title: String,
     /// step 是否完成。
@@ -1217,8 +866,6 @@ struct StepRecord {
     path: Vec<usize>,
     /// step 行号。
     line_index: usize,
-    /// step 行缩进。
-    indent: usize,
     /// step 标题。
     title: String,
     /// step 是否完成。
@@ -1231,35 +878,14 @@ struct StepRecord {
     desc_end: usize,
     /// 反缩进后的 desc。
     desc: String,
-    /// 根父 step 对应的 doc key。
-    root_doc_key: String,
 }
 
 /// 单行 step 的解析结果。
 struct ParsedStepLine {
-    /// step 行缩进。
-    indent: usize,
     /// step 标题。
     title: String,
     /// step 是否完成。
     checked: bool,
     /// step 是否带 checkbox。
     checkable: bool,
-}
-
-/// doc 项及其文本范围。
-#[derive(Debug, Clone)]
-struct DocItem {
-    /// doc key。
-    key: String,
-    /// doc 项起始行，包含 key 行。
-    item_start: usize,
-    /// doc 项结束行。
-    item_end: usize,
-    /// desc 起始行。
-    desc_start: usize,
-    /// desc 结束行。
-    desc_end: usize,
-    /// 反缩进后的 desc。
-    desc: String,
 }
