@@ -1591,8 +1591,7 @@ async fn read_joined_pipe(
 
 /// 返回全局外置工具目录。
 fn extra_tools_global_dir() -> PathBuf {
-    env::var_os("HOME")
-        .map(PathBuf::from)
+    crate::home::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".gsdv/extra")
 }

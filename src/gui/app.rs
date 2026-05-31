@@ -248,9 +248,7 @@ pub fn run() -> eframe::Result<()> {
                 theme::set_mode(&cc.egui_ctx, theme_mode);
             }
             let data = data::load_initial_gui_data(agent_launch.kind);
-            if !data.workspaces.is_empty() {
-                apply_runtime_fonts(&cc.egui_ctx, &font_settings);
-            }
+            apply_runtime_fonts(&cc.egui_ctx, &font_settings);
             let mut app =
                 GsdvGuiApp::new_with_font_settings(data, agent_launch, font_settings, system_fonts);
             app.set_fs_watch_repaint_context(cc.egui_ctx.clone());

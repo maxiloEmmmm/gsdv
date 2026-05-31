@@ -416,7 +416,7 @@ fn credentials_path() -> Option<PathBuf> {
 
 /// 返回当前用户 home 目录。
 fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    crate::home::home_dir()
 }
 
 /// 当前 Unix 毫秒。

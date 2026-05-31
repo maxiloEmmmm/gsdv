@@ -435,7 +435,7 @@ impl GsdvGuiApp {
             return path.to_path_buf();
         }
         if let Some(rest) = path.strip_prefix("~").ok() {
-            if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            if let Some(home) = crate::home::home_dir() {
                 return home.join(rest);
             }
         }

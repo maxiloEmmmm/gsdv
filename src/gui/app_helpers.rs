@@ -425,7 +425,7 @@ pub(super) fn reviewer_script_tip(path: &Path) -> io::Result<Option<String>> {
 pub(super) fn reviewer_script_dir() -> Option<PathBuf> {
     env::var_os("GSDV_REVIEWER_SCRIPT_DIR")
         .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".gsdv/reviewer")))
+        .or_else(|| crate::home::home_dir().map(|home| home.join(".gsdv/reviewer")))
 }
 
 pub(super) fn run_reviewer_script_process(

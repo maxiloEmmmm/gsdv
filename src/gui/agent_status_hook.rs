@@ -313,7 +313,7 @@ fn stable_state_key(path: &Path) -> u64 {
 }
 
 fn home_dir() -> Option<PathBuf> {
-    env::var_os("HOME").map(PathBuf::from)
+    crate::home::home_dir()
 }
 
 fn gsdv_store_path() -> Option<PathBuf> {

@@ -440,6 +440,48 @@ fn normalize_font_settings_adds_missing_default_fallback() {
     );
 }
 
+/// 验证跨平台旧 fallback 路径不可用时会换成当前系统字体。
+#[test]
+fn normalize_font_settings_replaces_unavailable_default_fallback() {
+    let fonts = vec![SystemFontEntry {
+        name: "msyh".to_string(),
+        path: PathBuf::from("C:/Windows/Fonts/msyh.ttc"),
+        size_bytes: 18_000_000,
+        search_key: "msyh".to_string(),
+    }];
+    let mut settings = FontSettings {
+        default_fonts: data::FontSurfaceSettings {
+            family: data::FontFamilySetting::Monospace,
+            fallback_system_name: Some("PingFang".to_string()),
+            fallback_system_path: Some("/System/Library/Fonts/PingFang.ttc".to_string()),
+            ..data::FontSurfaceSettings::default()
+        },
+        agent: data::FontSurfaceSettings {
+            family: data::FontFamilySetting::Default,
+            ..data::FontSurfaceSettings::default()
+        },
+        terminal: data::FontSurfaceSettings {
+            family: data::FontFamilySetting::Default,
+            ..data::FontSurfaceSettings::default()
+        },
+        editor: data::FontSurfaceSettings {
+            family: data::FontFamilySetting::Default,
+            ..data::FontSurfaceSettings::default()
+        },
+    };
+
+    assert!(normalize_font_settings(&mut settings, &fonts));
+
+    assert_eq!(
+        settings.default_fonts.fallback_system_name.as_deref(),
+        Some("msyh")
+    );
+    assert_eq!(
+        settings.default_fonts.fallback_system_path.as_deref(),
+        Some("C:/Windows/Fonts/msyh.ttc")
+    );
+}
+
 /// 验证 default surface 会清理不该保留的字体路径。
 #[test]
 fn normalize_font_settings_clears_stale_default_surface_paths() {
