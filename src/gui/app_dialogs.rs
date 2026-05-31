@@ -282,7 +282,6 @@ impl GsdvGuiApp {
                 }
                 AppDialog::WorkflowAddStep {
                     task_path,
-                    parent_step_path,
                     mut key,
                     mut desc,
                 } => {
@@ -293,10 +292,10 @@ impl GsdvGuiApp {
                     ui.label(section_label(i18n::text(self.app_language, "TASK")));
                     ui.label(RichText::new(display_path(&task_path)).color(theme::text()));
                     ui.add_space(10.0);
-                    ui.label(section_label(i18n::text(self.app_language, "KEY")));
+                    ui.label(section_label(i18n::text(self.app_language, "TITLE")));
                     let key_response = ui.add(
                         egui::TextEdit::singleline(&mut key)
-                            .hint_text("step.key")
+                            .hint_text("Step title")
                             .desired_width(f32::INFINITY),
                     );
                     ui.add_space(10.0);
@@ -307,7 +306,6 @@ impl GsdvGuiApp {
                     );
                     let request = WorkflowMutationRequest::AddStep {
                         task_path: task_path.clone(),
-                        parent_step_path: parent_step_path.clone(),
                         key: key.clone(),
                         desc: desc.clone(),
                     };
@@ -341,7 +339,6 @@ impl GsdvGuiApp {
                     if next_dialog.is_some() {
                         next_dialog = Some(AppDialog::WorkflowAddStep {
                             task_path,
-                            parent_step_path,
                             key,
                             desc,
                         });

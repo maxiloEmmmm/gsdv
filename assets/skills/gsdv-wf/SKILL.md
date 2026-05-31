@@ -25,64 +25,51 @@ The task description Markdown files for the some project. They are called P_TASK
 
 **This Markdown layout is**
 
---steps--
-- [x]..
-- xxx1
-  - [ ] a
-    xx desc..
-  - [ ] b
-    xx desc..
-- xxx2
-  xx desc...
-  
----------
+desc... about this task before first step.
 
---doc--
-- xxx1
-  xx desc..
-- xxx2
-  xx desc..
---------
+## [x] step1 title
+Step description...
 
-- Each doc item is an independent logical unit inside the task.
-- A step may be associated with doc, or it may be independent.
-- A step may or may not have child steps. Each step and doc item can have its own desc, usually mixing logical reasoning and pseudocode.
-- Each top-level step item may have a corresponding key in doc. If no matching doc key exists, it is an independent step. Child steps have no corresponding doc and inherit their parent by default.
-- doc and step keys should use English, such as a.b.c. Do not use spaces or newlines. Keep keys short and unique; avoid meaningless repeated key prefixes within the same task.
-- A step can have at most one level of child steps; child steps cannot have their own child steps.
+## [ ] step2 title
+Step description...
+
+- Each step is a Markdown level-2 heading with a checkbox: `## [ ] title` or `## [x] title`.
+- A step title is exactly one heading line. It may contain spaces or Chinese text, but must not contain a newline.
+- The step description is the Markdown content after the step heading and before the next step heading.
+- A step description may contain implementation notes, reasoning, pseudocode, constraints, or acceptance details.
 </some/task-*.md>
 </desc>
 
 
 <route>
 <r.next>
-  1. find first unchecked leaf step on all project's task, order by project name and task name.
-  2. check the current implementation progress of this step, see whether there is a step-level description, continue implementing this step based on the step documentation and its own description.
+  1. find the first unchecked step across all project tasks, ordered by project name and task name.
+  2. check the current implementation progress of this step, then continue implementing it based on the step title and step description.
   3. mark the step as complete only when the implementation is actually finished and no known blocker remains. If the work is partial, blocked, or needs user confirmation, do not mark it complete.
   4. if entry args include loop:true
      repeat r.next after each completed step
-     stop when no unchecked leaf step remains, work is blocked, or user confirmation is needed
+     stop when no unchecked step remains, work is blocked, or user confirmation is needed
 </r.next>
 
 <r.step>
-  find project task doc and target step by entry args
-  if task doc can't be identified
-    ask user which task doc to use, then stop
-  if no step exists in task doc
+  find the project task file and target step from entry args
+  if the task file can't be identified
+    ask user which task file to use, then stop
+  if no step exists in the task file
     need_fill_step = true
   else
     ask user whether current steps are enough
     need_fill_step = user's answer is no
   if need_fill_step
-    propose a `plan` with detected steps from task doc and wait for user confirmation
-    after user confirms, fill the steps into task doc
+    propose a `plan` with detected steps from the task file and wait for user confirmation
+    after user confirms, fill the steps into the task file as Markdown level-2 checkbox headings
 </r.step>
 
 <r.other>
-  entry args not match before route, just flow user by entry args
-  if user give full workflow logical path like: project > task ...
-    call `r.next` and direct run it's step 2
+  if the entry args do not match any route above, follow the user's intent from the entry args
+  if user gives a full workflow logical path like: project > task > step
+    run step 2 of `r.next` directly for that target step
   if entry args not clear
-    ask user want to do?
+    ask what the user wants to do
 </r.other>
 </route>

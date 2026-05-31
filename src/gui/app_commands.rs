@@ -60,10 +60,8 @@ impl GsdvGuiApp {
             UiCommand::CloseTopLayer => self.close_top_keyboard_layer(),
             UiCommand::OpenHelp => self.set_active_app_dialog(Some(AppDialog::Help)),
             UiCommand::SaveDocument => {
-                if self.workflow_step_editor_visible() {
+                if self.workflow_task_surface_visible() {
                     self.save_active_workflow_step(ctx, None);
-                } else if self.workflow_task_surface_visible() {
-                    return;
                 } else {
                     self.save_active_document();
                 }

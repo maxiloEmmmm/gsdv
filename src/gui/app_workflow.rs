@@ -51,8 +51,16 @@ impl GsdvGuiApp {
     pub(super) fn workflow_step_editor_dirty(&self) -> bool {
         self.workflow_states
             .get(self.active_workspace)
-            .and_then(|state| state.editor.as_ref())
-            .is_some_and(WorkflowStepEditor::is_dirty)
+            .is_some_and(|state| {
+                state
+                    .task_editor
+                    .as_ref()
+                    .is_some_and(WorkflowTaskEditor::is_dirty)
+                    || state
+                        .editor
+                        .as_ref()
+                        .is_some_and(WorkflowStepEditor::is_dirty)
+            })
     }
 
     /// 复制当前选中的 workflow 逻辑路径。
@@ -186,7 +194,7 @@ impl GsdvGuiApp {
         ctx: &egui::Context,
         target: WorkflowSelectionTarget,
     ) {
-        if self.workflow_step_editor_dirty() {
+        if self.workflow_switch_requires_save(&target) {
             self.set_active_app_dialog(Some(AppDialog::WorkflowUnsavedSwitch { target }));
             return;
         }
@@ -203,6 +211,7 @@ impl GsdvGuiApp {
             WorkflowSelectionTarget::Project { root_path } => {
                 if let Some(state) = self.workflow_states.get_mut(self.active_workspace) {
                     state.selected = Some(target);
+                    state.task_editor = None;
                     state.editor = None;
                 }
                 self.request_open_file(root_path);
@@ -211,9 +220,11 @@ impl GsdvGuiApp {
                 }
                 self.persist_workspaces();
             }
-            WorkflowSelectionTarget::Task { .. } => {
+            WorkflowSelectionTarget::Task { task_path } => {
+                let task_editor = self.reusable_or_fresh_workflow_task_editor(&task_path);
                 if let Some(state) = self.workflow_states.get_mut(self.active_workspace) {
                     state.selected = Some(target);
+                    state.task_editor = task_editor;
                     state.editor = None;
                 }
                 if let Some(workspace) = self.current_workspace_mut() {
@@ -225,6 +236,7 @@ impl GsdvGuiApp {
                 task_path,
                 step_path,
             } => {
+                let task_editor = self.reusable_or_fresh_workflow_task_editor(&task_path);
                 let Some(editor) = self.workflow_editor_for_step(&task_path, &step_path) else {
                     self.push_toast(
                         i18n::text(self.app_language, "Workflow step not found"),
@@ -234,6 +246,7 @@ impl GsdvGuiApp {
                 };
                 if let Some(state) = self.workflow_states.get_mut(self.active_workspace) {
                     state.selected = Some(target);
+                    state.task_editor = task_editor;
                     state.editor = Some(editor);
                 }
                 if let Some(workspace) = self.current_workspace_mut() {
@@ -242,6 +255,50 @@ impl GsdvGuiApp {
                 self.request_app_repaint(ctx);
             }
         }
+    }
+
+    /// 判断切换目标是否会丢弃当前 workflow 未保存内容。
+    fn workflow_switch_requires_save(&self, target: &WorkflowSelectionTarget) -> bool {
+        let Some(state) = self.workflow_states.get(self.active_workspace) else {
+            return false;
+        };
+        if let Some(task_editor) = state.task_editor.as_ref()
+            && task_editor.is_dirty()
+            && workflow_target_task_path(target) != Some(task_editor.task_path.as_path())
+        {
+            return true;
+        }
+        if let Some(editor) = state.editor.as_ref()
+            && editor.is_dirty()
+            && editor.target != *target
+        {
+            return true;
+        }
+        false
+    }
+
+    /// 优先复用同 task 的未保存编辑器，否则从当前 tree 重建。
+    fn reusable_or_fresh_workflow_task_editor(
+        &self,
+        task_path: &Path,
+    ) -> Option<WorkflowTaskEditor> {
+        self.workflow_states
+            .get(self.active_workspace)
+            .and_then(|state| state.task_editor.as_ref())
+            .filter(|editor| editor.task_path == task_path)
+            .cloned()
+            .or_else(|| self.workflow_editor_for_task(task_path))
+    }
+
+    /// 从已加载 tree 中查找 task 并构建说明编辑器。
+    fn workflow_editor_for_task(&self, task_path: &Path) -> Option<WorkflowTaskEditor> {
+        let state = self.workflow_states.get(self.active_workspace)?;
+        let tree = state.tree.as_ref()?;
+        tree.projects
+            .iter()
+            .flat_map(|project| project.tasks.iter())
+            .find(|task| task.path == task_path)
+            .map(workflow_task_editor_from_node)
     }
 
     /// 从已加载 tree 中查找 step 并构建编辑器。
@@ -277,19 +334,30 @@ impl GsdvGuiApp {
         let Some(state) = self.workflow_states.get_mut(active_workspace) else {
             return;
         };
-        let Some(editor) = state.editor.as_mut() else {
+        let selected = state.selected.clone();
+        let Some(task_editor) = state.task_editor.as_mut() else {
             return;
         };
-        editor.save_error = None;
+        task_editor.save_error = None;
+        if let Some(editor) = state.editor.as_mut() {
+            editor.save_error = None;
+        }
         state.pending_target_after_save = pending_target;
+        let step_path = state.editor.as_ref().map(|editor| editor.step_path.clone());
+        let step_text = state.editor.as_ref().map(|editor| editor.step_text.clone());
         let request = WorkflowSaveRequest {
-            task_path: editor.task_path.clone(),
-            step_path: editor.step_path.clone(),
-            doc_key: editor.doc_key.clone(),
-            doc_text: editor.doc_text.clone(),
-            step_text: editor.step_text.clone(),
+            task_path: task_editor.task_path.clone(),
+            task_text: task_editor.task_text.clone(),
+            step_path,
+            step_text,
         };
-        self.spawn_workflow_step_save_task(ctx, active_workspace, workspace.path.clone(), request);
+        self.spawn_workflow_step_save_task(
+            ctx,
+            active_workspace,
+            workspace.path.clone(),
+            selected,
+            request,
+        );
     }
 
     /// 后台保存 workflow step 片段。
@@ -298,15 +366,15 @@ impl GsdvGuiApp {
         ctx: &egui::Context,
         index: usize,
         workspace_path: PathBuf,
+        selected: Option<WorkflowSelectionTarget>,
         request: WorkflowSaveRequest,
     ) {
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
         let repaint_after = self.max_repaint_interval();
-        let target = WorkflowSelectionTarget::Step {
+        let target = selected.unwrap_or_else(|| WorkflowSelectionTarget::Task {
             task_path: request.task_path.clone(),
-            step_path: request.step_path.clone(),
-        };
+        });
         self.background_runtime.spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
                 crate::gui::workflow::save_workflow_step_editor(&workspace_path, request)
@@ -333,17 +401,22 @@ impl GsdvGuiApp {
         let Some(state) = self.workflow_states.get_mut(index) else {
             return;
         };
-        let Some(editor) = state.editor.as_mut() else {
-            return;
-        };
-        if editor.target != target {
+        if state.selected.as_ref() != Some(&target) {
             return;
         }
+        let Some(task_editor) = state.task_editor.as_mut() else {
+            return;
+        };
         match result {
             Ok(saved) => {
-                editor.saved_doc_text = saved.doc_text;
-                editor.saved_step_text = saved.step_text;
-                editor.save_error = None;
+                task_editor.saved_task_text = saved.task_text;
+                task_editor.save_error = None;
+                if let Some(editor) = state.editor.as_mut()
+                    && let Some(step_text) = saved.step_text
+                {
+                    editor.saved_step_text = step_text;
+                    editor.save_error = None;
+                }
                 self.push_toast(
                     i18n::text(self.app_language, "Workflow saved"),
                     theme::success(),
@@ -351,7 +424,10 @@ impl GsdvGuiApp {
                 self.request_workflow_tree_refresh(ctx, index);
             }
             Err(error) => {
-                editor.save_error = Some(error);
+                task_editor.save_error = Some(error.clone());
+                if let Some(editor) = state.editor.as_mut() {
+                    editor.save_error = Some(error);
+                }
                 self.push_toast(
                     i18n::text(self.app_language, "Workflow save failed"),
                     theme::danger(),
@@ -487,6 +563,12 @@ impl GsdvGuiApp {
         }
         if let Some(state) = self.workflow_states.get_mut(index) {
             rewrite_workflow_selection_prefix(&mut state.selected, old_prefix, new_prefix);
+            if let Some(editor) = state.task_editor.as_mut()
+                && let Some(next_task_path) =
+                    rewritten_path_prefix(&editor.task_path, old_prefix, new_prefix)
+            {
+                editor.task_path = next_task_path;
+            }
             if let Some(editor) = state.editor.as_mut()
                 && let Some(next_task_path) =
                     rewritten_path_prefix(&editor.task_path, old_prefix, new_prefix)
@@ -511,6 +593,11 @@ impl GsdvGuiApp {
         }
         if let Some(state) = self.workflow_states.get_mut(index) {
             rewrite_workflow_selection_path(&mut state.selected, old_path, new_path);
+            if let Some(editor) = state.task_editor.as_mut()
+                && editor.task_path == old_path
+            {
+                editor.task_path = new_path.to_path_buf();
+            }
             if let Some(editor) = state.editor.as_mut()
                 && editor.task_path == old_path
             {
@@ -559,6 +646,7 @@ impl GsdvGuiApp {
             workspace.selected_file = None;
         }
         if let Some(state) = self.workflow_states.get_mut(index) {
+            state.task_editor = None;
             state.editor = None;
             state.selected = None;
         }
@@ -583,6 +671,7 @@ impl GsdvGuiApp {
                 Some(WorkflowSelectionTarget::Project { .. }) | None => false,
             };
             if selected_deleted {
+                state.task_editor = None;
                 state.editor = None;
                 state.selected = None;
             }
@@ -604,21 +693,12 @@ impl GsdvGuiApp {
                 }
                 self.workflow_task_duplicate_error(project_key, task_key, None)
             }
-            WorkflowMutationRequest::AddStep {
-                task_path,
-                parent_step_path,
-                key,
-                ..
-            } => {
-                if let Err(error) = crate::gui::workflow::validate_workflow_key(key) {
-                    return Some(error);
-                }
-                self.workflow_step_duplicate_error(
-                    task_path,
-                    parent_step_path.as_deref(),
-                    key,
-                    None,
-                )
+            WorkflowMutationRequest::AddStep { task_path, key, .. } => {
+                let key = match crate::gui::workflow::validate_workflow_step_title(key) {
+                    Ok(key) => key,
+                    Err(error) => return Some(error),
+                };
+                self.workflow_step_duplicate_error(task_path, key, None)
             }
             WorkflowMutationRequest::RenameProject {
                 project_key,
@@ -651,18 +731,15 @@ impl GsdvGuiApp {
                 step_path,
                 new_key,
             } => {
-                if let Err(error) = crate::gui::workflow::validate_workflow_key(new_key) {
-                    return Some(error);
-                }
+                let new_key = match crate::gui::workflow::validate_workflow_step_title(new_key) {
+                    Ok(new_key) => new_key,
+                    Err(error) => return Some(error),
+                };
                 let current = self.workflow_step_title(task_path, step_path)?;
-                if current == *new_key {
+                if current == new_key {
                     return None;
                 }
-                let parent_path = step_path
-                    .split_last()
-                    .map(|(_, parent)| (!parent.is_empty()).then_some(parent))
-                    .flatten();
-                self.workflow_step_duplicate_error(task_path, parent_path, new_key, Some(step_path))
+                self.workflow_step_duplicate_error(task_path, new_key, Some(step_path))
             }
             _ => None,
         }
@@ -710,7 +787,6 @@ impl GsdvGuiApp {
     fn workflow_step_duplicate_error(
         &self,
         task_path: &Path,
-        parent_step_path: Option<&[usize]>,
         key: &str,
         exclude_step_path: Option<&[usize]>,
     ) -> Option<String> {
@@ -724,14 +800,7 @@ impl GsdvGuiApp {
             .iter()
             .flat_map(|project| project.tasks.iter())
             .find(|task| task.path == task_path)?;
-        let siblings = if let Some(parent_path) = parent_step_path {
-            workflow_step_node_at_path(&task.steps, parent_path)
-                .map(|step| step.children.as_slice())
-                .unwrap_or(&[])
-        } else {
-            task.steps.as_slice()
-        };
-        siblings
+        task.steps
             .iter()
             .any(|step| exclude_step_path != Some(step.path.as_slice()) && step.title == key)
             .then(|| format!("step already exists at this level: {key}"))
@@ -778,6 +847,15 @@ fn workflow_step_node_at_path<'a>(
         Some(node)
     } else {
         workflow_step_node_at_path(&node.children, rest)
+    }
+}
+
+/// 返回 workflow 目标所属的 task 路径。
+fn workflow_target_task_path(target: &WorkflowSelectionTarget) -> Option<&Path> {
+    match target {
+        WorkflowSelectionTarget::Task { task_path }
+        | WorkflowSelectionTarget::Step { task_path, .. } => Some(task_path.as_path()),
+        WorkflowSelectionTarget::Project { .. } => None,
     }
 }
 
