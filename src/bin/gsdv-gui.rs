@@ -5,6 +5,9 @@ mod ai;
 #[path = "../gui/mod.rs"]
 mod gui;
 #[allow(dead_code, unused_imports, unused_variables)]
+#[path = "../home.rs"]
+mod home;
+#[allow(dead_code, unused_imports, unused_variables)]
 #[path = "../reviewer/mod.rs"]
 mod reviewer;
 #[allow(dead_code, unused_imports, unused_variables)]
@@ -643,7 +646,7 @@ fn gsdv_home_dir() -> Result<PathBuf> {
 }
 
 fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    home::home_dir()
 }
 
 fn shell_quote(value: &str) -> String {

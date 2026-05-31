@@ -2186,7 +2186,7 @@ fn normalize_path(path: &Path) -> PathBuf {
 }
 
 fn home_dir() -> Option<PathBuf> {
-    env::var_os("HOME").map(PathBuf::from)
+    crate::home::home_dir()
 }
 
 fn gsdv_store_path() -> Option<PathBuf> {

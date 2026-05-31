@@ -208,7 +208,11 @@ pub(super) fn ensure_default_fallback_font(
     settings: &mut data::FontSurfaceSettings,
     system_fonts: &[SystemFontEntry],
 ) -> bool {
-    if settings.fallback_system_path.is_some() {
+    if settings
+        .fallback_system_path
+        .as_deref()
+        .is_some_and(|path| font_path_is_available(path, system_fonts))
+    {
         return false;
     }
     let Some(fallback) = preferred_fallback_font(system_fonts) else {
@@ -217,6 +221,11 @@ pub(super) fn ensure_default_fallback_font(
     settings.fallback_system_name = Some(fallback.name.clone());
     settings.fallback_system_path = Some(fallback.path.to_string_lossy().to_string());
     true
+}
+
+/// 判断字体路径当前是否可用，适用于跨平台迁移后的旧配置校正。
+fn font_path_is_available(path: &str, system_fonts: &[SystemFontEntry]) -> bool {
+    Path::new(path).is_file() || system_fonts.iter().any(|font| font.path == Path::new(path))
 }
 
 /// 清理旧配置里和默认继承冲突的字段。
@@ -365,6 +374,9 @@ pub(super) fn system_font_roots() -> Vec<PathBuf> {
         if let Some(windir) = env::var_os("WINDIR") {
             roots.push(PathBuf::from(windir).join("Fonts"));
         }
+        if let Some(system_root) = env::var_os("SystemRoot") {
+            roots.push(PathBuf::from(system_root).join("Fonts"));
+        }
         if let Some(local) = env::var_os("LOCALAPPDATA") {
             roots.push(
                 PathBuf::from(local)
@@ -378,16 +390,15 @@ pub(super) fn system_font_roots() -> Vec<PathBuf> {
     {
         roots.push(PathBuf::from("/System/Library/Fonts"));
         roots.push(PathBuf::from("/Library/Fonts"));
-        if let Some(home) = env::var_os("HOME") {
-            roots.push(PathBuf::from(home).join("Library").join("Fonts"));
+        if let Some(home) = crate::home::home_dir() {
+            roots.push(home.join("Library").join("Fonts"));
         }
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         roots.push(PathBuf::from("/usr/share/fonts"));
         roots.push(PathBuf::from("/usr/local/share/fonts"));
-        if let Some(home) = env::var_os("HOME") {
-            let home = PathBuf::from(home);
+        if let Some(home) = crate::home::home_dir() {
             roots.push(home.join(".local").join("share").join("fonts"));
             roots.push(home.join(".fonts"));
         }

@@ -5,7 +5,6 @@ use eframe::egui::{
     self, Align2, Color32, CornerRadius, RichText, ScrollArea, Sense, Stroke, Ui, Vec2,
 };
 use std::collections::{BTreeMap, BTreeSet};
-use std::env;
 use std::path::{Path, PathBuf};
 
 /// outline 行为向 app 层返回的动作。
@@ -434,8 +433,7 @@ fn collapse_outline_node_to_first_level(node: &mut OutlineNode, depth: usize) {
 /// 判断 outline 路径是否属于 Home Root 的全局收藏区。
 pub(crate) fn outline_path_is_global(path: &Path, absolute: &Path) -> bool {
     path.is_absolute()
-        && env::var_os("HOME")
-            .map(PathBuf::from)
+        && crate::home::home_dir()
             .as_deref()
             .is_some_and(|home| absolute.starts_with(home))
 }
