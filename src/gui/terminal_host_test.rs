@@ -1,5 +1,33 @@
 use super::*;
+use std::ffi::OsString;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// 验证 Windows 缺少 SHELL 时不会回退到 Unix bash。
+#[test]
+fn workspace_terminal_command_uses_powershell_on_windows_without_shell() {
+    assert_eq!(
+        workspace_terminal_command_from_env(None, true),
+        "powershell"
+    );
+}
+
+/// 验证已有 SHELL 优先级高于平台兜底。
+#[test]
+fn workspace_terminal_command_prefers_shell_env() {
+    assert_eq!(
+        workspace_terminal_command_from_env(Some(OsString::from("C:/Git/bin/bash.exe")), true),
+        "C:/Git/bin/bash.exe"
+    );
+}
+
+/// 验证非 Windows 仍沿用原先 bash 兜底。
+#[test]
+fn workspace_terminal_command_keeps_unix_fallback() {
+    assert_eq!(
+        workspace_terminal_command_from_env(None, false),
+        "/bin/bash"
+    );
+}
 
 /// Verifies that platform paste events reach the PTY even while Cmd is held.
 #[test]

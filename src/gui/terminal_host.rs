@@ -3429,11 +3429,30 @@ impl TerminalHost for GuiTerminalHost {
 fn terminal_command(workspace: &WorkspaceViewData, kind: TerminalSurfaceKind) -> String {
     match kind {
         TerminalSurfaceKind::Agent => workspace.agent_kind.command().to_string(),
-        TerminalSurfaceKind::Workspace => {
-            std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
-        }
+        TerminalSurfaceKind::Workspace => workspace_terminal_command(),
         TerminalSurfaceKind::Helix => "hx".to_string(),
     }
+}
+
+/// 返回 workspace terminal 的启动命令，适用于跨平台 shell 兜底。
+fn workspace_terminal_command() -> String {
+    workspace_terminal_command_from_env(std::env::var_os("SHELL"), cfg!(target_os = "windows"))
+}
+
+/// 从环境变量解析 workspace terminal 命令，便于覆盖 Windows 缺 SHELL 的场景。
+fn workspace_terminal_command_from_env(shell: Option<OsString>, is_windows: bool) -> String {
+    if let Some(shell) = non_empty_os_string(shell) {
+        return shell.to_string_lossy().to_string();
+    }
+    if is_windows {
+        return "powershell".to_string();
+    }
+    "/bin/bash".to_string()
+}
+
+/// 过滤空环境变量，避免空 SHELL 被当成可执行程序。
+fn non_empty_os_string(value: Option<OsString>) -> Option<OsString> {
+    value.filter(|value| !value.as_os_str().is_empty())
 }
 
 fn terminal_args(
