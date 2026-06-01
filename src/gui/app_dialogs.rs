@@ -107,11 +107,13 @@ impl GsdvGuiApp {
                 | AppDialog::RenamePath { .. } => Vec2::new(460.0, 300.0),
                 AppDialog::CloseWorkspace { .. } => Vec2::new(500.0, 280.0),
                 AppDialog::WorkflowUnsavedSwitch { .. } => Vec2::new(500.0, 260.0),
-                AppDialog::WorkflowAddTask { .. } => Vec2::new(500.0, 260.0),
+                AppDialog::WorkflowAddProject { .. }
+                | AppDialog::WorkflowAddTask { .. } => Vec2::new(500.0, 260.0),
                 AppDialog::WorkflowAddStep { .. } => Vec2::new(520.0, 420.0),
                 AppDialog::WorkflowRenameProject { .. }
                 | AppDialog::WorkflowRenameTask { .. }
                 | AppDialog::WorkflowRenameStep { .. } => Vec2::new(500.0, 260.0),
+                AppDialog::WorkflowMergeSteps { .. } => Vec2::new(500.0, 260.0),
                 AppDialog::WorkflowDeleteConfirm { .. } => Vec2::new(500.0, 260.0),
                 AppDialog::AddSubagent { .. } => Vec2::new(460.0, 470.0),
                 AppDialog::RestartAgent { .. } => Vec2::new(500.0, 260.0),
@@ -229,6 +231,53 @@ impl GsdvGuiApp {
                         }
                     });
                 }
+                AppDialog::WorkflowAddProject { mut key } => {
+                    ui.label(
+                        RichText::new(i18n::text(self.app_language, "New workflow project"))
+                            .strong(),
+                    );
+                    ui.add_space(12.0);
+                    ui.label(section_label(i18n::text(self.app_language, "KEY")));
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut key)
+                            .hint_text("project-key")
+                            .desired_width(f32::INFINITY),
+                    );
+                    response.request_focus();
+                    let request = WorkflowMutationRequest::AddProject {
+                        project_key: key.clone(),
+                    };
+                    let error = self.workflow_mutation_key_error(&request);
+                    if let Some(error) = error.as_ref() {
+                        ui.add_space(6.0);
+                        ui.colored_label(theme::warning(), error);
+                    }
+                    ui.add_space(12.0);
+                    let can_create = error.is_none();
+                    let enter_create = can_create
+                        && response.has_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if secondary_action(ui, i18n::text(self.app_language, "Cancel")).clicked() {
+                            next_dialog = None;
+                        }
+                        if ui
+                            .add_enabled(
+                                can_create,
+                                Button::new(i18n::text(self.app_language, "Create"))
+                                    .fill(theme::primary()),
+                            )
+                            .clicked()
+                            || enter_create
+                        {
+                            workflow_mutation = Some(request.clone());
+                            next_dialog = None;
+                        }
+                    });
+                    if next_dialog.is_some() {
+                        next_dialog = Some(AppDialog::WorkflowAddProject { key });
+                    }
+                }
                 AppDialog::WorkflowAddTask {
                     project_key,
                     mut key,
@@ -300,6 +349,7 @@ impl GsdvGuiApp {
                             .hint_text("Step title")
                             .desired_width(f32::INFINITY),
                     );
+                    key_response.request_focus();
                     ui.add_space(10.0);
                     ui.label(section_label(i18n::text(self.app_language, "DESC")));
                     ui.add_sized(
@@ -511,6 +561,66 @@ impl GsdvGuiApp {
                             task_path,
                             step_path,
                             key,
+                        });
+                    }
+                }
+                AppDialog::WorkflowMergeSteps {
+                    task_path,
+                    step_paths,
+                    mut title,
+                } => {
+                    ui.label(
+                        RichText::new(i18n::text(self.app_language, "Merge workflow steps"))
+                            .strong(),
+                    );
+                    ui.add_space(12.0);
+                    ui.label(section_label(i18n::text(self.app_language, "TASK")));
+                    ui.label(RichText::new(display_path(&task_path)).color(theme::text()));
+                    ui.add_space(10.0);
+                    ui.label(section_label(i18n::text(self.app_language, "TITLE")));
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut title)
+                            .hint_text("Merged step title")
+                            .desired_width(f32::INFINITY),
+                    );
+                    response.request_focus();
+                    let request = WorkflowMutationRequest::MergeSteps {
+                        task_path: task_path.clone(),
+                        step_paths: step_paths.clone(),
+                        title: title.clone(),
+                    };
+                    let error = self.workflow_mutation_key_error(&request);
+                    if let Some(error) = error.as_ref() {
+                        ui.add_space(6.0);
+                        ui.colored_label(theme::warning(), error);
+                    }
+                    ui.add_space(12.0);
+                    let can_merge = error.is_none();
+                    let enter_merge = can_merge
+                        && response.has_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if secondary_action(ui, i18n::text(self.app_language, "Cancel")).clicked() {
+                            next_dialog = None;
+                        }
+                        if ui
+                            .add_enabled(
+                                can_merge,
+                                Button::new(i18n::text(self.app_language, "Merge"))
+                                    .fill(theme::primary()),
+                            )
+                            .clicked()
+                            || enter_merge
+                        {
+                            workflow_mutation = Some(request.clone());
+                            next_dialog = None;
+                        }
+                    });
+                    if next_dialog.is_some() {
+                        next_dialog = Some(AppDialog::WorkflowMergeSteps {
+                            task_path,
+                            step_paths,
+                            title,
                         });
                     }
                 }
@@ -1741,11 +1851,13 @@ fn app_dialog_title(dialog: &AppDialog, language: AppLanguage) -> &str {
         AppDialog::RecentMarkdownOutline { .. } => "Recent Markdown",
         AppDialog::UnsavedSwitch { .. } => "Unsaved Changes",
         AppDialog::WorkflowUnsavedSwitch { .. } => "Unsaved Workflow",
+        AppDialog::WorkflowAddProject { .. } => "New Workflow Project",
         AppDialog::WorkflowAddTask { .. } => "New Workflow Task",
         AppDialog::WorkflowAddStep { .. } => "New Workflow Step",
         AppDialog::WorkflowRenameProject { .. }
         | AppDialog::WorkflowRenameTask { .. }
         | AppDialog::WorkflowRenameStep { .. } => "Rename Workflow",
+        AppDialog::WorkflowMergeSteps { .. } => "Merge Workflow Steps",
         AppDialog::WorkflowDeleteConfirm { .. } => "Confirm Workflow Delete",
         AppDialog::CreateMarkdown { .. } => "Create Markdown",
         AppDialog::CreateFolder { .. } => "Create Folder",

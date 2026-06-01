@@ -88,6 +88,7 @@ impl GsdvGuiApp {
         let selected = state.selected.as_ref()?;
         let tree = state.tree.as_ref()?;
         match selected {
+            WorkflowSelectionTarget::WorkspaceRoot { .. } => Some("root.md".to_string()),
             WorkflowSelectionTarget::Project { root_path } => tree
                 .projects
                 .iter()
@@ -208,11 +209,25 @@ impl GsdvGuiApp {
         target: WorkflowSelectionTarget,
     ) {
         match target.clone() {
+            WorkflowSelectionTarget::WorkspaceRoot { root_path } => {
+                if let Some(state) = self.workflow_states.get_mut(self.active_workspace) {
+                    state.selected = Some(target);
+                    state.task_editor = None;
+                    state.editor = None;
+                    clear_workflow_step_selection(state);
+                }
+                self.request_open_file(root_path);
+                if let Some(workspace) = self.current_workspace_mut() {
+                    workspace.center_mode = CenterMode::Editor;
+                }
+                self.persist_workspaces();
+            }
             WorkflowSelectionTarget::Project { root_path } => {
                 if let Some(state) = self.workflow_states.get_mut(self.active_workspace) {
                     state.selected = Some(target);
                     state.task_editor = None;
                     state.editor = None;
+                    clear_workflow_step_selection(state);
                 }
                 self.request_open_file(root_path);
                 if let Some(workspace) = self.current_workspace_mut() {
@@ -226,6 +241,7 @@ impl GsdvGuiApp {
                     state.selected = Some(target);
                     state.task_editor = task_editor;
                     state.editor = None;
+                    clear_workflow_step_selection(state);
                 }
                 if let Some(workspace) = self.current_workspace_mut() {
                     workspace.center_mode = CenterMode::Editor;
@@ -248,6 +264,7 @@ impl GsdvGuiApp {
                     state.selected = Some(target);
                     state.task_editor = task_editor;
                     state.editor = Some(editor);
+                    set_single_workflow_step_selection(state, &task_path, &step_path);
                 }
                 if let Some(workspace) = self.current_workspace_mut() {
                     workspace.center_mode = CenterMode::Editor;
@@ -543,10 +560,42 @@ impl GsdvGuiApp {
             } => {
                 self.clear_workflow_editor_for_step_subtree(index, task_path, step_path);
             }
+            WorkflowMutationRequest::MergeSteps {
+                task_path,
+                step_paths,
+                ..
+            } => {
+                self.clear_after_workflow_step_merge(index, task_path, step_paths);
+            }
+            WorkflowMutationRequest::AddStep { task_path, .. } => {
+                self.select_newly_added_workflow_step_after_reload(index, task_path);
+            }
             WorkflowMutationRequest::InitRoot
-            | WorkflowMutationRequest::AddTask { .. }
-            | WorkflowMutationRequest::AddStep { .. } => {}
+            | WorkflowMutationRequest::AddProject { .. }
+            | WorkflowMutationRequest::AddTask { .. } => {}
         }
+    }
+
+    /// 在 AddStep 刷新 tree 后自动打开新追加的 step。
+    fn select_newly_added_workflow_step_after_reload(&mut self, index: usize, task_path: &Path) {
+        let Some(state) = self.workflow_states.get_mut(index) else {
+            return;
+        };
+        let Some(tree) = state.tree.as_ref() else {
+            return;
+        };
+        let Some(task) = tree
+            .projects
+            .iter()
+            .flat_map(|project| project.tasks.iter())
+            .find(|task| task.path == task_path)
+        else {
+            return;
+        };
+        state.pending_target_after_save = Some(WorkflowSelectionTarget::Step {
+            task_path: task_path.to_path_buf(),
+            step_path: vec![task.steps.len()],
+        });
     }
 
     /// 重写指向已重命名目录前缀的文档和 workflow 状态路径。
@@ -688,7 +737,9 @@ impl GsdvGuiApp {
             let selected_deleted = match state.selected.as_ref() {
                 Some(WorkflowSelectionTarget::Task { task_path }) => task_path == path,
                 Some(WorkflowSelectionTarget::Step { task_path, .. }) => task_path == path,
-                Some(WorkflowSelectionTarget::Project { .. }) | None => false,
+                Some(WorkflowSelectionTarget::WorkspaceRoot { .. })
+                | Some(WorkflowSelectionTarget::Project { .. })
+                | None => false,
             };
             if selected_deleted {
                 state.task_editor = None;
@@ -705,6 +756,12 @@ impl GsdvGuiApp {
     ) -> Option<String> {
         match request {
             WorkflowMutationRequest::InitRoot => None,
+            WorkflowMutationRequest::AddProject { project_key } => {
+                if let Err(error) = crate::gui::workflow::validate_workflow_key(project_key) {
+                    return Some(error);
+                }
+                self.workflow_project_duplicate_error("", project_key)
+            }
             WorkflowMutationRequest::AddTask {
                 project_key,
                 task_key,
@@ -761,6 +818,20 @@ impl GsdvGuiApp {
                     return None;
                 }
                 self.workflow_step_duplicate_error(task_path, new_key, Some(step_path))
+            }
+            WorkflowMutationRequest::MergeSteps {
+                task_path,
+                step_paths,
+                title,
+            } => {
+                let title = match crate::gui::workflow::validate_workflow_step_title(title) {
+                    Ok(title) => title,
+                    Err(error) => return Some(error),
+                };
+                if step_paths.len() < 2 {
+                    return Some("Select at least two steps to merge".to_string());
+                }
+                self.workflow_step_duplicate_error_for_merge(task_path, title, step_paths)
             }
             _ => None,
         }
@@ -827,6 +898,29 @@ impl GsdvGuiApp {
             .then(|| format!("step already exists at this level: {key}"))
     }
 
+    /// 合并 step 时只检查未参与合并的同名 step。
+    fn workflow_step_duplicate_error_for_merge(
+        &self,
+        task_path: &Path,
+        key: &str,
+        merged_step_paths: &[Vec<usize>],
+    ) -> Option<String> {
+        let tree = self
+            .workflow_states
+            .get(self.active_workspace)?
+            .tree
+            .as_ref()?;
+        let task = tree
+            .projects
+            .iter()
+            .flat_map(|project| project.tasks.iter())
+            .find(|task| task.path == task_path)?;
+        task.steps
+            .iter()
+            .any(|step| !merged_step_paths.contains(&step.path) && step.title == key)
+            .then(|| format!("step already exists at this level: {key}"))
+    }
+
     /// 返回指定 task path 当前对应的 task key。
     fn workflow_task_key_for_path(&self, task_path: &Path) -> Option<String> {
         let tree = self
@@ -855,6 +949,38 @@ impl GsdvGuiApp {
             .find(|task| task.path == task_path)?;
         workflow_step_node_at_path(&task.steps, step_path).map(|step| step.title.clone())
     }
+
+    /// 清理合并 step 后失效的编辑器和多选状态。
+    fn clear_after_workflow_step_merge(
+        &mut self,
+        index: usize,
+        task_path: &Path,
+        step_paths: &[Vec<usize>],
+    ) {
+        if let Some(state) = self.workflow_states.get_mut(index) {
+            let selected_merged = state.selected.as_ref().is_some_and(|selected| {
+                matches!(
+                    selected,
+                    WorkflowSelectionTarget::Step {
+                        task_path: selected_task_path,
+                        step_path,
+                    } if selected_task_path == task_path && step_paths.contains(step_path)
+                )
+            });
+            let editor_merged = state.editor.as_ref().is_some_and(|editor| {
+                editor.task_path == task_path && step_paths.contains(&editor.step_path)
+            });
+            if selected_merged {
+                state.selected = Some(WorkflowSelectionTarget::Task {
+                    task_path: task_path.to_path_buf(),
+                });
+            }
+            if editor_merged {
+                state.editor = None;
+            }
+            clear_workflow_step_selection(state);
+        }
+    }
 }
 
 /// 递归查找指定路径的 step 节点。
@@ -876,7 +1002,9 @@ fn workflow_target_task_path(target: &WorkflowSelectionTarget) -> Option<&Path> 
     match target {
         WorkflowSelectionTarget::Task { task_path }
         | WorkflowSelectionTarget::Step { task_path, .. } => Some(task_path.as_path()),
-        WorkflowSelectionTarget::Project { .. } => None,
+        WorkflowSelectionTarget::WorkspaceRoot { .. } | WorkflowSelectionTarget::Project { .. } => {
+            None
+        }
     }
 }
 
@@ -976,7 +1104,10 @@ fn rewrite_workflow_selection_prefix(
     new_prefix: &Path,
 ) {
     match selection {
-        Some(WorkflowSelectionTarget::Project { root_path }) => {
+        Some(
+            WorkflowSelectionTarget::WorkspaceRoot { root_path }
+            | WorkflowSelectionTarget::Project { root_path },
+        ) => {
             if let Some(next_path) = rewritten_path_prefix(root_path, old_prefix, new_prefix) {
                 *root_path = next_path;
             }
@@ -1010,4 +1141,23 @@ fn rewrite_workflow_selection_path(
         }
         _ => {}
     }
+}
+
+/// 清空 workflow step 多选状态。
+pub(super) fn clear_workflow_step_selection(state: &mut WorkflowUiState) {
+    state.selected_step_paths.clear();
+    state.step_selection_anchor = None;
+    state.step_selection_task_path = None;
+}
+
+/// 将 workflow step 多选状态设置成单个 step。
+pub(super) fn set_single_workflow_step_selection(
+    state: &mut WorkflowUiState,
+    task_path: &Path,
+    step_path: &[usize],
+) {
+    state.selected_step_paths.clear();
+    state.selected_step_paths.insert(step_path.to_vec());
+    state.step_selection_anchor = Some(step_path.to_vec());
+    state.step_selection_task_path = Some(task_path.to_path_buf());
 }

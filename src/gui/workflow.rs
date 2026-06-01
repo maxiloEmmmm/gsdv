@@ -32,6 +32,8 @@ pub(super) fn workflow_root_missing_error(workspace_root: &Path, error: &str) ->
 pub(super) struct WorkflowTree {
     /// workspace 内相对的 gsdv-spec 目录。
     pub spec_path: PathBuf,
+    /// workspace 级 workflow root.md 相对 workspace 的路径。
+    pub root_path: PathBuf,
     /// 当前 workspace 的 workflow 项目列表。
     pub projects: Vec<WorkflowProjectNode>,
 }
@@ -82,6 +84,8 @@ pub(super) struct WorkflowStepNode {
 /// workflow 选择目标。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum WorkflowSelectionTarget {
+    /// workspace 级 root.md。
+    WorkspaceRoot { root_path: PathBuf },
     /// 项目 root.md。
     Project { root_path: PathBuf },
     /// task 专属 workflow 界面。
@@ -166,6 +170,11 @@ pub(super) struct WorkflowSaveSuccess {
 pub(super) enum WorkflowMutationRequest {
     /// 初始化 workspace 级 workflow 根文件。
     InitRoot,
+    /// 在 workflow 规范目录下创建一个项目 root.md。
+    AddProject {
+        /// 项目目录名。
+        project_key: String,
+    },
     /// 在项目目录下创建一个空 task Markdown 文件。
     AddTask {
         /// 项目目录名。
@@ -221,6 +230,15 @@ pub(super) enum WorkflowMutationRequest {
         task_path: PathBuf,
         /// 要删除的 step 路径。
         step_path: Vec<usize>,
+    },
+    /// 合并同一个 task 中连续选中的 step。
+    MergeSteps {
+        /// task 文档相对 workspace 的路径。
+        task_path: PathBuf,
+        /// 要合并的 step 路径列表。
+        step_paths: Vec<Vec<usize>>,
+        /// 合并后新 step 的标题。
+        title: String,
     },
 }
 
@@ -281,6 +299,7 @@ pub(super) fn load_workflow_tree(workspace_root: &Path) -> Result<WorkflowTree, 
     }
     Ok(WorkflowTree {
         spec_path: PathBuf::from(GSDV_SPEC_DIR),
+        root_path: relative_to_workspace(workspace_root, &root_md),
         projects,
     })
 }
@@ -446,6 +465,9 @@ pub(super) fn apply_workflow_mutation(
 ) -> Result<(), String> {
     match request {
         WorkflowMutationRequest::InitRoot => init_workflow_root(workspace_root),
+        WorkflowMutationRequest::AddProject { project_key } => {
+            add_workflow_project(workspace_root, &project_key)
+        }
         WorkflowMutationRequest::AddTask {
             project_key,
             task_key,
@@ -477,6 +499,11 @@ pub(super) fn apply_workflow_mutation(
             task_path,
             step_path,
         } => delete_workflow_step(workspace_root, &task_path, &step_path),
+        WorkflowMutationRequest::MergeSteps {
+            task_path,
+            step_paths,
+            title,
+        } => merge_workflow_steps(workspace_root, &task_path, &step_paths, &title),
     }
 }
 
@@ -533,6 +560,23 @@ fn init_workflow_root(workspace_root: &Path) -> Result<(), String> {
 /// 返回 workspace 级 workflow 根文件路径。
 fn workflow_root_path(workspace_root: &Path) -> PathBuf {
     workspace_root.join(GSDV_SPEC_DIR).join(ROOT_MD)
+}
+
+/// 创建 workflow project 根文件。
+fn add_workflow_project(workspace_root: &Path, project_key: &str) -> Result<(), String> {
+    let project_key = validate_workflow_key(project_key)?;
+    let project_dir = workspace_root
+        .join(GSDV_SPEC_DIR)
+        .join(PROJECTS_DIR)
+        .join(project_key);
+    let root_path = project_dir.join(ROOT_MD);
+    if root_path.exists() {
+        return Err(format!("workflow project already exists: {project_key}"));
+    }
+    fs::create_dir_all(&project_dir)
+        .map_err(|error| format!("failed to create {}: {error}", project_dir.display()))?;
+    fs::write(&root_path, [])
+        .map_err(|error| format!("failed to write {}: {error}", root_path.display()))
 }
 
 /// 在项目目录下创建空 task Markdown 文件。
@@ -731,6 +775,93 @@ fn delete_workflow_step(
         .map_err(|error| format!("failed to write {}: {error}", absolute.display()))
 }
 
+/// 合并 task 文档里连续的多个 step 块。
+fn merge_workflow_steps(
+    workspace_root: &Path,
+    task_path: &Path,
+    step_paths: &[Vec<usize>],
+    title: &str,
+) -> Result<(), String> {
+    let title = validate_workflow_step_title(title)?;
+    if step_paths.len() < 2 {
+        return Err("Select at least two steps to merge".to_string());
+    }
+    let absolute = workspace_root.join(task_path);
+    let content = fs::read_to_string(&absolute)
+        .map_err(|error| format!("failed to read {}: {error}", absolute.display()))?;
+    let mut lines = markdown_lines(&content);
+    let records = parse_step_records(&content);
+    let selected_indices = workflow_step_indices_for_merge(&records, step_paths)?;
+    let first_index = *selected_indices
+        .first()
+        .ok_or_else(|| "Select at least two steps to merge".to_string())?;
+    if records
+        .iter()
+        .enumerate()
+        .any(|(index, record)| !selected_indices.contains(&index) && record.title == title)
+    {
+        return Err(format!("step already exists at this level: {title}"));
+    }
+    let selected_records = selected_indices
+        .iter()
+        .map(|index| records[*index].clone())
+        .collect::<Vec<_>>();
+    let replacement = merged_workflow_step_lines(selected_records, title);
+    for index in selected_indices.iter().skip(1).rev() {
+        let delete_end = records
+            .get(*index + 1)
+            .map(|record| record.line_index)
+            .unwrap_or(lines.len());
+        lines.splice(records[*index].line_index..delete_end, Vec::<String>::new());
+    }
+    let first_end = records
+        .get(first_index + 1)
+        .map(|record| record.line_index)
+        .unwrap_or(lines.len());
+    lines.splice(records[first_index].line_index..first_end, replacement);
+    let next_content = join_markdown_lines(&lines);
+    fs::write(&absolute, next_content.as_bytes())
+        .map_err(|error| format!("failed to write {}: {error}", absolute.display()))
+}
+
+/// 将待合并 step 路径映射成文档中的连续索引。
+fn workflow_step_indices_for_merge(
+    records: &[StepRecord],
+    step_paths: &[Vec<usize>],
+) -> Result<Vec<usize>, String> {
+    let mut indices = Vec::with_capacity(step_paths.len());
+    for path in step_paths {
+        let index = records
+            .iter()
+            .position(|record| record.path == *path)
+            .ok_or_else(|| "step not found".to_string())?;
+        if !indices.contains(&index) {
+            indices.push(index);
+        }
+    }
+    indices.sort_unstable();
+    Ok(indices)
+}
+
+/// 生成合并后的 step 行，只顺序保留原 step 正文。
+fn merged_workflow_step_lines(records: Vec<StepRecord>, title: &str) -> Vec<String> {
+    let checked = records.iter().all(|record| record.checked);
+    let mut lines = vec![renamed_step_line_with_checked(title, checked)];
+    let mut appended_desc_count = 0usize;
+    for record in records {
+        let desc = record.desc.trim_end();
+        if desc.is_empty() {
+            continue;
+        }
+        if appended_desc_count > 0 && lines.last().is_some_and(|line| !line.is_empty()) {
+            lines.push(String::new());
+        }
+        lines.extend(editor_text_lines(desc));
+        appended_desc_count += 1;
+    }
+    lines
+}
+
 /// 解析 task 文档首个 step 前的 task 说明。
 fn parse_task_desc(content: &str) -> String {
     let lines = markdown_lines(content);
@@ -850,8 +981,13 @@ fn replace_step_desc(
 
 /// 生成重命名后的 step 行，保留 checkbox 状态。
 fn renamed_step_line(record: &StepRecord, new_key: &str) -> String {
-    let checkbox = if record.checked { "[x]" } else { "[ ]" };
-    format!("## {checkbox} {new_key}")
+    renamed_step_line_with_checked(new_key, record.checked)
+}
+
+/// 按指定 checkbox 状态生成 step 行。
+fn renamed_step_line_with_checked(title: &str, checked: bool) -> String {
+    let checkbox = if checked { "[x]" } else { "[ ]" };
+    format!("## {checkbox} {title}")
 }
 
 /// 从 task 路径提取不带 `task-` 前缀的 key。
