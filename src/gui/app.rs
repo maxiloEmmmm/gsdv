@@ -1096,6 +1096,14 @@ struct WorkflowUiState {
     editor: Option<WorkflowStepEditor>,
     /// 片段保存成功后要继续打开的目标。
     pending_target_after_save: Option<WorkflowSelectionTarget>,
+    /// task 工作台内两个片段 pane 是否显示 Markdown preview。
+    preview_fragments: bool,
+    /// 当前 task 工作台中多选的 step 路径。
+    selected_step_paths: BTreeSet<Vec<usize>>,
+    /// Shift 范围选择的锚点 step 路径。
+    step_selection_anchor: Option<Vec<usize>>,
+    /// 多选状态所属的 task 文档路径。
+    step_selection_task_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1943,6 +1951,9 @@ enum AppDialog {
         project_key: String,
         key: String,
     },
+    WorkflowAddProject {
+        key: String,
+    },
     WorkflowAddStep {
         task_path: PathBuf,
         key: String,
@@ -1960,6 +1971,11 @@ enum AppDialog {
         task_path: PathBuf,
         step_path: Vec<usize>,
         key: String,
+    },
+    WorkflowMergeSteps {
+        task_path: PathBuf,
+        step_paths: Vec<Vec<usize>>,
+        title: String,
     },
     WorkflowDeleteConfirm {
         target: WorkflowDeleteTarget,

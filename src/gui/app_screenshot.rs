@@ -85,6 +85,12 @@ impl GsdvGuiApp {
     }
 
     pub(super) fn toggle_markdown_editor_preview(&mut self) {
+        if self.workflow_task_surface_visible() {
+            if let Some(state) = self.workflow_states.get_mut(self.active_workspace) {
+                state.preview_fragments = !state.preview_fragments;
+            }
+            return;
+        }
         let Some(workspace) = self.current_workspace_mut() else {
             return;
         };
