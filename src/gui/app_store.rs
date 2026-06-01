@@ -78,6 +78,14 @@ impl GsdvGuiApp {
         });
     }
 
+    /// 将默认 agent 类型持久化派发到后台。
+    pub(super) fn spawn_default_agent_kind_save(&self, agent_kind: AgentKind) {
+        self.background_runtime.spawn(async move {
+            let _ = tokio::task::spawn_blocking(move || data::save_default_agent_kind(agent_kind))
+                .await;
+        });
+    }
+
     /// 将全局 outline 收藏保存派发到后台。
     pub(super) fn spawn_global_outline_favorites_save(&self, favorites: BTreeSet<PathBuf>) {
         self.background_runtime.spawn(async move {

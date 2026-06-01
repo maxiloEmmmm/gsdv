@@ -185,6 +185,7 @@ impl GsdvGuiApp {
             || self.pending_language_settings_save
             || self.pending_font_settings_save
             || self.pending_network_settings_save
+            || self.pending_default_agent_kind_save
     }
 
     /// 查询 input runtime 默认 terminal 目标的 kitty 协议状态。

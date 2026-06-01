@@ -126,6 +126,10 @@ impl GsdvGuiApp {
             self.pending_network_settings_save = false;
             self.spawn_network_settings_save(self.network_settings.clone());
         }
+        if self.pending_default_agent_kind_save {
+            self.pending_default_agent_kind_save = false;
+            self.spawn_default_agent_kind_save(self.default_agent_kind);
+        }
     }
 
     /// 为 UI 输入中编辑过的文档重建 Markdown 派生数据。
