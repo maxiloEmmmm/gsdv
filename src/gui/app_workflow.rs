@@ -619,13 +619,31 @@ impl GsdvGuiApp {
         task_path: &Path,
         step_path: &[usize],
     ) {
-        if let Some(state) = self.workflow_states.get_mut(index)
-            && let Some(editor) = state.editor.as_ref()
-            && editor.task_path == task_path
-            && editor.step_path.starts_with(step_path)
-        {
-            state.editor = None;
-            state.selected = None;
+        if let Some(state) = self.workflow_states.get_mut(index) {
+            let selected_deleted = state.selected.as_ref().is_some_and(|selected| {
+                matches!(
+                    selected,
+                    WorkflowSelectionTarget::Step {
+                        task_path: selected_task_path,
+                        step_path: selected_step_path,
+                    } if selected_task_path == task_path && selected_step_path.starts_with(step_path)
+                )
+            });
+            let editor_deleted = state.editor.as_ref().is_some_and(|editor| {
+                editor.task_path == task_path && editor.step_path.starts_with(step_path)
+            });
+            if editor_deleted {
+                state.editor = None;
+            }
+            if selected_deleted {
+                // 触发条件：删除当前选中的 step 或其父 step。
+                // 不能清空 selection：center mode 仍是 Editor，普通 Markdown
+                // surface 会接管并打开上一个 selected_file。
+                // 保持 task 选中，防止删除 step 后跳到 AGENTS.md 等旧文档。
+                state.selected = Some(WorkflowSelectionTarget::Task {
+                    task_path: task_path.to_path_buf(),
+                });
+            }
         }
     }
 
