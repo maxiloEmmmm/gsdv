@@ -1322,6 +1322,15 @@ impl GsdvGuiApp {
                                 self.pending_language_settings_save = true;
                             }
                             ui.add_space(12.0);
+                            if default_agent_settings_editor(
+                                ui,
+                                &mut self.default_agent_kind,
+                                language,
+                            ) {
+                                self.agent_launch.kind = self.default_agent_kind;
+                                self.pending_default_agent_kind_save = true;
+                            }
+                            ui.add_space(12.0);
                             if codex_auth_settings_editor(ui, &self.codex_auth, language) {
                                 start_codex_auth = true;
                                 next_dialog = Some(AppDialog::CodexAuth);
@@ -2406,6 +2415,50 @@ fn language_settings_editor(ui: &mut Ui, language: &mut AppLanguage) -> bool {
             ui.label(muted(i18n::text(
                 *language,
                 "Applied immediately and saved globally.",
+            )));
+        });
+    changed
+}
+
+/// 绘制默认 agent 设置，适用于新 workspace 和旧数据兜底。
+fn default_agent_settings_editor(
+    ui: &mut Ui,
+    default_agent_kind: &mut AgentKind,
+    language: AppLanguage,
+) -> bool {
+    let mut changed = false;
+    Frame::new()
+        .fill(theme::surface_elevated())
+        .stroke(Stroke::new(1.0, theme::border()))
+        .corner_radius(CornerRadius::same(theme::RADIUS_MD))
+        .inner_margin(Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new(i18n::text(language, "Default Agent"))
+                    .strong()
+                    .size(14.0)
+                    .color(theme::text()),
+            );
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label(muted(i18n::text(language, "New workspace agent")));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    egui::ComboBox::from_id_salt("default-agent-kind")
+                        .width(180.0)
+                        .selected_text(default_agent_kind.title())
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                        .show_ui(ui, |ui| {
+                            for option in AgentKind::all() {
+                                changed |= ui
+                                    .selectable_value(default_agent_kind, option, option.title())
+                                    .changed();
+                            }
+                        });
+                });
+            });
+            ui.label(muted(i18n::text(
+                language,
+                "Used when adding new workspaces and when old workspace data has no agent type.",
             )));
         });
     changed

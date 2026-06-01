@@ -37,7 +37,7 @@ use eframe::egui::{
 use egui_extras::{Size, StripBuilder};
 use notify::{RecursiveMode, Watcher};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
@@ -212,13 +212,11 @@ pub fn run() -> eframe::Result<()> {
     configure_platform_about_metadata();
     let mut agent_launch = AgentLaunchConfig::from_env_args();
     if !agent_launch.kind_explicit {
-        if let Some(agent_kind) = data::load_default_agent_kind() {
-            agent_launch.kind = agent_kind;
-        } else {
-            let agent_kind = prompt_default_agent_kind();
+        agent_launch.kind = data::load_default_agent_kind().unwrap_or_else(|| {
+            let agent_kind = default_agent_kind_from_available_commands();
             data::save_default_agent_kind(agent_kind);
-            agent_launch.kind = agent_kind;
-        }
+            agent_kind
+        });
     }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -372,29 +370,21 @@ mod macos_about {
     }
 }
 
-fn prompt_default_agent_kind() -> AgentKind {
-    loop {
-        println!("Select the default agent type for gsdv:");
-        for (index, agent_kind) in AgentKind::all().iter().enumerate() {
-            println!("  {}. {}", index + 1, agent_kind.title());
-        }
-        print!("Enter a number: ");
-        let _ = io::stdout().flush();
-
-        let mut input = String::new();
-        if io::stdin().read_line(&mut input).is_err() {
-            eprintln!("Could not read selection. Try again.");
-            continue;
-        }
-        let Ok(choice) = input.trim().parse::<usize>() else {
-            eprintln!("Invalid selection. Enter the number from the list.");
-            continue;
-        };
-        if let Some(agent_kind) = AgentKind::all().get(choice.saturating_sub(1)) {
-            return *agent_kind;
-        }
-        eprintln!("Invalid selection. Enter the number from the list.");
+/// 返回无显式配置时使用的 agent 类型。
+fn default_agent_kind_from_available_commands() -> AgentKind {
+    if !command_exists(AgentKind::Codex.command()) && command_exists(AgentKind::Claude.command()) {
+        AgentKind::Claude
+    } else {
+        AgentKind::Codex
     }
+}
+
+/// 判断命令名是否能在当前 PATH 中解析到普通文件。
+fn command_exists(command: &str) -> bool {
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&paths).any(|dir| dir.join(command).is_file())
 }
 
 struct GsdvGuiApp {
@@ -447,6 +437,8 @@ struct GsdvGuiApp {
     last_screenshot_path: Option<PathBuf>,
     theme_mode: theme::ThemeMode,
     rail_collapsed: bool,
+    /// 用户设置的新 workspace 默认 agent。
+    default_agent_kind: AgentKind,
     agent_launch: AgentLaunchConfig,
     fs_watcher: Arc<Mutex<FsWatcherService>>,
     fs_watch_dirty: FsWatchDirtyState,
@@ -466,6 +458,8 @@ struct GsdvGuiApp {
     pending_font_settings_save: bool,
     /// network settings 需要从事件阶段派发持久化。
     pending_network_settings_save: bool,
+    /// 默认 agent 类型需要从事件阶段持久化。
+    pending_default_agent_kind_save: bool,
     /// debug 截图请求文件轮询是否启用。
     screenshot_request_poll_enabled: bool,
     /// workspace store 最近一次被业务标记为需要持久化的时间。
@@ -902,6 +896,7 @@ impl GsdvGuiApp {
             last_screenshot_path: None,
             theme_mode: theme::current_mode(),
             rail_collapsed: value.rail_collapsed,
+            default_agent_kind: agent_launch.kind,
             agent_launch,
             fs_watcher: Arc::new(Mutex::new(FsWatcherService::new(app_event_tx.clone()))),
             fs_watch_dirty: FsWatchDirtyState::new(),
@@ -913,6 +908,7 @@ impl GsdvGuiApp {
             pending_language_settings_save: false,
             pending_font_settings_save: false,
             pending_network_settings_save: false,
+            pending_default_agent_kind_save: false,
             screenshot_request_poll_enabled: screenshot_request_poll_enabled(),
             workspace_store_dirty_at: None,
             workspace_store_save_in_flight: Arc::new(AtomicBool::new(false)),

@@ -188,6 +188,11 @@ fn chinese_text(source: &'static str) -> &'static str {
         "Language" => "语言",
         "Interface language" => "界面语言",
         "Applied immediately and saved globally." => "立即生效，并保存为全局设置。",
+        "Default Agent" => "默认 Agent",
+        "New workspace agent" => "新工作区 Agent",
+        "Used when adding new workspaces and when old workspace data has no agent type." => {
+            "用于新建工作区，也用于旧工作区数据缺少 agent 类型时兜底。"
+        }
         "Rendering" => "渲染",
         "Max FPS" => "最大 FPS",
         "Caps application-scheduled repaint requests." => "限制应用主动请求重绘的频率。",
@@ -653,6 +658,11 @@ fn japanese_text(source: &'static str) -> &'static str {
         "Language" => "言語",
         "Interface language" => "UI 言語",
         "Applied immediately and saved globally." => "すぐに反映され、全体設定として保存されます。",
+        "Default Agent" => "既定 Agent",
+        "New workspace agent" => "新規ワークスペース Agent",
+        "Used when adding new workspaces and when old workspace data has no agent type." => {
+            "新規ワークスペース作成時と、古いワークスペースに agent 種別がない場合に使います。"
+        }
         "Rendering" => "描画",
         "Max FPS" => "最大 FPS",
         "Caps application-scheduled repaint requests." => {

@@ -95,7 +95,7 @@ impl GsdvGuiApp {
             .iter()
             .map(|workspace| workspace.path.clone())
             .collect();
-        self.spawn_workspace_add_task(ctx, path, self.agent_launch.kind, existing_paths);
+        self.spawn_workspace_add_task(ctx, path, self.default_agent_kind, existing_paths);
     }
 
     /// 应用添加 workspace 后台任务结果。
