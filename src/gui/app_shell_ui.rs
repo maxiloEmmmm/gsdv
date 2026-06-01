@@ -1528,31 +1528,75 @@ impl GsdvGuiApp {
     }
 
     pub(super) fn empty_workspace_surface(&mut self, ui: &mut Ui) {
-        ui.vertical_centered(|ui| {
-            ui.add_space((ui.available_height() * 0.28).min(180.0));
-            ui.set_max_width(560.0);
-            pill_icon(ui, "g", theme::primary());
-            ui.add_space(14.0);
-            ui.label(
-                RichText::new(i18n::text(self.app_language, "Open a workspace"))
-                    .strong()
-                    .size(24.0),
-            );
-            ui.add_space(8.0);
-            ui.label(muted(i18n::text(
-                self.app_language,
-                "Add a project directory to start an agent session, browse Markdown, or inspect reviewer data.",
-            )));
-            ui.add_space(18.0);
-            ui.horizontal(|ui| {
-                ui.add_space((ui.available_width() - 128.0).max(0.0) * 0.5);
-                if primary_action(ui, i18n::text(self.app_language, "Add")).clicked() {
-                    self.add_workspace_from_dialog(ui.ctx());
-                }
-                if secondary_action(ui, i18n::text(self.app_language, "Help")).clicked() {
-                    self.set_active_app_dialog(Some(AppDialog::Help));
-                }
-            });
+        let rect = ui.available_rect_before_wrap();
+        let (_, _) = ui.allocate_exact_size(rect.size(), Sense::hover());
+        ui.painter()
+            .rect_filled(rect, CornerRadius::ZERO, theme::bg());
+
+        let panel_width = rect.width().min(620.0).max(320.0);
+        let panel_height = 232.0_f32.min(rect.height().max(1.0));
+        let panel_top = rect.top() + ((rect.height() - panel_height) * 0.38).max(24.0);
+        let panel_rect = Rect::from_center_size(
+            egui::pos2(rect.center().x, panel_top + panel_height * 0.5),
+            Vec2::new(panel_width, panel_height),
+        );
+        let radius = CornerRadius::same(theme::RADIUS_LG);
+        ui.painter()
+            .rect_filled(panel_rect, radius, theme::surface_elevated());
+        ui.painter().rect_stroke(
+            panel_rect,
+            radius,
+            Stroke::new(1.0, theme::border()),
+            egui::StrokeKind::Inside,
+        );
+        let accent_rect = Rect::from_min_size(panel_rect.min, Vec2::new(panel_rect.width(), 3.0));
+        ui.painter()
+            .rect_filled(accent_rect, CornerRadius::same(2), theme::primary());
+
+        let icon_rect =
+            Rect::from_min_size(panel_rect.min + egui::vec2(28.0, 30.0), Vec2::splat(42.0));
+        ui.painter().rect_filled(
+            icon_rect,
+            CornerRadius::same(theme::RADIUS_MD),
+            theme::primary_soft(),
+        );
+        ui.painter().rect_stroke(
+            icon_rect,
+            CornerRadius::same(theme::RADIUS_MD),
+            Stroke::new(1.0, theme::primary_border()),
+            egui::StrokeKind::Inside,
+        );
+        paint_plus_icon(ui, icon_rect.center(), 8.0, theme::primary(), 2.0);
+
+        let content_rect = Rect::from_min_max(
+            egui::pos2(icon_rect.right() + 18.0, panel_rect.top() + 28.0),
+            egui::pos2(panel_rect.right() - 28.0, panel_rect.bottom() - 24.0),
+        );
+        let mut content_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(content_rect)
+                .layout(Layout::top_down(Align::Min)),
+        );
+        content_ui.set_clip_rect(content_rect);
+        content_ui.label(
+            RichText::new(i18n::text(self.app_language, "Open a workspace"))
+                .strong()
+                .size(22.0)
+                .color(theme::text()),
+        );
+        content_ui.add_space(8.0);
+        content_ui.label(muted(i18n::text(
+            self.app_language,
+            "Add a project directory to start an agent session, browse Markdown, or inspect reviewer data.",
+        )));
+        content_ui.add_space(20.0);
+        content_ui.horizontal(|ui| {
+            if primary_action(ui, i18n::text(self.app_language, "Add workspace")).clicked() {
+                self.add_workspace_from_dialog(ui.ctx());
+            }
+            if secondary_action(ui, i18n::text(self.app_language, "Help")).clicked() {
+                self.set_active_app_dialog(Some(AppDialog::Help));
+            }
         });
     }
 }
