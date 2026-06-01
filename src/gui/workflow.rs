@@ -959,7 +959,15 @@ fn replace_task_desc(lines: &mut Vec<String>, next_text: &str) {
         .iter()
         .position(|line| parse_step_line(line).is_some())
         .unwrap_or(lines.len());
-    let replacement = editor_text_lines(next_text);
+    let mut replacement = editor_text_lines(next_text.trim_end());
+    if desc_end < lines.len()
+        && !replacement.is_empty()
+        && replacement
+            .last()
+            .is_some_and(|line| !line.trim().is_empty())
+    {
+        replacement.push(String::new());
+    }
     lines.splice(0..desc_end, replacement);
 }
 
