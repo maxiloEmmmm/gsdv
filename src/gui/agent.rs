@@ -35,6 +35,24 @@ impl AgentKind {
         self.integration().args(session_id)
     }
 
+    /// Returns effort levels supported by this agent CLI.
+    pub fn effort_levels(self) -> &'static [&'static str] {
+        match self {
+            Self::Codex => &["low", "medium", "high", "xhigh"],
+            Self::Claude => &["low", "medium", "high", "xhigh", "max"],
+        }
+    }
+
+    /// Returns whether an effort value is valid for this agent CLI.
+    pub fn supports_effort(self, effort: &str) -> bool {
+        self.effort_levels().contains(&effort.trim())
+    }
+
+    /// Returns whether this agent CLI supports Codex service tier fast mode.
+    pub fn supports_fast_mode(self) -> bool {
+        matches!(self, Self::Codex)
+    }
+
     pub fn all() -> [Self; 2] {
         [Self::Codex, Self::Claude]
     }
@@ -186,14 +204,70 @@ impl AgentLaunchConfig {
         config
     }
 
+    /// Builds CLI args for the configured default agent.
     pub fn args(&self, session_id: Option<&str>) -> Vec<String> {
-        self.args_for(self.kind, session_id)
+        self.args_for(self.kind, session_id, None, None, None)
     }
 
-    pub fn args_for(&self, kind: AgentKind, session_id: Option<&str>) -> Vec<String> {
+    /// Builds CLI args and applies per-agent overrides when present.
+    pub fn args_for(
+        &self,
+        kind: AgentKind,
+        session_id: Option<&str>,
+        model: Option<&str>,
+        effort: Option<&str>,
+        fast_mode: Option<bool>,
+    ) -> Vec<String> {
         let mut args = kind.args(session_id);
+        if let Some(model) = normalized_agent_model_arg(model) {
+            args.push("--model".to_string());
+            args.push(model.to_string());
+        }
+        if let Some(effort) = normalized_agent_effort_arg(kind, effort) {
+            match kind {
+                AgentKind::Codex => {
+                    args.push("-c".to_string());
+                    args.push(format!("model_reasoning_effort=\"{effort}\""));
+                }
+                AgentKind::Claude => {
+                    args.push("--effort".to_string());
+                    args.push(effort.to_string());
+                }
+            }
+        }
+        if let Some(service_tier) = normalized_agent_fast_mode_arg(kind, fast_mode) {
+            args.push("-c".to_string());
+            args.push(format!("service_tier=\"{service_tier}\""));
+        }
         args.extend(self.coder_args.iter().cloned());
         args
+    }
+}
+
+/// Returns a non-empty model override suitable for CLI args.
+fn normalized_agent_model_arg(model: Option<&str>) -> Option<&str> {
+    model.map(str::trim).filter(|value| !value.is_empty())
+}
+
+/// Returns a valid effort override suitable for the selected agent CLI.
+fn normalized_agent_effort_arg(kind: AgentKind, effort: Option<&str>) -> Option<&str> {
+    effort
+        .map(str::trim)
+        .filter(|value| kind.supports_effort(value))
+}
+
+/// Returns Codex's CLI service tier override for one fast mode state.
+fn normalized_agent_fast_mode_arg(
+    kind: AgentKind,
+    fast_mode: Option<bool>,
+) -> Option<&'static str> {
+    if !kind.supports_fast_mode() {
+        return None;
+    }
+    match fast_mode {
+        Some(true) => Some("fast"),
+        Some(false) => Some("default"),
+        None => None,
     }
 }
 

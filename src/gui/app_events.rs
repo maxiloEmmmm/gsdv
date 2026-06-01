@@ -1068,8 +1068,11 @@ impl GsdvGuiApp {
         }
         for event in events {
             match event {
-                FsWatchAppEvent::WorkspaceChanged(index) => {
+                FsWatchAppEvent::WorkspaceChanged { index, workflow } => {
                     self.fs_watch_dirty.mark_outline_dirty(index);
+                    if workflow {
+                        self.fs_watch_dirty.mark_workflow_dirty(index);
+                    }
                     self.fs_watch_dirty.mark_reviewer_dirty(index);
                 }
                 FsWatchAppEvent::ReviewerScriptsChanged => {

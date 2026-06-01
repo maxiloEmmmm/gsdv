@@ -16,6 +16,17 @@ const TASK_PREFIX: &str = "task-";
 /// Markdown 文件扩展名。
 const MARKDOWN_EXT: &str = "md";
 
+/// 判断路径是否属于 workspace 的 workflow 规范目录。
+pub(super) fn path_is_workflow_spec_path(workspace_root: &Path, path: &Path) -> bool {
+    let spec_root = workspace_root.join(GSDV_SPEC_DIR);
+    path == spec_root || path.starts_with(spec_root)
+}
+
+/// 判断加载错误是否表示 workflow 根文件还没初始化。
+pub(super) fn workflow_root_missing_error(workspace_root: &Path, error: &str) -> bool {
+    error == format!("{} not found", workflow_root_path(workspace_root).display())
+}
+
 /// workflow 树加载结果。
 #[derive(Debug, Clone, Default)]
 pub(super) struct WorkflowTree {
@@ -153,6 +164,8 @@ pub(super) struct WorkflowSaveSuccess {
 /// workflow tree 右键菜单触发的文件修改请求。
 #[derive(Debug, Clone)]
 pub(super) enum WorkflowMutationRequest {
+    /// 初始化 workspace 级 workflow 根文件。
+    InitRoot,
     /// 在项目目录下创建一个空 task Markdown 文件。
     AddTask {
         /// 项目目录名。
@@ -244,7 +257,7 @@ pub(super) fn workflow_step_editor_from_node(
 /// 从 workspace 根目录加载 workflow tree。
 pub(super) fn load_workflow_tree(workspace_root: &Path) -> Result<WorkflowTree, String> {
     let spec_root = workspace_root.join(GSDV_SPEC_DIR);
-    let root_md = spec_root.join(ROOT_MD);
+    let root_md = workflow_root_path(workspace_root);
     if !root_md.is_file() {
         return Err(format!("{} not found", root_md.display()));
     }
@@ -432,6 +445,7 @@ pub(super) fn apply_workflow_mutation(
     request: WorkflowMutationRequest,
 ) -> Result<(), String> {
     match request {
+        WorkflowMutationRequest::InitRoot => init_workflow_root(workspace_root),
         WorkflowMutationRequest::AddTask {
             project_key,
             task_key,
@@ -490,6 +504,35 @@ pub(super) fn validate_workflow_step_title(title: &str) -> Result<&str, String> 
         return Err("Step title must be one line".to_string());
     }
     Ok(title)
+}
+
+/// 初始化 workspace 级 workflow 根文件。
+fn init_workflow_root(workspace_root: &Path) -> Result<(), String> {
+    let root_path = workflow_root_path(workspace_root);
+    if root_path.is_file() {
+        return Ok(());
+    }
+    if root_path.exists() {
+        return Err(format!(
+            "workflow root is not a file: {}",
+            root_path.display()
+        ));
+    }
+    let Some(parent) = root_path.parent() else {
+        return Err(format!(
+            "invalid workflow root path: {}",
+            root_path.display()
+        ));
+    };
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+    fs::write(&root_path, [])
+        .map_err(|error| format!("failed to write {}: {error}", root_path.display()))
+}
+
+/// 返回 workspace 级 workflow 根文件路径。
+fn workflow_root_path(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(GSDV_SPEC_DIR).join(ROOT_MD)
 }
 
 /// 在项目目录下创建空 task Markdown 文件。

@@ -85,6 +85,12 @@ pub struct WorkspaceViewData {
     pub name: String,
     pub path: PathBuf,
     pub agent_kind: AgentKind,
+    /// Per-workspace main agent model override.
+    pub agent_model: Option<String>,
+    /// Per-workspace main agent effort override.
+    pub agent_effort: Option<String>,
+    /// Per-workspace Codex fast-mode override.
+    pub agent_fast_mode: Option<bool>,
     pub agent_id: String,
     pub session_id: Option<String>,
     pub activity: WorkspaceActivity,
@@ -125,6 +131,15 @@ pub struct SubagentViewData {
     /// Agent implementation used by this subagent.
     #[serde(default)]
     pub agent_kind: AgentKind,
+    /// Per-subagent model override passed to the agent CLI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_model: Option<String>,
+    /// Per-subagent effort override passed to the agent CLI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_effort: Option<String>,
+    /// Per-subagent Codex fast-mode override passed as service_tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_fast_mode: Option<bool>,
     /// Stable hook id used to route status/session events.
     pub agent_id: String,
     /// Runtime session id used for resume.
@@ -475,6 +490,12 @@ struct StoredWorkspace {
     path: String,
     #[serde(default)]
     agent_kind: Option<AgentKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_fast_mode: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     agent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1055,6 +1076,9 @@ pub fn new_workspace(path: PathBuf, agent_kind: AgentKind) -> WorkspaceViewData 
         StoredWorkspace {
             path: path.to_string_lossy().to_string(),
             agent_kind: Some(agent_kind),
+            agent_model: None,
+            agent_effort: None,
+            agent_fast_mode: None,
             agent_id: None,
             session_id: None,
             selected_file: None,
@@ -1093,6 +1117,12 @@ pub fn save_workspace_store(workspaces: &[WorkspaceViewData], active: usize, rai
             .map(|workspace| StoredWorkspace {
                 path: workspace.path.to_string_lossy().to_string(),
                 agent_kind: Some(workspace.agent_kind),
+                agent_model: workspace.agent_model.clone(),
+                agent_effort: workspace.agent_effort.clone(),
+                agent_fast_mode: normalize_stored_agent_fast_mode(
+                    workspace.agent_kind,
+                    workspace.agent_fast_mode,
+                ),
                 agent_id: Some(workspace.agent_id.clone()),
                 session_id: workspace.session_id.clone(),
                 selected_file: workspace
@@ -1131,6 +1161,25 @@ pub fn save_workspace_subagents(workspace: &WorkspaceViewData) {
     }
 }
 
+/// 返回清理后的 agent model 覆盖值。
+fn normalize_stored_agent_model(model: Option<String>) -> Option<String> {
+    model
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// 返回清理后的 agent effort 覆盖值。
+fn normalize_stored_agent_effort(kind: AgentKind, effort: Option<String>) -> Option<String> {
+    effort
+        .map(|value| value.trim().to_string())
+        .filter(|value| kind.supports_effort(value))
+}
+
+/// 返回当前 agent 类型支持的 fast-mode 覆盖值。
+fn normalize_stored_agent_fast_mode(kind: AgentKind, fast_mode: Option<bool>) -> Option<bool> {
+    kind.supports_fast_mode().then_some(fast_mode).flatten()
+}
+
 /// 保存 workspace 级 outline 收藏。
 pub fn save_workspace_outline_favorites(workspace_path: &Path, favorites: &BTreeSet<PathBuf>) {
     let Some(path) = workspace_outline_favorites_path(workspace_path) else {
@@ -1164,6 +1213,9 @@ pub fn new_subagent(
     workspace_path: &Path,
     name: String,
     agent_kind: AgentKind,
+    agent_model: Option<String>,
+    agent_effort: Option<String>,
+    agent_fast_mode: Option<bool>,
     session_id: Option<String>,
 ) -> SubagentViewData {
     let id = format!("sub-{}-{:x}", now_ms(), stable_state_key(Path::new(&name)));
@@ -1172,6 +1224,9 @@ pub fn new_subagent(
         id,
         name,
         agent_kind,
+        agent_model,
+        agent_effort,
+        agent_fast_mode: normalize_stored_agent_fast_mode(agent_kind, agent_fast_mode),
         session_id,
         activity: WorkspaceActivity::Unknown,
     }
@@ -1201,6 +1256,11 @@ fn load_workspace_subagents(
             if !AgentKind::all().contains(&subagent.agent_kind) {
                 subagent.agent_kind = default_agent_kind;
             }
+            subagent.agent_model = normalize_stored_agent_model(subagent.agent_model);
+            subagent.agent_effort =
+                normalize_stored_agent_effort(subagent.agent_kind, subagent.agent_effort);
+            subagent.agent_fast_mode =
+                normalize_stored_agent_fast_mode(subagent.agent_kind, subagent.agent_fast_mode);
             subagent.activity = WorkspaceActivity::Unknown;
             subagent
         })
@@ -1273,6 +1333,9 @@ fn build_workspace(
         name: workspace_name(&path),
         path,
         agent_kind,
+        agent_model: normalize_stored_agent_model(stored.agent_model),
+        agent_effort: normalize_stored_agent_effort(agent_kind, stored.agent_effort),
+        agent_fast_mode: normalize_stored_agent_fast_mode(agent_kind, stored.agent_fast_mode),
         agent_id,
         session_id,
         activity,

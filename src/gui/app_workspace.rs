@@ -303,12 +303,23 @@ impl GsdvGuiApp {
         index: usize,
         name: String,
         agent_kind: AgentKind,
+        agent_model: Option<String>,
+        agent_effort: Option<String>,
+        agent_fast_mode: Option<bool>,
         session_id: Option<String>,
     ) {
         let Some(workspace) = self.workspaces.get_mut(index) else {
             return;
         };
-        let subagent = data::new_subagent(&workspace.path, name, agent_kind, session_id);
+        let subagent = data::new_subagent(
+            &workspace.path,
+            name,
+            agent_kind,
+            agent_model,
+            agent_effort,
+            agent_fast_mode,
+            session_id,
+        );
         let slot = AgentSlotId::Subagent(subagent.id.clone());
         workspace.subagents.push(subagent);
         if let Some(active) = self.active_agent_slots.get_mut(index) {

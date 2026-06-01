@@ -25,7 +25,8 @@ use crate::gui::theme;
 use crate::gui::workflow::{
     WorkflowMutationRequest, WorkflowProjectNode, WorkflowSaveRequest, WorkflowSaveSuccess,
     WorkflowSelectionTarget, WorkflowStepEditor, WorkflowStepNode, WorkflowTaskEditor,
-    WorkflowTaskNode, WorkflowTree, workflow_step_editor_from_node, workflow_task_editor_from_node,
+    WorkflowTaskNode, WorkflowTree, path_is_workflow_spec_path, workflow_root_missing_error,
+    workflow_step_editor_from_node, workflow_task_editor_from_node,
 };
 use crate::reviewer::app::{GuiReviewerRowTone, ReviewerGitDataResult};
 use eframe::egui::text_edit::{TextEditOutput, TextEditState};
@@ -1125,6 +1126,8 @@ struct ReviewerScriptState {
 struct FsWatchDirtyState {
     /// Workspaces whose outline should be rebuilt after debounce.
     outline_workspaces: BTreeSet<usize>,
+    /// Workspaces whose workflow tree should be rebuilt after debounce.
+    workflow_workspaces: BTreeSet<usize>,
     /// First workspace event timestamp used for debounce.
     outline_dirty_at: Option<Instant>,
     /// Workspaces whose loaded reviewer may need uncommitted diff refresh.
@@ -1146,6 +1149,7 @@ impl FsWatchDirtyState {
     fn new() -> Self {
         Self {
             outline_workspaces: BTreeSet::new(),
+            workflow_workspaces: BTreeSet::new(),
             outline_dirty_at: None,
             reviewer_workspaces: BTreeSet::new(),
             reviewer_dirty_at: None,
@@ -1159,6 +1163,12 @@ impl FsWatchDirtyState {
     /// Marks one workspace outline dirty from a filesystem event.
     fn mark_outline_dirty(&mut self, index: usize) {
         self.outline_workspaces.insert(index);
+        self.outline_dirty_at.get_or_insert_with(Instant::now);
+    }
+
+    /// Marks one workspace workflow tree dirty from a spec file event.
+    fn mark_workflow_dirty(&mut self, index: usize) {
+        self.workflow_workspaces.insert(index);
         self.outline_dirty_at.get_or_insert_with(Instant::now);
     }
 
@@ -1184,7 +1194,8 @@ impl FsWatchDirtyState {
     /// Keeps workspace dirty indexes valid after workspace list changes.
     fn clamp_workspace_indexes(&mut self, len: usize) {
         self.outline_workspaces.retain(|index| *index < len);
-        if self.outline_workspaces.is_empty() {
+        self.workflow_workspaces.retain(|index| *index < len);
+        if self.outline_workspaces.is_empty() && self.workflow_workspaces.is_empty() {
             self.outline_dirty_at = None;
         }
         self.reviewer_workspaces.retain(|index| *index < len);
@@ -1297,6 +1308,7 @@ impl FsWatcherService {
         let mut status_changed = false;
         let mut scripts_changed = false;
         let mut workspace_indexes = BTreeSet::new();
+        let mut workflow_indexes = BTreeSet::new();
         for path in event.paths {
             let path = comparable_watch_path(&path);
             if self
@@ -1319,6 +1331,9 @@ impl FsWatcherService {
                         continue;
                     }
                     workspace_indexes.insert(index);
+                    if path_is_workflow_spec_path(root, &path) {
+                        workflow_indexes.insert(index);
+                    }
                 }
             }
         }
@@ -1329,7 +1344,10 @@ impl FsWatcherService {
             events.push(FsWatchAppEvent::ReviewerScriptsChanged);
         }
         for index in workspace_indexes {
-            events.push(FsWatchAppEvent::WorkspaceChanged(index));
+            events.push(FsWatchAppEvent::WorkspaceChanged {
+                index,
+                workflow: workflow_indexes.contains(&index),
+            });
         }
     }
 
@@ -1401,7 +1419,12 @@ impl FsWatcherService {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FsWatchAppEvent {
     /// A workspace file tree changed.
-    WorkspaceChanged(usize),
+    WorkspaceChanged {
+        /// Workspace index affected by the event.
+        index: usize,
+        /// Whether the changed path is under the workflow spec directory.
+        workflow: bool,
+    },
     /// Reviewer script directory changed.
     ReviewerScriptsChanged,
     /// Shared agent status file changed.
@@ -1963,6 +1986,9 @@ enum AppDialog {
         index: usize,
         name: String,
         agent_kind: AgentKind,
+        agent_model: String,
+        agent_effort: String,
+        agent_fast_mode: Option<bool>,
         session_id: String,
     },
     RestartAgent {
@@ -1971,6 +1997,11 @@ enum AppDialog {
     SwitchAgent {
         index: usize,
         next_kind: AgentKind,
+    },
+    SetAgentModel {
+        index: usize,
+        slot: AgentSlotId,
+        model: String,
     },
     ConfirmThemeSwitch {
         next_mode: theme::ThemeMode,
@@ -2031,6 +2062,18 @@ enum AgentTabAction {
     Switch {
         slot: AgentSlotId,
         next_kind: AgentKind,
+    },
+    SetModel {
+        slot: AgentSlotId,
+        model: String,
+    },
+    SetEffort {
+        slot: AgentSlotId,
+        effort: Option<String>,
+    },
+    SetFastMode {
+        slot: AgentSlotId,
+        fast_mode: Option<bool>,
     },
     CopySessionId(String),
     SetMarkdownOutlineCollapsed(bool),

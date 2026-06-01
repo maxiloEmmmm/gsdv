@@ -859,7 +859,7 @@ impl GuiTerminalHost {
             input_submitted = self.kind == TerminalSurfaceKind::Agent
                 && terminal_agent_input_submit_bytes(&bytes);
             self.write_bytes(&bytes);
-            enable_terminal_ime(ui, response.rect);
+            enable_terminal_ime(ui, &self.backend, response.rect);
             self.write_ime_commits(ui);
         }
         let input_rect = (self.kind == TerminalSurfaceKind::Agent)
@@ -1863,12 +1863,13 @@ fn control_key_byte(key: Key, modifiers: Modifiers) -> Option<u8> {
     Some(offset)
 }
 
-fn enable_terminal_ime(ui: &Ui, rect: egui::Rect) {
-    let ime_rect = terminal_ime_rect(rect);
-    let cursor_rect = egui::Rect::from_min_size(ime_rect.left_top(), Vec2::new(1.0, 18.0));
+fn enable_terminal_ime(ui: &Ui, backend: &TerminalBackend, rect: egui::Rect) {
+    let cursor_rect = terminal_ime_cursor_rect(backend, rect).unwrap_or_else(|| {
+        egui::Rect::from_min_size(rect.left_top(), Vec2::new(1.0, backend.size.cell_height))
+    });
     ui.ctx().output_mut(|output| {
         output.ime = Some(egui::output::IMEOutput {
-            rect: ime_rect,
+            rect: cursor_rect,
             cursor_rect,
         });
     });
@@ -1896,16 +1897,27 @@ fn trim_trailing_spaces(text: &mut String) {
     text.truncate(trimmed_len);
 }
 
-fn terminal_ime_rect(rect: egui::Rect) -> egui::Rect {
-    #[cfg(target_os = "linux")]
-    {
-        let hidden = rect.left_top() + Vec2::new(-10_000.0, -10_000.0);
-        egui::Rect::from_min_size(hidden, Vec2::new(1.0, 1.0))
+/// 返回当前 terminal 光标对应的 IME 候选窗锚点。
+fn terminal_ime_cursor_rect(backend: &TerminalBackend, terminal_rect: egui::Rect) -> Option<Rect> {
+    let term = backend.term.lock();
+    let content = term.renderable_content();
+    let display_offset = content.display_offset as i32;
+    let line = content.cursor.point.line.0 + display_offset;
+    if line < 0 || line >= backend.size.lines as i32 {
+        return None;
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        rect
-    }
+    let column = content
+        .cursor
+        .point
+        .column
+        .0
+        .min(backend.size.cols as usize);
+    let x = terminal_rect.left() + backend.size.cell_width * column as f32;
+    let y = terminal_rect.top() + backend.size.cell_height * line as f32;
+    Some(Rect::from_min_size(
+        Pos2::new(x, y),
+        Vec2::new(1.0, backend.size.cell_height.max(1.0)),
+    ))
 }
 
 fn ime_commit_texts(events: &[egui::Event]) -> impl Iterator<Item = String> + '_ {
@@ -3465,7 +3477,13 @@ fn terminal_args(
     match kind {
         TerminalSurfaceKind::Agent => {
             let mut args = Vec::new();
-            args.extend(agent_launch.args_for(workspace.agent_kind, agent_session_id));
+            args.extend(agent_launch.args_for(
+                workspace.agent_kind,
+                agent_session_id,
+                workspace.agent_model.as_deref(),
+                workspace.agent_effort.as_deref(),
+                workspace.agent_fast_mode,
+            ));
             args
         }
         TerminalSurfaceKind::Workspace => Vec::new(),

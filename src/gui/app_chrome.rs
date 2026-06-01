@@ -129,6 +129,9 @@ pub(super) fn agent_slot_context_menu(
     ui: &mut Ui,
     slot: AgentSlotId,
     current_agent_kind: AgentKind,
+    current_agent_model: Option<&str>,
+    current_agent_effort: Option<&str>,
+    current_agent_fast_mode: Option<bool>,
     current_session_id: Option<&str>,
     action: &mut Option<AgentTabAction>,
     language: AppLanguage,
@@ -147,6 +150,72 @@ pub(super) fn agent_slot_context_menu(
     if ui.button(i18n::text(language, "Restart agent")).clicked() {
         *action = Some(AgentTabAction::Restart(slot.clone()));
         ui.close_menu();
+    }
+    if ui.button(i18n::text(language, "Set model")).clicked() {
+        *action = Some(AgentTabAction::SetModel {
+            slot: slot.clone(),
+            model: current_agent_model.unwrap_or_default().to_string(),
+        });
+        ui.close_menu();
+    }
+    ui.menu_button(i18n::text(language, "Effort"), |ui| {
+        let current = current_agent_effort.unwrap_or_default();
+        if ui
+            .selectable_label(current.is_empty(), i18n::text(language, "Default effort"))
+            .clicked()
+        {
+            *action = Some(AgentTabAction::SetEffort {
+                slot: slot.clone(),
+                effort: None,
+            });
+            ui.close_menu();
+        }
+        for effort in current_agent_kind.effort_levels() {
+            if ui.selectable_label(current == *effort, *effort).clicked() {
+                *action = Some(AgentTabAction::SetEffort {
+                    slot: slot.clone(),
+                    effort: Some((*effort).to_string()),
+                });
+                ui.close_menu();
+            }
+        }
+    });
+    if current_agent_kind.supports_fast_mode() {
+        ui.menu_button(i18n::text(language, "Fast mode"), |ui| {
+            if ui
+                .selectable_label(
+                    current_agent_fast_mode.is_none(),
+                    i18n::text(language, "Default fast mode"),
+                )
+                .clicked()
+            {
+                *action = Some(AgentTabAction::SetFastMode {
+                    slot: slot.clone(),
+                    fast_mode: None,
+                });
+                ui.close_menu();
+            }
+            if ui
+                .selectable_label(current_agent_fast_mode == Some(true), "On")
+                .clicked()
+            {
+                *action = Some(AgentTabAction::SetFastMode {
+                    slot: slot.clone(),
+                    fast_mode: Some(true),
+                });
+                ui.close_menu();
+            }
+            if ui
+                .selectable_label(current_agent_fast_mode == Some(false), "Off")
+                .clicked()
+            {
+                *action = Some(AgentTabAction::SetFastMode {
+                    slot: slot.clone(),
+                    fast_mode: Some(false),
+                });
+                ui.close_menu();
+            }
+        });
     }
     ui.menu_button(i18n::text(language, "Switch agent"), |ui| {
         for agent_kind in AgentKind::all() {

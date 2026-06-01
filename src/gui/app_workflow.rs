@@ -543,7 +543,9 @@ impl GsdvGuiApp {
             } => {
                 self.clear_workflow_editor_for_step_subtree(index, task_path, step_path);
             }
-            WorkflowMutationRequest::AddTask { .. } | WorkflowMutationRequest::AddStep { .. } => {}
+            WorkflowMutationRequest::InitRoot
+            | WorkflowMutationRequest::AddTask { .. }
+            | WorkflowMutationRequest::AddStep { .. } => {}
         }
     }
 
@@ -684,6 +686,7 @@ impl GsdvGuiApp {
         request: &WorkflowMutationRequest,
     ) -> Option<String> {
         match request {
+            WorkflowMutationRequest::InitRoot => None,
             WorkflowMutationRequest::AddTask {
                 project_key,
                 task_key,

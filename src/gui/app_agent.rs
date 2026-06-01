@@ -128,6 +128,16 @@ impl GsdvGuiApp {
         match slot {
             AgentSlotId::Main => {
                 workspace.agent_kind = next_kind;
+                if !workspace
+                    .agent_effort
+                    .as_deref()
+                    .is_some_and(|effort| next_kind.supports_effort(effort))
+                {
+                    workspace.agent_effort = None;
+                }
+                if !next_kind.supports_fast_mode() {
+                    workspace.agent_fast_mode = None;
+                }
                 workspace.session_id = None;
                 workspace.activity = WorkspaceActivity::Unknown;
             }
@@ -138,10 +148,200 @@ impl GsdvGuiApp {
                     .find(|subagent| &subagent.id == id)
                 {
                     subagent.agent_kind = next_kind;
+                    if !subagent
+                        .agent_effort
+                        .as_deref()
+                        .is_some_and(|effort| next_kind.supports_effort(effort))
+                    {
+                        subagent.agent_effort = None;
+                    }
+                    if !next_kind.supports_fast_mode() {
+                        subagent.agent_fast_mode = None;
+                    }
                     subagent.session_id = None;
                     subagent.activity = WorkspaceActivity::Unknown;
                 }
             }
+        }
+    }
+
+    /// Updates one agent slot model override without clearing its session id.
+    pub(super) fn set_agent_slot_model(
+        &mut self,
+        ctx: &egui::Context,
+        index: usize,
+        slot: AgentSlotId,
+        model: String,
+    ) {
+        let next_model = normalized_agent_model_value(&model);
+        if self.agent_slot_model(index, &slot) == next_model {
+            return;
+        }
+        let Some(workspace) = self.workspaces.get_mut(index) else {
+            return;
+        };
+        match &slot {
+            AgentSlotId::Main => {
+                workspace.agent_model = next_model.clone();
+            }
+            AgentSlotId::Subagent(id) => {
+                let Some(subagent) = workspace
+                    .subagents
+                    .iter_mut()
+                    .find(|subagent| &subagent.id == id)
+                else {
+                    return;
+                };
+                subagent.agent_model = next_model.clone();
+            }
+        }
+        self.persist_workspaces();
+        if let Some(hosts) = self.terminal_hosts.get_mut(index) {
+            hosts.agents.remove(&slot);
+        }
+        self.spawn_terminal_host_for_workspace(ctx, index, TerminalSurfaceKind::Agent);
+        self.push_toast(
+            if next_model.is_some() {
+                i18n::text(self.app_language, "Agent model set")
+            } else {
+                i18n::text(self.app_language, "Agent model override cleared")
+            },
+            theme::success(),
+        );
+    }
+
+    /// Updates one agent slot effort override without clearing its session id.
+    pub(super) fn set_agent_slot_effort(
+        &mut self,
+        ctx: &egui::Context,
+        index: usize,
+        slot: AgentSlotId,
+        effort: Option<String>,
+    ) {
+        let Some(kind) = self.agent_slot_kind(index, &slot) else {
+            return;
+        };
+        let next_effort = normalized_agent_effort_value(kind, effort.as_deref());
+        if self.agent_slot_effort(index, &slot) == next_effort {
+            return;
+        }
+        let Some(workspace) = self.workspaces.get_mut(index) else {
+            return;
+        };
+        match &slot {
+            AgentSlotId::Main => {
+                workspace.agent_effort = next_effort.clone();
+            }
+            AgentSlotId::Subagent(id) => {
+                let Some(subagent) = workspace
+                    .subagents
+                    .iter_mut()
+                    .find(|subagent| &subagent.id == id)
+                else {
+                    return;
+                };
+                subagent.agent_effort = next_effort.clone();
+            }
+        }
+        self.persist_workspaces();
+        if let Some(hosts) = self.terminal_hosts.get_mut(index) {
+            hosts.agents.remove(&slot);
+        }
+        self.spawn_terminal_host_for_workspace(ctx, index, TerminalSurfaceKind::Agent);
+        self.push_toast(
+            if next_effort.is_some() {
+                i18n::text(self.app_language, "Agent effort set")
+            } else {
+                i18n::text(self.app_language, "Agent effort override cleared")
+            },
+            theme::success(),
+        );
+    }
+
+    /// Updates one agent slot fast-mode override without touching other slots.
+    pub(super) fn set_agent_slot_fast_mode(
+        &mut self,
+        ctx: &egui::Context,
+        index: usize,
+        slot: AgentSlotId,
+        fast_mode: Option<bool>,
+    ) {
+        let Some(kind) = self.agent_slot_kind(index, &slot) else {
+            return;
+        };
+        let next_fast_mode = normalized_agent_fast_mode_value(kind, fast_mode);
+        if self.agent_slot_fast_mode(index, &slot) == next_fast_mode {
+            return;
+        }
+        let Some(workspace) = self.workspaces.get_mut(index) else {
+            return;
+        };
+        match &slot {
+            AgentSlotId::Main => {
+                workspace.agent_fast_mode = next_fast_mode;
+            }
+            AgentSlotId::Subagent(id) => {
+                let Some(subagent) = workspace
+                    .subagents
+                    .iter_mut()
+                    .find(|subagent| &subagent.id == id)
+                else {
+                    return;
+                };
+                subagent.agent_fast_mode = next_fast_mode;
+            }
+        }
+        self.persist_workspaces();
+        if let Some(hosts) = self.terminal_hosts.get_mut(index) {
+            hosts.agents.remove(&slot);
+        }
+        self.spawn_terminal_host_for_workspace(ctx, index, TerminalSurfaceKind::Agent);
+        self.push_toast(
+            if next_fast_mode.is_some() {
+                i18n::text(self.app_language, "Agent fast mode set")
+            } else {
+                i18n::text(self.app_language, "Agent fast mode override cleared")
+            },
+            theme::success(),
+        );
+    }
+
+    /// Returns the configured model override for one agent slot.
+    fn agent_slot_model(&self, index: usize, slot: &AgentSlotId) -> Option<String> {
+        let workspace = self.workspaces.get(index)?;
+        match slot {
+            AgentSlotId::Main => workspace.agent_model.clone(),
+            AgentSlotId::Subagent(id) => workspace
+                .subagents
+                .iter()
+                .find(|subagent| &subagent.id == id)
+                .and_then(|subagent| subagent.agent_model.clone()),
+        }
+    }
+
+    /// Returns the configured effort override for one agent slot.
+    fn agent_slot_effort(&self, index: usize, slot: &AgentSlotId) -> Option<String> {
+        let workspace = self.workspaces.get(index)?;
+        match slot {
+            AgentSlotId::Main => workspace.agent_effort.clone(),
+            AgentSlotId::Subagent(id) => workspace
+                .subagents
+                .iter()
+                .find(|subagent| &subagent.id == id)
+                .and_then(|subagent| subagent.agent_effort.clone()),
+        }
+    }
+
+    /// Returns the configured fast-mode override for one agent slot.
+    fn agent_slot_fast_mode(&self, index: usize, slot: &AgentSlotId) -> Option<bool> {
+        let workspace = self.workspaces.get(index)?;
+        match slot {
+            AgentSlotId::Main => workspace.agent_fast_mode,
+            AgentSlotId::Subagent(id) => workspace
+                .subagents
+                .iter()
+                .find(|subagent| &subagent.id == id)
+                .and_then(|subagent| subagent.agent_fast_mode),
         }
     }
 
@@ -377,4 +577,23 @@ impl GsdvGuiApp {
             self.request_app_repaint_after(ctx, deadline.saturating_duration_since(now));
         }
     }
+}
+
+/// Normalizes a model override entered by the user.
+fn normalized_agent_model_value(model: &str) -> Option<String> {
+    let model = model.trim();
+    (!model.is_empty()).then(|| model.to_string())
+}
+
+/// Normalizes an effort override for one agent kind.
+fn normalized_agent_effort_value(kind: AgentKind, effort: Option<&str>) -> Option<String> {
+    effort
+        .map(str::trim)
+        .filter(|value| kind.supports_effort(value))
+        .map(str::to_string)
+}
+
+/// Keeps fast mode scoped to Codex slots because Claude has no service tier.
+fn normalized_agent_fast_mode_value(kind: AgentKind, fast_mode: Option<bool>) -> Option<bool> {
+    kind.supports_fast_mode().then_some(fast_mode).flatten()
 }
