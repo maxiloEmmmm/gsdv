@@ -583,6 +583,9 @@ impl GsdvGuiApp {
                 .find(|subagent| &subagent.id == id)?;
             workspace.name = format!("{} · {}", workspace.name, subagent.name);
             workspace.agent_kind = subagent.agent_kind;
+            workspace.agent_model = subagent.agent_model.clone();
+            workspace.agent_effort = subagent.agent_effort.clone();
+            workspace.agent_fast_mode = subagent.agent_fast_mode;
             workspace.agent_id = subagent.agent_id.clone();
             workspace.session_id = subagent.session_id.clone();
             workspace.activity = subagent.activity;

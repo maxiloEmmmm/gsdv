@@ -89,6 +89,7 @@ impl GsdvGuiApp {
         let mut add_subagent = None;
         let mut restart_agent = None;
         let mut switch_agent = None;
+        let mut set_agent_model = None;
         let mut confirm_theme_switch = None;
         let mut restart_agent_without_resume = false;
         let mut start_codex_auth = false;
@@ -112,9 +113,10 @@ impl GsdvGuiApp {
                 | AppDialog::WorkflowRenameTask { .. }
                 | AppDialog::WorkflowRenameStep { .. } => Vec2::new(500.0, 260.0),
                 AppDialog::WorkflowDeleteConfirm { .. } => Vec2::new(500.0, 260.0),
-                AppDialog::AddSubagent { .. } => Vec2::new(460.0, 290.0),
+                AppDialog::AddSubagent { .. } => Vec2::new(460.0, 470.0),
                 AppDialog::RestartAgent { .. } => Vec2::new(500.0, 260.0),
                 AppDialog::SwitchAgent { .. } => Vec2::new(520.0, 280.0),
+                AppDialog::SetAgentModel { .. } => Vec2::new(520.0, 260.0),
                 AppDialog::ConfirmThemeSwitch { .. } => Vec2::new(460.0, 250.0),
                 AppDialog::AgentExitedAbnormally { .. } => Vec2::new(620.0, 340.0),
                 AppDialog::Help => Vec2::new(760.0, 640.0),
@@ -702,6 +704,9 @@ impl GsdvGuiApp {
                     index,
                     mut name,
                     mut agent_kind,
+                    mut agent_model,
+                    mut agent_effort,
+                    mut agent_fast_mode,
                     mut session_id,
                 } => {
                     let workspace = self.workspaces.get(index);
@@ -723,6 +728,9 @@ impl GsdvGuiApp {
                             index,
                             name: name.clone(),
                             agent_kind,
+                            agent_model: agent_model.clone(),
+                            agent_effort: agent_effort.clone(),
+                            agent_fast_mode,
                             session_id: session_id.clone(),
                         });
                     }
@@ -737,12 +745,113 @@ impl GsdvGuiApp {
                             }
                         });
                     if agent_kind != previous_agent_kind {
+                        if !agent_kind.supports_effort(&agent_effort) {
+                            agent_effort.clear();
+                        }
+                        if !agent_kind.supports_fast_mode() {
+                            agent_fast_mode = None;
+                        }
                         next_dialog = Some(AppDialog::AddSubagent {
                             index,
                             name: name.clone(),
                             agent_kind,
+                            agent_model: agent_model.clone(),
+                            agent_effort: agent_effort.clone(),
+                            agent_fast_mode,
                             session_id: session_id.clone(),
                         });
+                    }
+                    ui.add_space(10.0);
+                    ui.label(section_label(i18n::text(
+                        self.app_language,
+                        "MODEL (OPTIONAL)",
+                    )));
+                    let model_response = ui.add(
+                        egui::TextEdit::singleline(&mut agent_model)
+                            .hint_text("gpt-5.5, sonnet, ...")
+                            .desired_width(f32::INFINITY),
+                    );
+                    if model_response.changed() {
+                        next_dialog = Some(AppDialog::AddSubagent {
+                            index,
+                            name: name.clone(),
+                            agent_kind,
+                            agent_model: agent_model.clone(),
+                            agent_effort: agent_effort.clone(),
+                            agent_fast_mode,
+                            session_id: session_id.clone(),
+                        });
+                    }
+                    ui.add_space(10.0);
+                    ui.label(section_label(i18n::text(
+                        self.app_language,
+                        "EFFORT (OPTIONAL)",
+                    )));
+                    let effort_before = agent_effort.clone();
+                    egui::ComboBox::from_id_salt(("add-subagent-agent-effort", index))
+                        .selected_text(if agent_effort.is_empty() {
+                            i18n::text(self.app_language, "Default effort")
+                        } else {
+                            agent_effort.as_str()
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut agent_effort,
+                                String::new(),
+                                i18n::text(self.app_language, "Default effort"),
+                            );
+                            for effort in agent_kind.effort_levels() {
+                                ui.selectable_value(
+                                    &mut agent_effort,
+                                    (*effort).to_string(),
+                                    *effort,
+                                );
+                            }
+                        });
+                    if agent_effort != effort_before {
+                        next_dialog = Some(AppDialog::AddSubagent {
+                            index,
+                            name: name.clone(),
+                            agent_kind,
+                            agent_model: agent_model.clone(),
+                            agent_effort: agent_effort.clone(),
+                            agent_fast_mode,
+                            session_id: session_id.clone(),
+                        });
+                    }
+                    if agent_kind.supports_fast_mode() {
+                        ui.add_space(10.0);
+                        ui.label(section_label(i18n::text(
+                            self.app_language,
+                            "FAST MODE (OPTIONAL)",
+                        )));
+                        let fast_mode_before = agent_fast_mode;
+                        egui::ComboBox::from_id_salt(("add-subagent-agent-fast-mode", index))
+                            .selected_text(match agent_fast_mode {
+                                None => i18n::text(self.app_language, "Default fast mode"),
+                                Some(true) => "On",
+                                Some(false) => "Off",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut agent_fast_mode,
+                                    None,
+                                    i18n::text(self.app_language, "Default fast mode"),
+                                );
+                                ui.selectable_value(&mut agent_fast_mode, Some(true), "On");
+                                ui.selectable_value(&mut agent_fast_mode, Some(false), "Off");
+                            });
+                        if agent_fast_mode != fast_mode_before {
+                            next_dialog = Some(AppDialog::AddSubagent {
+                                index,
+                                name: name.clone(),
+                                agent_kind,
+                                agent_model: agent_model.clone(),
+                                agent_effort: agent_effort.clone(),
+                                agent_fast_mode,
+                                session_id: session_id.clone(),
+                            });
+                        }
                     }
                     ui.add_space(10.0);
                     ui.label(section_label(i18n::text(
@@ -759,13 +868,18 @@ impl GsdvGuiApp {
                             index,
                             name: name.clone(),
                             agent_kind,
+                            agent_model: agent_model.clone(),
+                            agent_effort: agent_effort.clone(),
+                            agent_fast_mode,
                             session_id: session_id.clone(),
                         });
                     }
                     ui.add_space(14.0);
                     let can_create = workspace.is_some() && !name.trim().is_empty();
                     let enter_create = can_create
-                        && (response.has_focus() || session_response.has_focus())
+                        && (response.has_focus()
+                            || model_response.has_focus()
+                            || session_response.has_focus())
                         && ui.input(|input| input.key_pressed(egui::Key::Enter));
                     let mut create_requested = enter_create;
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -784,14 +898,34 @@ impl GsdvGuiApp {
                         }
                     });
                     if create_requested {
+                        let trimmed_agent_model = agent_model.trim();
+                        let agent_model = if trimmed_agent_model.is_empty() {
+                            None
+                        } else {
+                            Some(trimmed_agent_model.to_string())
+                        };
+                        let agent_effort = agent_kind
+                            .supports_effort(&agent_effort)
+                            .then(|| agent_effort.clone())
+                            .filter(|effort| !effort.is_empty());
                         let trimmed_session_id = session_id.trim();
                         let session_id = if trimmed_session_id.is_empty() {
                             None
                         } else {
                             Some(trimmed_session_id.to_string())
                         };
-                        add_subagent =
-                            Some((index, name.trim().to_string(), agent_kind, session_id));
+                        add_subagent = Some((
+                            index,
+                            name.trim().to_string(),
+                            agent_kind,
+                            agent_model,
+                            agent_effort,
+                            agent_kind
+                                .supports_fast_mode()
+                                .then_some(agent_fast_mode)
+                                .flatten(),
+                            session_id,
+                        ));
                         next_dialog = None;
                     }
                 }
@@ -889,6 +1023,57 @@ impl GsdvGuiApp {
                             next_dialog = None;
                         }
                     });
+                }
+                AppDialog::SetAgentModel {
+                    index,
+                    slot,
+                    mut model,
+                } => {
+                    let workspace = self.agent_workspace_for_slot(index, &slot);
+                    ui.label(RichText::new(i18n::text(self.app_language, "Agent model")).strong());
+                    if let Some(workspace) = workspace.as_ref() {
+                        ui.label(muted(&format!(
+                            "{} · {}",
+                            workspace.agent_kind.title(),
+                            workspace.name
+                        )));
+                    }
+                    ui.add_space(12.0);
+                    ui.label(section_label(i18n::text(
+                        self.app_language,
+                        "MODEL (OPTIONAL)",
+                    )));
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut model)
+                            .hint_text(i18n::text(
+                                self.app_language,
+                                "empty uses global default",
+                            ))
+                            .desired_width(f32::INFINITY),
+                    );
+                    if response.changed() {
+                        next_dialog = Some(AppDialog::SetAgentModel {
+                            index,
+                            slot: slot.clone(),
+                            model: model.clone(),
+                        });
+                    }
+                    ui.add_space(14.0);
+                    let enter_save = response.has_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    let mut save_requested = enter_save;
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if primary_action(ui, i18n::text(self.app_language, "Save")).clicked() {
+                            save_requested = true;
+                        }
+                        if secondary_action(ui, i18n::text(self.app_language, "Cancel")).clicked() {
+                            next_dialog = None;
+                        }
+                    });
+                    if save_requested {
+                        set_agent_model = Some((index, slot, model));
+                        next_dialog = None;
+                    }
                 }
                 AppDialog::ConfirmThemeSwitch { next_mode } => {
                     ui.horizontal(|ui| {
@@ -1198,14 +1383,35 @@ impl GsdvGuiApp {
         if let Some(index) = close_workspace {
             self.close_workspace(ctx, index);
         }
-        if let Some((index, name, agent_kind, session_id)) = add_subagent {
-            self.add_subagent(ctx, index, name, agent_kind, session_id);
+        if let Some((
+            index,
+            name,
+            agent_kind,
+            agent_model,
+            agent_effort,
+            agent_fast_mode,
+            session_id,
+        )) = add_subagent
+        {
+            self.add_subagent(
+                ctx,
+                index,
+                name,
+                agent_kind,
+                agent_model,
+                agent_effort,
+                agent_fast_mode,
+                session_id,
+            );
         }
         if let Some((index, resume)) = restart_agent {
             self.restart_agent(ctx, index, resume);
         }
         if let Some((index, next_kind)) = switch_agent {
             self.switch_agent_kind(ctx, index, next_kind);
+        }
+        if let Some((index, slot, model)) = set_agent_model {
+            self.set_agent_slot_model(ctx, index, slot, model);
         }
         if let Some(mode) = confirm_theme_switch {
             self.apply_theme_switch(ctx, mode);
@@ -1549,6 +1755,7 @@ fn app_dialog_title(dialog: &AppDialog, language: AppLanguage) -> &str {
         AppDialog::AddSubagent { .. } => "Add Subagent",
         AppDialog::RestartAgent { .. } => "Restart Agent",
         AppDialog::SwitchAgent { .. } => "Switch Agent",
+        AppDialog::SetAgentModel { .. } => "Agent model",
         AppDialog::ConfirmThemeSwitch { .. } => "Switch Theme",
         AppDialog::AgentExitedAbnormally { .. } => "Agent Exited",
         AppDialog::Help => "Help",

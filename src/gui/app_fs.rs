@@ -74,7 +74,8 @@ impl GsdvGuiApp {
             .is_some_and(|dirty_at| now.duration_since(dirty_at) >= FS_WATCH_DEBOUNCE)
         {
             let dirty_workspaces = std::mem::take(&mut self.fs_watch_dirty.outline_workspaces);
-            let workflow_dirty_workspaces = dirty_workspaces.clone();
+            let workflow_dirty_workspaces =
+                std::mem::take(&mut self.fs_watch_dirty.workflow_workspaces);
             self.fs_watch_dirty.outline_dirty_at = None;
             self.reload_clean_selected_documents(ctx, &dirty_workspaces);
             self.spawn_outline_refresh_tasks(ctx, dirty_workspaces);

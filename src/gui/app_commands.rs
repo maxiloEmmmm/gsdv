@@ -461,6 +461,22 @@ impl GsdvGuiApp {
                     next_kind,
                 }));
             }
+            AgentTabAction::SetModel { slot, model } => {
+                self.set_active_agent_slot(self.active_workspace, slot.clone());
+                self.set_active_app_dialog(Some(AppDialog::SetAgentModel {
+                    index: self.active_workspace,
+                    slot,
+                    model,
+                }));
+            }
+            AgentTabAction::SetEffort { slot, effort } => {
+                self.set_active_agent_slot(self.active_workspace, slot.clone());
+                self.set_agent_slot_effort(ctx, self.active_workspace, slot, effort);
+            }
+            AgentTabAction::SetFastMode { slot, fast_mode } => {
+                self.set_active_agent_slot(self.active_workspace, slot.clone());
+                self.set_agent_slot_fast_mode(ctx, self.active_workspace, slot, fast_mode);
+            }
             AgentTabAction::CopySessionId(session_id) => {
                 ctx.copy_text(session_id);
                 self.push_toast(

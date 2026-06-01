@@ -51,11 +51,16 @@ impl GsdvGuiApp {
         } else {
             i18n::text(language, "[memo]-Saved")
         };
+        let work_remaining = self.pomodoro_work_remaining_footer_state();
         ui.allocate_ui_with_layout(
             Vec2::new(ui.available_width(), ui.available_height()),
             Layout::left_to_right(Align::Center),
             |ui| {
                 ui.label(muted(mode));
+                if let Some((remaining_fraction, warning)) = work_remaining {
+                    separator_dot(ui);
+                    pomodoro_work_remaining_footer_bar(ui, remaining_fraction, warning);
+                }
                 if matches!(center_mode, CenterMode::Editor | CenterMode::Preview) {
                     separator_dot(ui);
                     if dirty {
@@ -79,6 +84,22 @@ impl GsdvGuiApp {
                 });
             },
         );
+    }
+
+    /// 返回 footer 工作剩余进度条的渲染状态。
+    fn pomodoro_work_remaining_footer_state(&self) -> Option<(f32, bool)> {
+        if !self.runtime_settings.pomodoro_enabled || self.pomodoro.phase != PomodoroPhase::Working
+        {
+            return None;
+        }
+        let total = pomodoro_work_duration(&self.runtime_settings);
+        let elapsed = Instant::now().duration_since(self.pomodoro.phase_started_at);
+        let remaining = total.saturating_sub(elapsed);
+        let remaining_fraction =
+            (remaining.as_secs_f32() / total.as_secs_f32().max(1.0)).clamp(0.0, 1.0);
+        let warning = pomodoro_work_progress(&self.runtime_settings, &self.pomodoro)
+            >= pomodoro_warning_progress(&self.runtime_settings);
+        Some((remaining_fraction, warning))
     }
 
     /// Draws the full-window bottom bar after panels and drawers.
@@ -437,6 +458,14 @@ impl GsdvGuiApp {
                 )
             })
             .unwrap_or_default();
+        let workflow_not_initialized = self
+            .current_workspace()
+            .and_then(|workspace| {
+                load_error
+                    .as_deref()
+                    .map(|error| workflow_root_missing_error(&workspace.path, error))
+            })
+            .unwrap_or(false);
         if tree.is_none() && !loading && load_error.is_none() {
             self.request_workflow_tree_refresh(ui.ctx(), self.active_workspace);
         }
@@ -444,15 +473,21 @@ impl GsdvGuiApp {
         let mut toggled_project_key = None;
         let mut context_dialog = None;
         let mut copy_path = None;
+        let mut init_workflow_root = false;
         ScrollArea::both()
             .max_height(tree_height)
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                if loading {
+                if loading && tree.is_none() {
                     ui.label(muted(i18n::text(self.app_language, "Loading workflow...")));
                 }
-                if let Some(error) = load_error {
+                if workflow_not_initialized {
+                    if primary_action(ui, i18n::text(self.app_language, "Create root.md")).clicked()
+                    {
+                        init_workflow_root = true;
+                    }
+                } else if let Some(error) = load_error {
                     ui.colored_label(theme::warning(), error);
                 }
                 let Some(tree) = tree else {
@@ -477,6 +512,8 @@ impl GsdvGuiApp {
             });
         if let Some(dialog) = context_dialog {
             self.set_active_app_dialog(Some(dialog));
+        } else if init_workflow_root {
+            self.request_workflow_mutation(ui.ctx(), WorkflowMutationRequest::InitRoot);
         } else if let Some(path) = copy_path {
             ui.ctx().copy_text(path);
             self.push_toast(
@@ -868,6 +905,9 @@ impl GsdvGuiApp {
                             ui,
                             AgentSlotId::Main,
                             workspace.agent_kind,
+                            workspace.agent_model.as_deref(),
+                            workspace.agent_effort.as_deref(),
+                            workspace.agent_fast_mode,
                             workspace.session_id.as_deref(),
                             &mut agent_tab_action,
                             self.app_language,
@@ -890,6 +930,9 @@ impl GsdvGuiApp {
                                 ui,
                                 slot.clone(),
                                 subagent.agent_kind,
+                                subagent.agent_model.as_deref(),
+                                subagent.agent_effort.as_deref(),
+                                subagent.agent_fast_mode,
                                 subagent.session_id.as_deref(),
                                 &mut agent_tab_action,
                                 self.app_language,
@@ -989,6 +1032,9 @@ impl GsdvGuiApp {
                 index: self.active_workspace,
                 name: String::new(),
                 agent_kind: workspace.agent_kind,
+                agent_model: String::new(),
+                agent_effort: String::new(),
+                agent_fast_mode: None,
                 session_id: String::new(),
             }));
         }
@@ -1509,6 +1555,32 @@ impl GsdvGuiApp {
             });
         });
     }
+}
+
+/// 绘制 footer 上的工作剩余进度条。
+fn pomodoro_work_remaining_footer_bar(ui: &mut Ui, remaining_fraction: f32, warning: bool) {
+    ui.ctx().request_repaint_after(Duration::from_secs(1));
+    let size = Vec2::new(132.0, 8.0);
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let radius = CornerRadius::same(3);
+    let fill_width = rect.width() * remaining_fraction.clamp(0.0, 1.0);
+    let fill_rect = Rect::from_min_size(rect.min, Vec2::new(fill_width, rect.height()));
+    let color = if warning {
+        theme::warning()
+    } else {
+        theme::success()
+    };
+    ui.painter()
+        .rect_filled(rect, radius, theme::surface_elevated());
+    if fill_width > 0.5 {
+        ui.painter().rect_filled(fill_rect, radius, color);
+    }
+    ui.painter().rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, theme::border()),
+        egui::StrokeKind::Inside,
+    );
 }
 
 /// 绘制 workflow 单个片段 editor。

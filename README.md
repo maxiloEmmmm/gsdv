@@ -2,6 +2,8 @@
 
 `gsdv` is a native desktop workspace for agent-centered development.
 
+![gsdv preview](assets/examples/ig_023f35ae25010aa7016a1cf1395a608191b1eecb31267809ca.png)
+
 It keeps the coding agent, project notes, implementation workflow, repository review, and workspace shell inside one focused app window. The goal is not to become a general IDE. The goal is to keep the operational context around an AI-assisted project visible, editable, and reviewable while work is happening.
 
 ```text
