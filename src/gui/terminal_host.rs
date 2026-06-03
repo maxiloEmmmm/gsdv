@@ -3482,12 +3482,14 @@ fn terminal_args(
     match kind {
         TerminalSurfaceKind::Agent => {
             let mut args = Vec::new();
+            let resume_cwd = terminal_working_directory(workspace, kind);
             args.extend(agent_launch.args_for(
                 workspace.agent_kind,
                 agent_session_id,
                 workspace.agent_model.as_deref(),
                 workspace.agent_effort.as_deref(),
                 workspace.agent_fast_mode,
+                Some(resume_cwd.as_path()),
             ));
             args
         }

@@ -218,10 +218,7 @@ impl GsdvGuiApp {
                             max_scroll_y,
                             scroll_y,
                             |app, ui, scroll_y| {
-                                let editor_font = editor_font_id(&effective_font_surface_settings(
-                                    &app.font_settings,
-                                    &app.font_settings.editor,
-                                ));
+                                let editor_font = effective_editor_font_id(&app.font_settings);
                                 let editor_interactive = !app.suppress_editor_input
                                     && app.center_surface_accepts_keyboard_input();
                                 let workspace_index = app.active_workspace;

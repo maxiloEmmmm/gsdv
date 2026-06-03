@@ -1,5 +1,5 @@
 use super::*;
-use crate::gui::data::OutlineRootKind;
+use crate::gui::data::{OutlineRootKind, SubagentViewData};
 use crate::reviewer::app::GuiReviewerRow;
 
 fn test_workspace() -> WorkspaceViewData {
@@ -40,6 +40,14 @@ fn key_input(key: egui::Key, modifiers: egui::Modifiers) -> egui::InputState {
         modifiers,
     });
     input
+}
+
+/// Returns a per-test temporary directory path.
+fn app_test_root(name: &str) -> PathBuf {
+    let root = std::env::temp_dir().join(format!("gsdv_app_test_{}_{}", name, std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    root
 }
 
 /// 构造 logical/physical key 不一致的快捷键输入。
@@ -193,7 +201,7 @@ fn terminal_font_size_for_kind_resolves_default_fonts() {
     );
 }
 
-/// 验证编辑内容字体会复用 Markdown editor 的继承后字号。
+/// 验证 Markdown editor 继承默认字体链时仍使用自己的字号。
 #[test]
 fn effective_editor_font_id_resolves_default_fonts() {
     let settings = FontSettings {
@@ -206,6 +214,7 @@ fn effective_editor_font_id_resolves_default_fonts() {
         },
         editor: data::FontSurfaceSettings {
             family: data::FontFamilySetting::Default,
+            size: 15.0,
             ..data::FontSurfaceSettings::default()
         },
         agent: data::FontSurfaceSettings::default(),
@@ -214,7 +223,7 @@ fn effective_editor_font_id_resolves_default_fonts() {
 
     let font = effective_editor_font_id(&settings);
 
-    assert_eq!(font.size, 18.0);
+    assert_eq!(font.size, 15.0);
     assert_eq!(font.family, theme::editor_system_font_family());
 }
 
@@ -1849,6 +1858,57 @@ fn workspace_terminal_drawer_can_open_over_reviewer_route() {
     app.workspace_terminal_drawers[0] = true;
 
     assert!(app.workspace_terminal_drawer_is_open());
+}
+
+/// Verifies generic Helix launch uses the main agent work-dir override.
+#[test]
+fn workspace_helix_workdir_uses_active_main_agent_work_dir() {
+    let root = app_test_root("main_agent_helix_workdir");
+    let agent_dir = root.join("agent-dir");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let mut workspace = test_workspace();
+    workspace.path = root;
+    workspace.agent_work_dir = Some(agent_dir.clone());
+    let app = GsdvGuiApp::from(InitialGuiData {
+        active_workspace: 0,
+        workspaces: vec![workspace],
+        rail_collapsed: false,
+    });
+
+    assert_eq!(app.active_agent_or_workspace_work_dir(), Some(agent_dir));
+}
+
+/// Verifies generic Helix launch follows the selected subagent work-dir.
+#[test]
+fn workspace_helix_workdir_uses_active_subagent_work_dir() {
+    let root = app_test_root("subagent_helix_workdir");
+    let main_dir = root.join("main-dir");
+    let subagent_dir = root.join("subagent-dir");
+    std::fs::create_dir_all(&main_dir).unwrap();
+    std::fs::create_dir_all(&subagent_dir).unwrap();
+    let mut workspace = test_workspace();
+    workspace.path = root;
+    workspace.agent_work_dir = Some(main_dir);
+    workspace.subagents.push(SubagentViewData {
+        id: "subagent-one".to_string(),
+        name: "one".to_string(),
+        agent_kind: AgentKind::Codex,
+        agent_model: None,
+        agent_effort: None,
+        agent_fast_mode: None,
+        agent_work_dir: Some(subagent_dir.clone()),
+        agent_id: "subagent-one-agent".to_string(),
+        session_id: None,
+        activity: WorkspaceActivity::Unknown,
+    });
+    let mut app = GsdvGuiApp::from(InitialGuiData {
+        active_workspace: 0,
+        workspaces: vec![workspace],
+        rail_collapsed: false,
+    });
+    app.set_active_agent_slot(0, AgentSlotId::Subagent("subagent-one".to_string()));
+
+    assert_eq!(app.active_agent_or_workspace_work_dir(), Some(subagent_dir));
 }
 
 /// Verifies covered center surfaces cannot keep consuming keyboard text.

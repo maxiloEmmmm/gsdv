@@ -122,7 +122,7 @@ const DARK: Palette = Palette {
     diff_hunk_bg: Color32::from_rgb(0x13, 0x24, 0x3A),
     diff_metadata_bg: Color32::from_rgb(0x12, 0x1B, 0x25),
     code_bg: Color32::from_rgb(0x13, 0x1D, 0x29),
-    markdown_text: Color32::from_rgb(0xB8, 0xC2, 0xCC),
+    markdown_text: Color32::from_rgb(0xA3, 0xAE, 0xBB),
     markdown_heading: Color32::from_rgb(0x93, 0xC5, 0xFD),
     markdown_link: Color32::from_rgb(0x67, 0xE8, 0xF9),
 };
