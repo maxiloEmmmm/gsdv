@@ -143,7 +143,7 @@ impl GsdvGuiApp {
             OutlineAction::CreateFolder(dir) => {
                 self.set_active_app_dialog(Some(AppDialog::CreateFolder {
                     dir,
-                    name: "new-folder".to_string(),
+                    name: String::new(),
                 }));
             }
             OutlineAction::AttachDirectory => {
