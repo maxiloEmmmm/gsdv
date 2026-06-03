@@ -1351,10 +1351,7 @@ impl GsdvGuiApp {
             );
             return;
         };
-        let editor_font = editor_font_id(&effective_font_surface_settings(
-            &self.font_settings,
-            &self.font_settings.editor,
-        ));
+        let editor_font = effective_editor_font_id(&self.font_settings);
         let interactive = self.center_surface_accepts_keyboard_input();
         let mut next_task_text = editor.task_text.clone();
         let save_error = editor.save_error.clone();
@@ -1420,10 +1417,7 @@ impl GsdvGuiApp {
             );
             return;
         };
-        let editor_font = editor_font_id(&effective_font_surface_settings(
-            &self.font_settings,
-            &self.font_settings.editor,
-        ));
+        let editor_font = effective_editor_font_id(&self.font_settings);
         let interactive = self.center_surface_accepts_keyboard_input();
         let mut next_step_text = editor.step_text.clone();
         let save_error = editor.save_error.clone();
@@ -1679,10 +1673,7 @@ impl GsdvGuiApp {
             ui.separator();
             ui.add_space(8.0);
 
-            let editor_font = editor_font_id(&effective_font_surface_settings(
-                &self.font_settings,
-                &self.font_settings.editor,
-            ));
+            let editor_font = effective_editor_font_id(&self.font_settings);
             let workspace_index = self.active_workspace;
             let Some(workspace) = self.current_workspace_mut() else {
                 empty_document_panel(

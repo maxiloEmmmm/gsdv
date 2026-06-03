@@ -373,7 +373,7 @@ impl GsdvGuiApp {
     }
 
     /// Returns the configured working directory override for one agent slot.
-    fn agent_slot_work_dir(&self, index: usize, slot: &AgentSlotId) -> Option<PathBuf> {
+    pub(super) fn agent_slot_work_dir(&self, index: usize, slot: &AgentSlotId) -> Option<PathBuf> {
         let workspace = self.workspaces.get(index)?;
         match slot {
             AgentSlotId::Main => workspace.agent_work_dir.clone(),

@@ -11,7 +11,11 @@ pub(super) fn editor_font_id(settings: &data::FontSurfaceSettings) -> egui::Font
 
 /// 返回继承默认配置后的 Markdown editor 字体。
 pub(super) fn effective_editor_font_id(settings: &FontSettings) -> egui::FontId {
-    editor_font_id(&effective_font_surface_settings(settings, &settings.editor))
+    let mut editor = effective_font_surface_settings(settings, &settings.editor);
+    if settings.editor.family == data::FontFamilySetting::Default {
+        editor.size = settings.editor.size;
+    }
+    editor_font_id(&editor)
 }
 
 pub(super) fn notification_font_id(settings: &data::FontSurfaceSettings) -> egui::FontId {

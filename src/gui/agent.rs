@@ -1,5 +1,6 @@
 use std::env;
 use std::fmt;
+use std::path::Path;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
@@ -206,7 +207,7 @@ impl AgentLaunchConfig {
 
     /// Builds CLI args for the configured default agent.
     pub fn args(&self, session_id: Option<&str>) -> Vec<String> {
-        self.args_for(self.kind, session_id, None, None, None)
+        self.args_for(self.kind, session_id, None, None, None, None)
     }
 
     /// Builds CLI args and applies per-agent overrides when present.
@@ -217,8 +218,12 @@ impl AgentLaunchConfig {
         model: Option<&str>,
         effort: Option<&str>,
         fast_mode: Option<bool>,
+        resume_cwd: Option<&Path>,
     ) -> Vec<String> {
         let mut args = kind.args(session_id);
+        if let Some(cwd) = normalized_codex_resume_cwd_arg(kind, session_id, resume_cwd) {
+            args.splice(0..0, ["-C".to_string(), cwd.display().to_string()]);
+        }
         if let Some(model) = normalized_agent_model_arg(model) {
             args.push("--model".to_string());
             args.push(model.to_string());
@@ -247,6 +252,18 @@ impl AgentLaunchConfig {
 /// Returns a non-empty model override suitable for CLI args.
 fn normalized_agent_model_arg(model: Option<&str>) -> Option<&str> {
     model.map(str::trim).filter(|value| !value.is_empty())
+}
+
+/// Returns Codex's explicit cwd arg for resume sessions.
+fn normalized_codex_resume_cwd_arg<'a>(
+    kind: AgentKind,
+    session_id: Option<&str>,
+    cwd: Option<&'a Path>,
+) -> Option<&'a Path> {
+    if kind != AgentKind::Codex || session_id.is_none_or(|value| value.trim().is_empty()) {
+        return None;
+    }
+    cwd.filter(|path| path.is_dir())
 }
 
 /// Returns a valid effort override suitable for the selected agent CLI.

@@ -607,27 +607,17 @@ impl GsdvGuiApp {
     }
 
     pub(super) fn open_checked_workspace_helix_drawer(&mut self, ctx: &egui::Context) {
-        let Some(workspace_path) = self
-            .current_workspace()
-            .map(|workspace| workspace.path.clone())
-        else {
+        let Some(workdir) = self.active_agent_or_workspace_work_dir() else {
             return;
         };
-        let helix_already_spawned = self
-            .terminal_hosts
-            .get(self.active_workspace)
-            .and_then(|hosts| hosts.helix.as_ref())
-            .is_some();
-        if !helix_already_spawned {
-            self.ensure_helix_host(
-                ctx,
-                HelixLaunchSpec {
-                    workdir: workspace_path,
-                    file: None,
-                    line: None,
-                },
-            );
-        }
+        self.ensure_helix_host(
+            ctx,
+            HelixLaunchSpec {
+                workdir,
+                file: None,
+                line: None,
+            },
+        );
         self.open_helix_drawer_for_active_workspace();
     }
 
@@ -686,5 +676,16 @@ impl GsdvGuiApp {
         } else {
             self.open_reviewer_helix_drawer(ctx);
         }
+    }
+
+    /// Returns the workdir used for opening the generic Helix drawer.
+    pub(super) fn active_agent_or_workspace_work_dir(&self) -> Option<PathBuf> {
+        let workspace_path = self
+            .current_workspace()
+            .map(|workspace| workspace.path.clone())?;
+        let slot = self.active_agent_slot();
+        self.agent_slot_work_dir(self.active_workspace, &slot)
+            .filter(|path| path.is_dir())
+            .or(Some(workspace_path))
     }
 }

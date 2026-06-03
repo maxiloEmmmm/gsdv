@@ -48,12 +48,40 @@ fn launch_config_parses_agent_and_coder_args() {
 }
 
 #[test]
-fn launch_args_do_not_include_work_dir_cli_arg() {
+fn codex_resume_args_include_explicit_cwd_before_subcommand() {
+    let root = std::env::temp_dir();
     let config = AgentLaunchConfig::default();
 
-    let codex_args = config.args_for(AgentKind::Codex, None, None, None, None);
-    let claude_args = config.args_for(AgentKind::Claude, None, None, None, None);
+    let args = config.args_for(
+        AgentKind::Codex,
+        Some("abc123"),
+        None,
+        None,
+        None,
+        Some(root.as_path()),
+    );
 
-    assert!(!codex_args.iter().any(|arg| arg == "--cd"));
+    assert_eq!(args[0], "-C");
+    assert_eq!(args[1], root.display().to_string());
+    assert_eq!(args[2], "resume");
+}
+
+#[test]
+fn claude_args_do_not_include_work_dir_cli_arg() {
+    let root = std::env::temp_dir();
+    let root_display = root.display().to_string();
+    let config = AgentLaunchConfig::default();
+
+    let claude_args = config.args_for(
+        AgentKind::Claude,
+        Some("abc123"),
+        None,
+        None,
+        None,
+        Some(root.as_path()),
+    );
+
+    assert!(!claude_args.iter().any(|arg| arg == "-C"));
     assert!(!claude_args.iter().any(|arg| arg == "--cd"));
+    assert!(!claude_args.iter().any(|arg| arg == &root_display));
 }
