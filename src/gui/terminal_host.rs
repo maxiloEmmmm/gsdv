@@ -1481,6 +1481,10 @@ fn copy_event_should_interrupt(modifiers: Modifiers, copy_event_can_interrupt: b
     if modifiers.shift || modifiers.alt {
         return false;
     }
+    // 触发条件：平台把 Ctrl/Cmd+C 上报为 Event::Copy。
+    // 不能把无修饰键 Copy 当中断：Ctrl+R 搜索中普通 c
+    // 可能被折成 Copy，误发 ETX 会直接取消搜索。
+    // 防止回归：普通输入 c 被显示成 ^C。
     modifiers.ctrl || modifiers.mac_cmd || modifiers.command
 }
 
