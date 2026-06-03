@@ -1,4 +1,4 @@
-use crate::gui::data::{self, AppLanguage, OutlineNode};
+use crate::gui::data::{self, AppLanguage, OutlineNode, OutlineRootKind};
 use crate::gui::i18n;
 use crate::gui::theme;
 use eframe::egui::{
@@ -17,6 +17,10 @@ pub(crate) enum OutlineAction {
     CreateMarkdown(PathBuf),
     /// 在目录下创建文件夹。
     CreateFolder(PathBuf),
+    /// 选择一个外部目录附加到当前 workspace outline。
+    AttachDirectory,
+    /// 从当前 workspace outline 移除一个附加目录记录。
+    RemoveAttachedDirectory(PathBuf),
     /// 重命名路径。
     Rename(PathBuf),
     /// 删除 Markdown 文件。
@@ -116,6 +120,7 @@ fn recent_markdown_outline_node(
             )
         }),
         OutlineNode::Root {
+            root_kind,
             key,
             label,
             children,
@@ -136,6 +141,7 @@ fn recent_markdown_outline_node(
                 .unwrap_or_default();
             Some((
                 OutlineNode::Root {
+                    root_kind: root_kind.clone(),
                     key: key.clone(),
                     label: label.clone(),
                     expanded: true,
@@ -208,6 +214,7 @@ pub(crate) fn render_outline_node(
 ) {
     match node {
         OutlineNode::Root {
+            root_kind,
             key,
             label,
             expanded,
@@ -225,7 +232,9 @@ pub(crate) fn render_outline_node(
                 if response.hovered() {
                     *tree_hovered = true;
                 }
-                response.context_menu(|ui| outline_dir_menu(ui, key, action, language));
+                response.context_menu(|ui| {
+                    outline_dir_menu(ui, key, Some(root_kind), action, language)
+                });
                 if *expanded {
                     for child in children {
                         render_outline_node(
@@ -261,7 +270,7 @@ pub(crate) fn render_outline_node(
                 if response.hovered() {
                     *tree_hovered = true;
                 }
-                response.context_menu(|ui| outline_dir_menu(ui, key, action, language));
+                response.context_menu(|ui| outline_dir_menu(ui, key, None, action, language));
                 if *expanded {
                     for child in children {
                         render_outline_node(
@@ -311,6 +320,7 @@ pub(crate) fn render_favorite_outline_node(
     }
     match node {
         OutlineNode::Root {
+            root_kind,
             key,
             label,
             expanded,
@@ -324,7 +334,9 @@ pub(crate) fn render_favorite_outline_node(
                 if response.hovered() {
                     *tree_hovered = true;
                 }
-                response.context_menu(|ui| outline_dir_menu(ui, key, action, language));
+                response.context_menu(|ui| {
+                    outline_dir_menu(ui, key, Some(root_kind), action, language)
+                });
                 if *expanded {
                     for child in children {
                         render_favorite_outline_node(
@@ -356,7 +368,7 @@ pub(crate) fn render_favorite_outline_node(
                 if response.hovered() {
                     *tree_hovered = true;
                 }
-                response.context_menu(|ui| outline_dir_menu(ui, key, action, language));
+                response.context_menu(|ui| outline_dir_menu(ui, key, None, action, language));
                 if *expanded {
                     for child in children {
                         render_favorite_outline_node(
@@ -602,9 +614,26 @@ fn paint_tree_chevron(ui: &Ui, center: egui::Pos2, expanded: bool, color: Color3
 fn outline_dir_menu(
     ui: &mut Ui,
     dir: &Path,
+    root_kind: Option<&OutlineRootKind>,
     action: &mut Option<OutlineAction>,
     language: AppLanguage,
 ) {
+    if ui
+        .button(i18n::text(language, "Attach directory"))
+        .clicked()
+    {
+        *action = Some(OutlineAction::AttachDirectory);
+        ui.close_menu();
+    }
+    if matches!(root_kind, Some(OutlineRootKind::Attached))
+        && ui
+            .button(i18n::text(language, "Remove attached directory"))
+            .clicked()
+    {
+        *action = Some(OutlineAction::RemoveAttachedDirectory(dir.to_path_buf()));
+        ui.close_menu();
+    }
+    ui.separator();
     if ui.button(i18n::text(language, "New markdown")).clicked() {
         *action = Some(OutlineAction::CreateMarkdown(dir.to_path_buf()));
         ui.close_menu();

@@ -477,6 +477,14 @@ impl GsdvGuiApp {
                 self.set_active_agent_slot(self.active_workspace, slot.clone());
                 self.set_agent_slot_fast_mode(ctx, self.active_workspace, slot, fast_mode);
             }
+            AgentTabAction::SetWorkDir { slot, work_dir } => {
+                self.set_active_agent_slot(self.active_workspace, slot.clone());
+                self.set_active_app_dialog(Some(AppDialog::SetAgentWorkDir {
+                    index: self.active_workspace,
+                    slot,
+                    work_dir,
+                }));
+            }
             AgentTabAction::CopySessionId(session_id) => {
                 ctx.copy_text(session_id);
                 self.push_toast(

@@ -235,7 +235,7 @@ fn home_codex_markdown_is_visible_by_default() {
         env::set_var("HOME", &root);
     }
 
-    let outline = build_outline(&workspace, None);
+    let outline = build_outline(&workspace, &[], None);
 
     assert!(outline_contains_file(&outline, &codex.join("AGENTS.md")));
 
@@ -245,6 +245,30 @@ fn home_codex_markdown_is_visible_by_default() {
             None => env::remove_var("HOME"),
         }
     }
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn attached_outline_directory_is_visible_beside_workspace_root() {
+    let root = test_root("attached_outline_visible");
+    let workspace = root.join("workspace");
+    let attached = root.join("notes");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&attached).unwrap();
+    fs::write(attached.join("README.md"), "# Notes\n").unwrap();
+
+    let outline = build_outline(&workspace, &[attached.clone()], None);
+
+    assert!(outline_contains_file(&outline, &attached.join("README.md")));
+    assert!(outline.iter().any(|node| matches!(
+        node,
+        OutlineNode::Root {
+            root_kind: OutlineRootKind::Attached,
+            key,
+            ..
+        } if key == &attached
+    )));
+
     let _ = fs::remove_dir_all(root);
 }
 
@@ -259,7 +283,7 @@ fn workspace_outline_preloads_children_for_later_expansion() {
     )
     .unwrap();
 
-    let outline = build_outline(&workspace, None);
+    let outline = build_outline(&workspace, &[], None);
     let skills = find_outline_dir(&outline, Path::new("repos/product/skills")).unwrap();
 
     match skills {
@@ -283,7 +307,7 @@ fn refresh_workspace_outline_preserves_collapsed_selected_parent() {
     fs::create_dir_all(workspace.join("src/nested")).unwrap();
     fs::write(workspace.join("src/nested/README.md"), "# Nested\n").unwrap();
     let selected = PathBuf::from("src/nested/README.md");
-    let mut outline = build_outline(&workspace, Some(&selected));
+    let mut outline = build_outline(&workspace, &[], Some(&selected));
     assert!(set_outline_dir_expanded(
         &mut outline,
         Path::new("src"),
@@ -309,7 +333,7 @@ fn refresh_workspace_outline_preserves_collapsed_root() {
     let workspace = root.join("workspace");
     fs::create_dir_all(workspace.join("src")).unwrap();
     fs::write(workspace.join("src/README.md"), "# Src\n").unwrap();
-    let mut outline = build_outline(&workspace, Some(Path::new("src/README.md")));
+    let mut outline = build_outline(&workspace, &[], Some(Path::new("src/README.md")));
     if let Some(OutlineNode::Root { expanded, .. }) = outline.get_mut(0) {
         *expanded = false;
     }
@@ -510,6 +534,10 @@ fn save_workspace_store_preserves_default_agent_kind() {
         name: "repo".to_string(),
         path: root.join("repo"),
         agent_kind: AgentKind::Codex,
+        agent_model: None,
+        agent_effort: None,
+        agent_fast_mode: None,
+        agent_work_dir: None,
         agent_id: "agent".to_string(),
         session_id: None,
         subagents: Vec::new(),
@@ -521,6 +549,7 @@ fn save_workspace_store_preserves_default_agent_kind() {
         selected_file: None,
         outline: Vec::new(),
         outline_favorites: BTreeSet::new(),
+        attached_outline_dirs: Vec::new(),
         recent_markdowns: Vec::new(),
         markdown_outline_collapsed: false,
         memo: String::new(),
@@ -830,6 +859,10 @@ fn save_workspace_store_persists_agent_kind() {
         name: "repo".to_string(),
         path: root.join("repo"),
         agent_kind: AgentKind::Claude,
+        agent_model: None,
+        agent_effort: None,
+        agent_fast_mode: None,
+        agent_work_dir: None,
         agent_id: "agent".to_string(),
         session_id: None,
         subagents: Vec::new(),
@@ -841,6 +874,7 @@ fn save_workspace_store_persists_agent_kind() {
         selected_file: None,
         outline: Vec::new(),
         outline_favorites: BTreeSet::new(),
+        attached_outline_dirs: Vec::new(),
         recent_markdowns: Vec::new(),
         markdown_outline_collapsed: true,
         memo: String::new(),
@@ -863,6 +897,31 @@ fn save_workspace_store_persists_agent_kind() {
 }
 
 #[test]
+fn save_workspace_store_persists_attached_outline_dirs() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let root = test_root("save_attached_outline_dirs");
+    let store = root.join("store.json");
+    let attached = root.join("notes");
+    fs::create_dir_all(&attached).unwrap();
+    unsafe {
+        env::set_var("GSDV_STORE_PATH", &store);
+    }
+    let mut workspace = test_workspace_data(root.join("repo"), None, Vec::new());
+    workspace.attached_outline_dirs = vec![attached.clone()];
+
+    save_workspace_store(&[workspace], 0, false);
+
+    let content = fs::read_to_string(&store).unwrap();
+    assert!(content.contains("attached_outline_dirs"));
+    assert!(content.contains(&attached.to_string_lossy().to_string()));
+
+    unsafe {
+        env::remove_var("GSDV_STORE_PATH");
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn save_workspace_store_persists_non_empty_session_id() {
     let _guard = ENV_LOCK.lock().unwrap();
     let root = test_root("save_session_id");
@@ -874,6 +933,10 @@ fn save_workspace_store_persists_non_empty_session_id() {
         name: "repo".to_string(),
         path: root.join("repo"),
         agent_kind: AgentKind::Codex,
+        agent_model: None,
+        agent_effort: None,
+        agent_fast_mode: None,
+        agent_work_dir: None,
         agent_id: "agent".to_string(),
         session_id: Some("session-abc".to_string()),
         subagents: Vec::new(),
@@ -885,6 +948,7 @@ fn save_workspace_store_persists_non_empty_session_id() {
         selected_file: None,
         outline: Vec::new(),
         outline_favorites: BTreeSet::new(),
+        attached_outline_dirs: Vec::new(),
         recent_markdowns: Vec::new(),
         markdown_outline_collapsed: false,
         memo: String::new(),
@@ -936,6 +1000,10 @@ fn refresh_workspace_agent_statuses_uses_latest_status_file_entry() {
         name: "repo".to_string(),
         path: workspace,
         agent_kind: AgentKind::Codex,
+        agent_model: None,
+        agent_effort: None,
+        agent_fast_mode: None,
+        agent_work_dir: None,
         agent_id: "agent".to_string(),
         session_id: None,
         subagents: Vec::new(),
@@ -947,6 +1015,7 @@ fn refresh_workspace_agent_statuses_uses_latest_status_file_entry() {
         selected_file: None,
         outline: Vec::new(),
         outline_favorites: BTreeSet::new(),
+        attached_outline_dirs: Vec::new(),
         recent_markdowns: Vec::new(),
         markdown_outline_collapsed: false,
         memo: String::new(),
@@ -1000,6 +1069,10 @@ fn refresh_workspace_agent_statuses_prefers_matching_agent_id() {
         name: "repo".to_string(),
         path: workspace,
         agent_kind: AgentKind::Codex,
+        agent_model: None,
+        agent_effort: None,
+        agent_fast_mode: None,
+        agent_work_dir: None,
         agent_id: "workspace-agent".to_string(),
         session_id: None,
         subagents: Vec::new(),
@@ -1011,6 +1084,7 @@ fn refresh_workspace_agent_statuses_prefers_matching_agent_id() {
         selected_file: None,
         outline: Vec::new(),
         outline_favorites: BTreeSet::new(),
+        attached_outline_dirs: Vec::new(),
         recent_markdowns: Vec::new(),
         markdown_outline_collapsed: false,
         memo: String::new(),
@@ -1067,6 +1141,10 @@ fn refresh_workspace_agent_statuses_reads_sessions_keyed_by_session_id() {
         name: "repo".to_string(),
         path: workspace,
         agent_kind: AgentKind::Codex,
+        agent_model: None,
+        agent_effort: None,
+        agent_fast_mode: None,
+        agent_work_dir: None,
         agent_id: "workspace-agent".to_string(),
         session_id: Some("old-session".to_string()),
         subagents: Vec::new(),
@@ -1078,6 +1156,7 @@ fn refresh_workspace_agent_statuses_reads_sessions_keyed_by_session_id() {
         selected_file: None,
         outline: Vec::new(),
         outline_favorites: BTreeSet::new(),
+        attached_outline_dirs: Vec::new(),
         recent_markdowns: Vec::new(),
         markdown_outline_collapsed: false,
         memo: String::new(),
@@ -1132,6 +1211,10 @@ fn refresh_workspace_agent_statuses_recovers_busy_aborted_turn() {
         name: "repo".to_string(),
         path: workspace,
         agent_kind: AgentKind::Codex,
+        agent_model: None,
+        agent_effort: None,
+        agent_fast_mode: None,
+        agent_work_dir: None,
         agent_id: "workspace-agent".to_string(),
         session_id: None,
         subagents: Vec::new(),
@@ -1143,6 +1226,7 @@ fn refresh_workspace_agent_statuses_recovers_busy_aborted_turn() {
         selected_file: None,
         outline: Vec::new(),
         outline_favorites: BTreeSet::new(),
+        attached_outline_dirs: Vec::new(),
         recent_markdowns: Vec::new(),
         markdown_outline_collapsed: false,
         memo: String::new(),
@@ -1197,6 +1281,10 @@ fn refresh_workspace_agent_statuses_keeps_busy_without_matching_abort() {
         name: "repo".to_string(),
         path: workspace,
         agent_kind: AgentKind::Codex,
+        agent_model: None,
+        agent_effort: None,
+        agent_fast_mode: None,
+        agent_work_dir: None,
         agent_id: "workspace-agent".to_string(),
         session_id: None,
         subagents: Vec::new(),
@@ -1208,6 +1296,7 @@ fn refresh_workspace_agent_statuses_keeps_busy_without_matching_abort() {
         selected_file: None,
         outline: Vec::new(),
         outline_favorites: BTreeSet::new(),
+        attached_outline_dirs: Vec::new(),
         recent_markdowns: Vec::new(),
         markdown_outline_collapsed: false,
         memo: String::new(),
@@ -1252,6 +1341,10 @@ fn refresh_workspace_agent_statuses_filters_other_agent_kinds() {
         name: "repo".to_string(),
         path: workspace,
         agent_kind: AgentKind::Codex,
+        agent_model: None,
+        agent_effort: None,
+        agent_fast_mode: None,
+        agent_work_dir: None,
         agent_id: "agent".to_string(),
         session_id: None,
         subagents: Vec::new(),
@@ -1263,6 +1356,7 @@ fn refresh_workspace_agent_statuses_filters_other_agent_kinds() {
         selected_file: None,
         outline: Vec::new(),
         outline_favorites: BTreeSet::new(),
+        attached_outline_dirs: Vec::new(),
         recent_markdowns: Vec::new(),
         markdown_outline_collapsed: false,
         memo: String::new(),
@@ -1404,6 +1498,10 @@ fn test_workspace_data(
         name: "workspace".to_string(),
         path,
         agent_kind: AgentKind::Codex,
+        agent_model: None,
+        agent_effort: None,
+        agent_fast_mode: None,
+        agent_work_dir: None,
         agent_id: "agent".to_string(),
         session_id: None,
         subagents: Vec::new(),
@@ -1415,6 +1513,7 @@ fn test_workspace_data(
         selected_file,
         outline,
         outline_favorites: BTreeSet::new(),
+        attached_outline_dirs: Vec::new(),
         recent_markdowns: Vec::new(),
         markdown_outline_collapsed: false,
         memo: String::new(),

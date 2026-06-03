@@ -50,13 +50,17 @@ Switching workspaces swaps the entire bundle. A terminal, agent session, selecte
 
 ### Run The Agent
 
-The agent surface embeds a real terminal backend and launches the selected coding agent from the workspace root. It supports resumable sessions, subagents, translated input drafts, quick replies, status hooks, and activity-aware UI state.
+The agent surface embeds a real terminal backend and launches the selected coding agent from the workspace root by default. It supports resumable sessions, subagents, translated input drafts, quick replies, status hooks, and activity-aware UI state.
+
+Each agent tab can carry its own optional launch settings, including model, effort, fast mode where supported, and work directory. Work directory overrides are agent-scoped and persisted with the workspace. They can be typed directly or filled from a folder picker, and an empty value falls back to the workspace root. The child process is launched in that directory instead of passing a directory flag through the agent CLI, so Codex and Claude use the same behavior.
 
 The agent surface is the workspace home. Other surfaces exist to feed context into it, inspect its results, or maintain the project plan around it.
 
 ### Maintain Project Knowledge
 
-The Markdown outline gives fast access to workspace documentation and supported home-root Markdown sources. The center surface can edit Markdown directly or render it as preview. Recent Markdown history and diff context help move information between notes and the agent without leaving the app.
+The Markdown outline gives fast access to workspace documentation, attached local directories, and supported home-root Markdown sources. The center surface can edit Markdown directly or render it as preview. Recent Markdown history and diff context help move information between notes and the agent without leaving the app.
+
+Outline directory menus can attach another local directory beside the workspace root, remove an attached directory without deleting it, create Markdown files, and create folders. New folder dialogs focus the name field immediately and accept Enter to create, keeping the file-management path keyboard friendly.
 
 ### Drive Work From `gsdv-spec`
 

@@ -306,6 +306,7 @@ impl GsdvGuiApp {
         agent_model: Option<String>,
         agent_effort: Option<String>,
         agent_fast_mode: Option<bool>,
+        agent_work_dir: Option<PathBuf>,
         session_id: Option<String>,
     ) {
         let Some(workspace) = self.workspaces.get_mut(index) else {
@@ -318,6 +319,7 @@ impl GsdvGuiApp {
             agent_model,
             agent_effort,
             agent_fast_mode,
+            agent_work_dir,
             session_id,
         );
         let slot = AgentSlotId::Subagent(subagent.id.clone());

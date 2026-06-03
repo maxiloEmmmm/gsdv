@@ -1040,6 +1040,7 @@ impl GsdvGuiApp {
                             workspace.agent_model.as_deref(),
                             workspace.agent_effort.as_deref(),
                             workspace.agent_fast_mode,
+                            workspace.agent_work_dir.as_deref(),
                             workspace.session_id.as_deref(),
                             &mut agent_tab_action,
                             self.app_language,
@@ -1065,6 +1066,7 @@ impl GsdvGuiApp {
                                 subagent.agent_model.as_deref(),
                                 subagent.agent_effort.as_deref(),
                                 subagent.agent_fast_mode,
+                                subagent.agent_work_dir.as_deref(),
                                 subagent.session_id.as_deref(),
                                 &mut agent_tab_action,
                                 self.app_language,
@@ -1167,6 +1169,7 @@ impl GsdvGuiApp {
                 agent_model: String::new(),
                 agent_effort: String::new(),
                 agent_fast_mode: None,
+                agent_work_dir: String::new(),
                 session_id: String::new(),
             }));
         }

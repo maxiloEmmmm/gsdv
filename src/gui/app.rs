@@ -2001,6 +2001,7 @@ enum AppDialog {
         agent_model: String,
         agent_effort: String,
         agent_fast_mode: Option<bool>,
+        agent_work_dir: String,
         session_id: String,
     },
     RestartAgent {
@@ -2014,6 +2015,11 @@ enum AppDialog {
         index: usize,
         slot: AgentSlotId,
         model: String,
+    },
+    SetAgentWorkDir {
+        index: usize,
+        slot: AgentSlotId,
+        work_dir: String,
     },
     ConfirmThemeSwitch {
         next_mode: theme::ThemeMode,
@@ -2086,6 +2092,10 @@ enum AgentTabAction {
     SetFastMode {
         slot: AgentSlotId,
         fast_mode: Option<bool>,
+    },
+    SetWorkDir {
+        slot: AgentSlotId,
+        work_dir: String,
     },
     CopySessionId(String),
     SetMarkdownOutlineCollapsed(bool),

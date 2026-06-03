@@ -584,6 +584,7 @@ impl GuiTerminalHost {
         let shell = terminal_command(workspace, kind);
         let args = terminal_args(workspace, kind, id, agent_launch, agent_session_id);
         let env = terminal_env(workspace, kind, network_settings);
+        let working_directory = terminal_working_directory(workspace, kind);
         let launch_command = command_display(&shell, &args);
         let initial_history = (kind == TerminalSurfaceKind::Workspace)
             .then(|| data::load_workspace_terminal_history(&workspace.path));
@@ -599,7 +600,7 @@ impl GuiTerminalHost {
             BackendSettings {
                 shell,
                 args,
-                working_directory: Some(workspace.path.clone()),
+                working_directory: Some(working_directory),
                 repaint_interval,
                 initial_history,
             },
@@ -3493,6 +3494,18 @@ fn terminal_args(
         TerminalSurfaceKind::Workspace => Vec::new(),
         TerminalSurfaceKind::Helix => Vec::new(),
     }
+}
+
+fn terminal_working_directory(workspace: &WorkspaceViewData, kind: TerminalSurfaceKind) -> PathBuf {
+    if kind == TerminalSurfaceKind::Agent
+        && let Some(work_dir) = workspace
+            .agent_work_dir
+            .as_ref()
+            .filter(|path| path.is_dir())
+    {
+        return work_dir.clone();
+    }
+    workspace.path.clone()
 }
 
 fn terminal_env(
