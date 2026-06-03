@@ -180,6 +180,14 @@ fn command_copy_event_is_forwarded_as_interrupt_without_selection() {
     );
 }
 
+/// Verifies that bare platform copy events are not treated as Ctrl+C.
+#[test]
+fn bare_copy_event_is_not_forwarded_as_interrupt_without_selection() {
+    let events = vec![Event::Copy];
+
+    assert!(agent_input_bytes_from_events(&events, Modifiers::default(), true).is_empty());
+}
+
 /// Verifies that platform copy events preserve terminal selection copy.
 #[test]
 fn command_copy_event_is_not_forwarded_as_interrupt_with_selection() {
