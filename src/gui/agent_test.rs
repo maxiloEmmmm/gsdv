@@ -46,3 +46,14 @@ fn launch_config_parses_agent_and_coder_args() {
     assert!(config.kind_explicit);
     assert_eq!(config.coder_args, vec!["--verbose", "--model"]);
 }
+
+#[test]
+fn launch_args_do_not_include_work_dir_cli_arg() {
+    let config = AgentLaunchConfig::default();
+
+    let codex_args = config.args_for(AgentKind::Codex, None, None, None, None);
+    let claude_args = config.args_for(AgentKind::Claude, None, None, None, None);
+
+    assert!(!codex_args.iter().any(|arg| arg == "--cd"));
+    assert!(!claude_args.iter().any(|arg| arg == "--cd"));
+}

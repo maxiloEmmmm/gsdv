@@ -91,6 +91,8 @@ pub struct WorkspaceViewData {
     pub agent_effort: Option<String>,
     /// Per-workspace Codex fast-mode override.
     pub agent_fast_mode: Option<bool>,
+    /// Per-workspace main agent working directory override.
+    pub agent_work_dir: Option<PathBuf>,
     pub agent_id: String,
     pub session_id: Option<String>,
     pub activity: WorkspaceActivity,
@@ -104,6 +106,8 @@ pub struct WorkspaceViewData {
     pub outline: Vec<OutlineNode>,
     /// Workspace-local Markdown favorites shown by the outline filter.
     pub outline_favorites: BTreeSet<PathBuf>,
+    /// Extra absolute directories displayed beside workspace and home roots.
+    pub attached_outline_dirs: Vec<PathBuf>,
     /// 当前 workspace 内按 app 访问时间排序的 Markdown 文件。
     pub recent_markdowns: Vec<RecentMarkdownEntry>,
     /// Whether the Markdown-local outline is hidden for this workspace.
@@ -140,6 +144,9 @@ pub struct SubagentViewData {
     /// Per-subagent Codex fast-mode override passed as service_tier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_fast_mode: Option<bool>,
+    /// Per-subagent working directory override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_work_dir: Option<PathBuf>,
     /// Stable hook id used to route status/session events.
     pub agent_id: String,
     /// Runtime session id used for resume.
@@ -166,8 +173,19 @@ struct AgentStatusIndexes {
 }
 
 #[derive(Debug, Clone)]
+pub enum OutlineRootKind {
+    /// Current workspace root.
+    Workspace,
+    /// Built-in home config root.
+    Home,
+    /// User-attached external directory.
+    Attached,
+}
+
+#[derive(Debug, Clone)]
 pub enum OutlineNode {
     Root {
+        root_kind: OutlineRootKind,
         key: PathBuf,
         label: String,
         expanded: bool,
@@ -497,6 +515,8 @@ struct StoredWorkspace {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     agent_fast_mode: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_work_dir: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     agent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     session_id: Option<String>,
@@ -512,6 +532,8 @@ struct StoredWorkspace {
     reviewer_mode: Option<ReviewerMode>,
     #[serde(default = "default_true")]
     markdown_outline_collapsed: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    attached_outline_dirs: Vec<PathBuf>,
 }
 
 /// 读取历史 center mode，适用于旧 store 里还残留 recent 的场景。
@@ -990,8 +1012,13 @@ pub fn refresh_workspace_outline(workspace: &mut WorkspaceViewData) {
     let selected = workspace.selected_file.clone();
     let expanded = expanded_outline_dirs(&workspace.outline);
     let collapsed = collapsed_outline_dirs(&workspace.outline);
-    workspace.outline =
-        build_outline_with_state(&workspace.path, selected.as_deref(), expanded, collapsed);
+    workspace.outline = build_outline_with_state(
+        &workspace.path,
+        &workspace.attached_outline_dirs,
+        selected.as_deref(),
+        expanded,
+        collapsed,
+    );
     if workspace.selected_file.is_none() {
         workspace.selected_file = first_markdown_file(&workspace.outline);
     }
@@ -1079,12 +1106,14 @@ pub fn new_workspace(path: PathBuf, agent_kind: AgentKind) -> WorkspaceViewData 
             agent_model: None,
             agent_effort: None,
             agent_fast_mode: None,
+            agent_work_dir: None,
             agent_id: None,
             session_id: None,
             selected_file: None,
             center_mode: None,
             reviewer_mode: None,
             markdown_outline_collapsed: true,
+            attached_outline_dirs: Vec::new(),
         },
         &statuses.by_session,
         &statuses.by_id,
@@ -1123,6 +1152,7 @@ pub fn save_workspace_store(workspaces: &[WorkspaceViewData], active: usize, rai
                     workspace.agent_kind,
                     workspace.agent_fast_mode,
                 ),
+                agent_work_dir: normalize_stored_agent_work_dir(workspace.agent_work_dir.clone()),
                 agent_id: Some(workspace.agent_id.clone()),
                 session_id: workspace.session_id.clone(),
                 selected_file: workspace
@@ -1132,6 +1162,7 @@ pub fn save_workspace_store(workspaces: &[WorkspaceViewData], active: usize, rai
                 center_mode: Some(workspace.center_mode),
                 reviewer_mode: Some(workspace.reviewer_mode),
                 markdown_outline_collapsed: workspace.markdown_outline_collapsed,
+                attached_outline_dirs: workspace.attached_outline_dirs.clone(),
             })
             .collect(),
     };
@@ -1180,6 +1211,12 @@ fn normalize_stored_agent_fast_mode(kind: AgentKind, fast_mode: Option<bool>) ->
     kind.supports_fast_mode().then_some(fast_mode).flatten()
 }
 
+pub fn normalize_stored_agent_work_dir(work_dir: Option<PathBuf>) -> Option<PathBuf> {
+    work_dir
+        .map(|path| normalize_path(&path))
+        .filter(|path| path.is_dir())
+}
+
 /// 保存 workspace 级 outline 收藏。
 pub fn save_workspace_outline_favorites(workspace_path: &Path, favorites: &BTreeSet<PathBuf>) {
     let Some(path) = workspace_outline_favorites_path(workspace_path) else {
@@ -1216,6 +1253,7 @@ pub fn new_subagent(
     agent_model: Option<String>,
     agent_effort: Option<String>,
     agent_fast_mode: Option<bool>,
+    agent_work_dir: Option<PathBuf>,
     session_id: Option<String>,
 ) -> SubagentViewData {
     let id = format!("sub-{}-{:x}", now_ms(), stable_state_key(Path::new(&name)));
@@ -1227,6 +1265,7 @@ pub fn new_subagent(
         agent_model,
         agent_effort,
         agent_fast_mode: normalize_stored_agent_fast_mode(agent_kind, agent_fast_mode),
+        agent_work_dir: normalize_stored_agent_work_dir(agent_work_dir),
         session_id,
         activity: WorkspaceActivity::Unknown,
     }
@@ -1261,6 +1300,7 @@ fn load_workspace_subagents(
                 normalize_stored_agent_effort(subagent.agent_kind, subagent.agent_effort);
             subagent.agent_fast_mode =
                 normalize_stored_agent_fast_mode(subagent.agent_kind, subagent.agent_fast_mode);
+            subagent.agent_work_dir = normalize_stored_agent_work_dir(subagent.agent_work_dir);
             subagent.activity = WorkspaceActivity::Unknown;
             subagent
         })
@@ -1304,9 +1344,14 @@ fn build_workspace(
         .as_deref()
         .map(PathBuf::from)
         .filter(|selected| selected_file_exists(&path, selected));
-    let mut outline = build_outline(&path, stored_selected_file.as_deref());
+    let attached_outline_dirs = normalize_attached_outline_dirs(stored.attached_outline_dirs);
+    let mut outline = build_outline(
+        &path,
+        &attached_outline_dirs,
+        stored_selected_file.as_deref(),
+    );
     let selected_file = stored_selected_file.or_else(|| first_markdown_file(&outline));
-    outline = build_outline(&path, selected_file.as_deref());
+    outline = build_outline(&path, &attached_outline_dirs, selected_file.as_deref());
     let status_by_id = statuses_by_id
         .get(&agent_kind)
         .and_then(|statuses| statuses.get(&agent_id));
@@ -1336,6 +1381,7 @@ fn build_workspace(
         agent_model: normalize_stored_agent_model(stored.agent_model),
         agent_effort: normalize_stored_agent_effort(agent_kind, stored.agent_effort),
         agent_fast_mode: normalize_stored_agent_fast_mode(agent_kind, stored.agent_fast_mode),
+        agent_work_dir: normalize_stored_agent_work_dir(stored.agent_work_dir),
         agent_id,
         session_id,
         activity,
@@ -1347,6 +1393,7 @@ fn build_workspace(
         selected_file,
         outline,
         outline_favorites,
+        attached_outline_dirs,
         recent_markdowns,
         markdown_outline_collapsed: stored.markdown_outline_collapsed,
         memo,
@@ -1365,11 +1412,16 @@ fn selected_file_exists(project_root: &Path, selected: &Path) -> bool {
     project_root.join(selected).is_file()
 }
 
-fn build_outline(project_root: &Path, selected_file: Option<&Path>) -> Vec<OutlineNode> {
+fn build_outline(
+    project_root: &Path,
+    attached_outline_dirs: &[PathBuf],
+    selected_file: Option<&Path>,
+) -> Vec<OutlineNode> {
     build_outline_with_state(
         project_root,
+        attached_outline_dirs,
         selected_file,
-        default_expanded_dirs(project_root),
+        default_expanded_dirs(project_root, attached_outline_dirs),
         HashSet::new(),
     )
 }
@@ -1377,6 +1429,7 @@ fn build_outline(project_root: &Path, selected_file: Option<&Path>) -> Vec<Outli
 /// Builds an outline while preserving explicit user tree state.
 fn build_outline_with_state(
     project_root: &Path,
+    attached_outline_dirs: &[PathBuf],
     selected_file: Option<&Path>,
     expanded: HashSet<PathBuf>,
     collapsed: HashSet<PathBuf>,
@@ -1391,6 +1444,7 @@ fn build_outline_with_state(
         selected_file,
     );
     nodes.push(OutlineNode::Root {
+        root_kind: OutlineRootKind::Workspace,
         key: PathBuf::new(),
         label: format!("{} (Workspace Root)", workspace_name(project_root)),
         expanded: !collapsed.contains(Path::new("")),
@@ -1402,12 +1456,32 @@ fn build_outline_with_state(
         if !home_children.is_empty() {
             let home_key = PathBuf::from(HOME_OUTLINE_ROOT);
             nodes.push(OutlineNode::Root {
+                root_kind: OutlineRootKind::Home,
                 expanded: !collapsed.contains(&home_key),
                 key: home_key,
                 label: "~ (Home Root)".to_string(),
                 children: home_children,
             });
         }
+    }
+
+    for dir in attached_outline_dirs {
+        if !dir.is_dir() {
+            continue;
+        }
+        let root_expanded = !collapsed.contains(dir);
+        let children = if root_expanded {
+            build_attached_dir_children(dir, &expanded, &collapsed, selected_file)
+        } else {
+            Vec::new()
+        };
+        nodes.push(OutlineNode::Root {
+            root_kind: OutlineRootKind::Attached,
+            expanded: root_expanded,
+            key: dir.clone(),
+            label: format!("{} (Attached Root)", attached_outline_label(dir)),
+            children,
+        });
     }
 
     nodes
@@ -1654,6 +1728,54 @@ fn build_home_dir_children(
     nodes
 }
 
+fn build_attached_dir_children(
+    current_dir: &Path,
+    expanded: &HashSet<PathBuf>,
+    collapsed: &HashSet<PathBuf>,
+    selected_file: Option<&Path>,
+) -> Vec<OutlineNode> {
+    let Ok(entries) = fs::read_dir(current_dir) else {
+        return Vec::new();
+    };
+    let mut entries = entries.filter_map(|entry| entry.ok()).collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.file_name());
+
+    let mut nodes = Vec::new();
+    for entry in entries {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            if should_skip_outline_dir(current_dir, &name) {
+                continue;
+            }
+            let is_expanded = (expanded.contains(&path)
+                || outline_attached_dir_contains_selected(&path, selected_file))
+                && !collapsed.contains(&path);
+            let children = if is_expanded {
+                build_attached_dir_children(&path, expanded, collapsed, selected_file)
+            } else {
+                Vec::new()
+            };
+            nodes.push(OutlineNode::Dir {
+                key: path.clone(),
+                label: name,
+                expanded: is_expanded,
+                children,
+            });
+        } else if file_type.is_file()
+            && path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+        {
+            nodes.push(OutlineNode::File { path, label: name });
+        }
+    }
+    nodes
+}
+
 fn first_markdown_file(nodes: &[OutlineNode]) -> Option<PathBuf> {
     for node in nodes {
         match node {
@@ -1668,7 +1790,7 @@ fn first_markdown_file(nodes: &[OutlineNode]) -> Option<PathBuf> {
     None
 }
 
-fn default_expanded_dirs(root: &Path) -> HashSet<PathBuf> {
+fn default_expanded_dirs(root: &Path, attached_outline_dirs: &[PathBuf]) -> HashSet<PathBuf> {
     let mut expanded = HashSet::new();
     expanded.insert(PathBuf::new());
     if let Ok(entries) = fs::read_dir(root) {
@@ -1688,6 +1810,7 @@ fn default_expanded_dirs(root: &Path) -> HashSet<PathBuf> {
     for dir_name in HOME_OUTLINE_DIRS {
         expanded.insert(PathBuf::from(HOME_OUTLINE_ROOT).join(dir_name));
     }
+    expanded.extend(attached_outline_dirs.iter().cloned());
     expanded
 }
 
@@ -1704,6 +1827,37 @@ fn outline_workspace_dir_contains_selected(
         .strip_prefix(project_root)
         .unwrap_or(selected_file);
     selected_relative.starts_with(dir_relative)
+}
+
+fn outline_attached_dir_contains_selected(dir: &Path, selected_file: Option<&Path>) -> bool {
+    selected_file.is_some_and(|selected| selected.is_absolute() && selected.starts_with(dir))
+}
+
+fn attached_outline_label(dir: &Path) -> String {
+    dir.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| dir.to_string_lossy().to_string())
+}
+
+pub fn normalize_attached_outline_dir(path: PathBuf) -> Option<PathBuf> {
+    let path = normalize_path(&path);
+    path.is_dir().then_some(path)
+}
+
+fn normalize_attached_outline_dirs(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = BTreeSet::new();
+    let mut normalized = Vec::new();
+    for path in paths {
+        let Some(path) = normalize_attached_outline_dir(path) else {
+            continue;
+        };
+        if seen.insert(path.clone()) {
+            normalized.push(path);
+        }
+    }
+    normalized
 }
 
 fn should_skip_outline_dir(parent: &Path, dir_name: &str) -> bool {

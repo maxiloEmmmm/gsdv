@@ -146,6 +146,12 @@ impl GsdvGuiApp {
                     name: "new-folder".to_string(),
                 }));
             }
+            OutlineAction::AttachDirectory => {
+                self.attach_outline_directory_from_dialog(ctx);
+            }
+            OutlineAction::RemoveAttachedDirectory(path) => {
+                self.remove_attached_outline_directory(ctx, path);
+            }
             OutlineAction::Rename(path) => {
                 let name = path
                     .file_name()
@@ -181,6 +187,69 @@ impl GsdvGuiApp {
                 self.spawn_outline_refresh_tasks(ctx, BTreeSet::from([self.active_workspace]));
             }
         }
+    }
+
+    /// 选择一个外部目录并挂到当前 workspace outline。
+    pub(super) fn attach_outline_directory_from_dialog(&mut self, ctx: &egui::Context) {
+        let start_dir = self
+            .current_workspace()
+            .map(|workspace| workspace.path.clone())
+            .or_else(|| std::env::current_dir().ok());
+        let mut dialog = rfd::FileDialog::new().set_title("Attach Directory");
+        if let Some(start_dir) = start_dir {
+            dialog = dialog.set_directory(start_dir);
+        }
+        let Some(path) = dialog.pick_folder() else {
+            return;
+        };
+        let Some(path) = data::normalize_attached_outline_dir(path) else {
+            self.push_toast(
+                i18n::text(self.app_language, "Directory not found"),
+                theme::warning(),
+            );
+            return;
+        };
+        let Some(workspace) = self.current_workspace_mut() else {
+            return;
+        };
+        if workspace.attached_outline_dirs.contains(&path) {
+            self.push_toast(
+                i18n::text(self.app_language, "Directory already attached"),
+                theme::warning(),
+            );
+            return;
+        }
+        workspace.attached_outline_dirs.push(path);
+        self.mark_workspace_store_dirty();
+        self.persist_workspaces();
+        self.spawn_outline_refresh_tasks(ctx, BTreeSet::from([self.active_workspace]));
+    }
+
+    /// 从当前 workspace outline 移除附加目录记录，不删除目录本身。
+    pub(super) fn remove_attached_outline_directory(&mut self, ctx: &egui::Context, path: PathBuf) {
+        let Some(workspace) = self.current_workspace_mut() else {
+            return;
+        };
+        let Some(path) = data::normalize_attached_outline_dir(path) else {
+            return;
+        };
+        let before = workspace.attached_outline_dirs.len();
+        workspace
+            .attached_outline_dirs
+            .retain(|attached| attached != &path);
+        if workspace.attached_outline_dirs.len() == before {
+            return;
+        }
+        if workspace
+            .selected_file
+            .as_ref()
+            .is_some_and(|selected| selected.starts_with(&path))
+        {
+            workspace.selected_file = None;
+        }
+        self.mark_workspace_store_dirty();
+        self.persist_workspaces();
+        self.spawn_outline_refresh_tasks(ctx, BTreeSet::from([self.active_workspace]));
     }
 
     /// 切换当前 workspace 的 outline 收藏过滤状态。

@@ -132,6 +132,7 @@ pub(super) fn agent_slot_context_menu(
     current_agent_model: Option<&str>,
     current_agent_effort: Option<&str>,
     current_agent_fast_mode: Option<bool>,
+    current_agent_work_dir: Option<&Path>,
     current_session_id: Option<&str>,
     action: &mut Option<AgentTabAction>,
     language: AppLanguage,
@@ -155,6 +156,15 @@ pub(super) fn agent_slot_context_menu(
         *action = Some(AgentTabAction::SetModel {
             slot: slot.clone(),
             model: current_agent_model.unwrap_or_default().to_string(),
+        });
+        ui.close_menu();
+    }
+    if ui.button(i18n::text(language, "Set work-dir")).clicked() {
+        *action = Some(AgentTabAction::SetWorkDir {
+            slot: slot.clone(),
+            work_dir: current_agent_work_dir
+                .map(|path| path.to_string_lossy().to_string())
+                .unwrap_or_default(),
         });
         ui.close_menu();
     }

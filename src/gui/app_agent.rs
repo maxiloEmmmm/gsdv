@@ -210,6 +210,59 @@ impl GsdvGuiApp {
         );
     }
 
+    /// Updates one agent slot working directory override and restarts that slot.
+    pub(super) fn set_agent_slot_work_dir(
+        &mut self,
+        ctx: &egui::Context,
+        index: usize,
+        slot: AgentSlotId,
+        work_dir: String,
+    ) {
+        let trimmed_work_dir = work_dir.trim();
+        let next_work_dir = normalized_agent_work_dir_value(&work_dir);
+        if !trimmed_work_dir.is_empty() && next_work_dir.is_none() {
+            self.push_toast(
+                i18n::text(self.app_language, "Directory not found"),
+                theme::warning(),
+            );
+            return;
+        }
+        if self.agent_slot_work_dir(index, &slot) == next_work_dir {
+            return;
+        }
+        let Some(workspace) = self.workspaces.get_mut(index) else {
+            return;
+        };
+        match &slot {
+            AgentSlotId::Main => {
+                workspace.agent_work_dir = next_work_dir.clone();
+            }
+            AgentSlotId::Subagent(id) => {
+                let Some(subagent) = workspace
+                    .subagents
+                    .iter_mut()
+                    .find(|subagent| &subagent.id == id)
+                else {
+                    return;
+                };
+                subagent.agent_work_dir = next_work_dir.clone();
+            }
+        }
+        self.persist_workspaces();
+        if let Some(hosts) = self.terminal_hosts.get_mut(index) {
+            hosts.agents.remove(&slot);
+        }
+        self.spawn_terminal_host_for_workspace(ctx, index, TerminalSurfaceKind::Agent);
+        self.push_toast(
+            if next_work_dir.is_some() {
+                i18n::text(self.app_language, "Agent work-dir set")
+            } else {
+                i18n::text(self.app_language, "Agent work-dir override cleared")
+            },
+            theme::success(),
+        );
+    }
+
     /// Updates one agent slot effort override without clearing its session id.
     pub(super) fn set_agent_slot_effort(
         &mut self,
@@ -316,6 +369,19 @@ impl GsdvGuiApp {
                 .iter()
                 .find(|subagent| &subagent.id == id)
                 .and_then(|subagent| subagent.agent_model.clone()),
+        }
+    }
+
+    /// Returns the configured working directory override for one agent slot.
+    fn agent_slot_work_dir(&self, index: usize, slot: &AgentSlotId) -> Option<PathBuf> {
+        let workspace = self.workspaces.get(index)?;
+        match slot {
+            AgentSlotId::Main => workspace.agent_work_dir.clone(),
+            AgentSlotId::Subagent(id) => workspace
+                .subagents
+                .iter()
+                .find(|subagent| &subagent.id == id)
+                .and_then(|subagent| subagent.agent_work_dir.clone()),
         }
     }
 
@@ -583,6 +649,15 @@ impl GsdvGuiApp {
 fn normalized_agent_model_value(model: &str) -> Option<String> {
     let model = model.trim();
     (!model.is_empty()).then(|| model.to_string())
+}
+
+/// Normalizes a working directory override entered by the user.
+fn normalized_agent_work_dir_value(work_dir: &str) -> Option<PathBuf> {
+    let work_dir = work_dir.trim();
+    if work_dir.is_empty() {
+        return None;
+    }
+    data::normalize_stored_agent_work_dir(Some(PathBuf::from(work_dir)))
 }
 
 /// Normalizes an effort override for one agent kind.
