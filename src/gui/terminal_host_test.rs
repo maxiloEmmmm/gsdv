@@ -200,6 +200,58 @@ fn command_copy_event_is_not_forwarded_as_interrupt_with_selection() {
     assert!(agent_input_bytes_from_events(&events, modifiers, false).is_empty());
 }
 
+/// 验证带 command alias 的 Ctrl+C 不会被当作 terminal 选区复制。
+#[test]
+fn control_c_copy_event_with_selection_keeps_interrupt_semantics() {
+    let events = vec![Event::Copy];
+    let modifiers = Modifiers {
+        ctrl: true,
+        command: true,
+        ..Modifiers::default()
+    };
+
+    assert!(!terminal_selection_copy_requested_from_events(
+        &events, modifiers
+    ));
+    assert_eq!(
+        agent_input_bytes_from_events(&events, modifiers, true),
+        b"\x03"
+    );
+}
+
+/// 验证 Ctrl+Shift+C 仍然作为明确的 terminal 选区复制手势。
+#[test]
+fn control_shift_c_copy_event_with_selection_keeps_copy_semantics() {
+    let events = vec![Event::Copy];
+    let modifiers = Modifiers {
+        ctrl: true,
+        shift: true,
+        command: true,
+        ..Modifiers::default()
+    };
+
+    assert!(terminal_selection_copy_requested_from_events(
+        &events, modifiers
+    ));
+    assert!(agent_input_bytes_from_events(&events, modifiers, false).is_empty());
+}
+
+/// 验证 macOS Cmd+C 仍然可以复制 terminal 选区。
+#[test]
+fn mac_command_c_copy_event_with_selection_keeps_copy_semantics() {
+    let events = vec![Event::Copy];
+    let modifiers = Modifiers {
+        mac_cmd: true,
+        command: true,
+        ..Modifiers::default()
+    };
+
+    assert!(terminal_selection_copy_requested_from_events(
+        &events, modifiers
+    ));
+    assert!(agent_input_bytes_from_events(&events, modifiers, false).is_empty());
+}
+
 /// Verifies that Ctrl+C survives egui's command alias on Linux and Windows.
 #[test]
 fn control_c_copy_event_with_command_alias_is_forwarded_as_interrupt() {
