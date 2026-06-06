@@ -300,6 +300,9 @@ pub(super) fn read_base_route_command_for_input(
     if command_or_alt && input.key_pressed(egui::Key::W) {
         return Some(UiCommand::AgentMarkdownShortcut);
     }
+    if command_or_alt && shortcut_key_pressed(input, egui::Key::Z) {
+        return Some(UiCommand::ToggleOutlineWorkflowTab);
+    }
     if command_or_alt && input.key_pressed(egui::Key::M) {
         return Some(UiCommand::TranslateAgentInput);
     }
@@ -401,6 +404,9 @@ pub(super) fn read_ui_command(
     }
     if command_or_alt && input.key_pressed(egui::Key::W) {
         return Some(UiCommand::AgentMarkdownShortcut);
+    }
+    if command_or_alt && shortcut_key_pressed(input, egui::Key::Z) {
+        return Some(UiCommand::ToggleOutlineWorkflowTab);
     }
     if command_or_alt && input.key_pressed(egui::Key::M) {
         return Some(UiCommand::TranslateAgentInput);

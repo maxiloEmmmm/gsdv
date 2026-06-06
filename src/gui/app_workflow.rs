@@ -18,6 +18,18 @@ impl GsdvGuiApp {
         self.request_app_repaint(ctx);
     }
 
+    /// 在普通 outline 和 workflow outline 之间切换。
+    pub(super) fn toggle_outline_workflow_tab(&mut self, ctx: &egui::Context) {
+        let Some(current_tab) = self.outline_panel_tabs.get(self.active_workspace).copied() else {
+            return;
+        };
+        let next_tab = match current_tab {
+            OutlinePanelTab::Outline => OutlinePanelTab::Workflow,
+            OutlinePanelTab::Workflow => OutlinePanelTab::Outline,
+        };
+        self.set_outline_panel_tab(ctx, next_tab);
+    }
+
     /// 当前 workspace 是否正在显示 workflow step 片段编辑器。
     pub(super) fn workflow_step_editor_visible(&self) -> bool {
         self.outline_panel_tabs

@@ -323,6 +323,13 @@ fn chinese_text(source: &'static str) -> &'static str {
         "Check that the configured shell or Codex command is available." => {
             "检查已配置的 shell 或 Codex 命令是否可用。"
         }
+        "Check that the configured shell is available." => "检查已配置的 shell 是否可用。",
+        "Check that the Helix executable `hx` is available." => {
+            "检查 Helix 可执行文件 `hx` 是否可用。"
+        }
+        "Starting Agent terminal..." => "正在启动 Agent 终端...",
+        "Starting workspace terminal..." => "正在启动工作区终端...",
+        "Starting Helix..." => "正在启动 Helix...",
         "Agent terminal failed to start" => "Agent 终端启动失败",
         "Workspace terminal failed to start" => "工作区终端启动失败",
         "Helix failed to start" => "Helix 启动失败",
@@ -814,6 +821,15 @@ fn japanese_text(source: &'static str) -> &'static str {
         "Check that the configured shell or Codex command is available." => {
             "設定された shell または Codex コマンドが利用可能か確認してください。"
         }
+        "Check that the configured shell is available." => {
+            "設定された shell が利用可能か確認してください。"
+        }
+        "Check that the Helix executable `hx` is available." => {
+            "Helix 実行ファイル `hx` が利用可能か確認してください。"
+        }
+        "Starting Agent terminal..." => "Agent ターミナルを起動中...",
+        "Starting workspace terminal..." => "ワークスペースターミナルを起動中...",
+        "Starting Helix..." => "Helix を起動中...",
         "Agent terminal failed to start" => "Agent ターミナルの起動に失敗しました",
         "Workspace terminal failed to start" => "ワークスペースターミナルの起動に失敗しました",
         "Helix failed to start" => "Helix の起動に失敗しました",

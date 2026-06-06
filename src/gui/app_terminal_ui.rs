@@ -4,6 +4,33 @@
 
 use super::*;
 
+/// 返回终端启动中提示，适用于 host 异步创建但还没返回结果的窗口。
+pub(super) fn terminal_pending_message_for_kind(kind: TerminalSurfaceKind) -> &'static str {
+    match kind {
+        TerminalSurfaceKind::Agent => "Starting Agent terminal...",
+        TerminalSurfaceKind::Workspace => "Starting workspace terminal...",
+        TerminalSurfaceKind::Helix => "Starting Helix...",
+    }
+}
+
+/// 返回终端失败提示，避免 Helix 复用 Agent/Codex 的排查文案。
+pub(super) fn terminal_error_hint_for_kind(kind: TerminalSurfaceKind) -> &'static str {
+    match kind {
+        TerminalSurfaceKind::Agent => {
+            "Check that the configured shell or Codex command is available."
+        }
+        TerminalSurfaceKind::Workspace => "Check that the configured shell is available.",
+        TerminalSurfaceKind::Helix => "Check that the Helix executable `hx` is available.",
+    }
+}
+
+/// 绘制终端启动中的占位视图，适用于后台 spawn 还未完成的短暂状态。
+fn terminal_pending_panel(ui: &mut Ui, message: &str) {
+    ui.centered_and_justified(|ui| {
+        ui.label(muted(message));
+    });
+}
+
 impl GsdvGuiApp {
     pub(super) fn terminal_host_surface(&mut self, ui: &mut Ui, kind: TerminalSurfaceKind) {
         self.ensure_terminal_host(ui.ctx(), kind);
@@ -27,6 +54,12 @@ impl GsdvGuiApp {
             .get(self.active_workspace)
             .cloned()
             .unwrap_or(AgentSlotId::Main);
+        let spawn_key = TerminalSpawnKey {
+            index: self.active_workspace,
+            kind,
+            agent_slot: agent_slot.clone(),
+        };
+        let spawn_pending = self.pending_terminal_spawns.contains(&spawn_key);
         let Some(hosts) = self.terminal_hosts.get_mut(self.active_workspace) else {
             return;
         };
@@ -41,6 +74,13 @@ impl GsdvGuiApp {
             TerminalSurfaceKind::Helix => (hosts.helix.as_mut(), hosts.helix_error.clone()),
         };
         let Some(host) = host else {
+            if spawn_pending {
+                terminal_pending_panel(
+                    ui,
+                    i18n::text(self.app_language, terminal_pending_message_for_kind(kind)),
+                );
+                return;
+            }
             let retry = terminal_error_panel(
                 ui,
                 match kind {
@@ -49,6 +89,7 @@ impl GsdvGuiApp {
                     TerminalSurfaceKind::Helix => "Helix failed to start",
                 },
                 error.as_deref().unwrap_or("No backend error was reported."),
+                terminal_error_hint_for_kind(kind),
                 self.app_language,
             );
             if retry && let Some(hosts) = self.terminal_hosts.get_mut(self.active_workspace) {
@@ -738,6 +779,11 @@ impl GsdvGuiApp {
             hosts.helix = None;
             self.ensure_helix_host(ui.ctx(), spec);
         }
+        let spawn_pending = self.pending_terminal_spawns.contains(&TerminalSpawnKey {
+            index: self.active_workspace,
+            kind: TerminalSurfaceKind::Helix,
+            agent_slot: AgentSlotId::Main,
+        });
         let accept_input = self.reviewer_helix_drawer_is_open()
             && self.active_app_dialog().is_none()
             && self.active_reviewer_dialog().is_none()
@@ -748,6 +794,16 @@ impl GsdvGuiApp {
             return;
         };
         let Some(host) = hosts.helix.as_mut() else {
+            if spawn_pending {
+                terminal_pending_panel(
+                    ui,
+                    i18n::text(
+                        self.app_language,
+                        terminal_pending_message_for_kind(TerminalSurfaceKind::Helix),
+                    ),
+                );
+                return;
+            }
             let retry = terminal_error_panel(
                 ui,
                 "Helix failed to start",
@@ -755,6 +811,7 @@ impl GsdvGuiApp {
                     .helix_error
                     .as_deref()
                     .unwrap_or("No backend error was reported."),
+                terminal_error_hint_for_kind(TerminalSurfaceKind::Helix),
                 self.app_language,
             );
             if retry {

@@ -2147,6 +2147,7 @@ enum UiCommand {
     ToggleWorkspaceTerminal,
     ToggleNotifications,
     ToggleRecentMarkdownOutline,
+    ToggleOutlineWorkflowTab,
     PasteRecentMarkdownDiffsToAgent,
     TranslateAgentInput,
     ApplyAgentInputTranslation,
