@@ -71,6 +71,7 @@ impl GsdvGuiApp {
             UiCommand::ToggleWorkspaceTerminal => self.route_to_workspace_terminal_drawer(),
             UiCommand::ToggleNotifications => self.toggle_notifications(),
             UiCommand::ToggleRecentMarkdownOutline => self.toggle_recent_markdown_outline_dialog(),
+            UiCommand::ToggleOutlineWorkflowTab => self.toggle_outline_workflow_tab(ctx),
             UiCommand::PasteRecentMarkdownDiffsToAgent => {
                 self.paste_recent_markdown_diffs_to_agent(ctx);
             }

@@ -1180,9 +1180,18 @@ fn text_edit_pre_global_consumes_cut_before_route_shortcuts() {
     let mut ctrl_modifiers = egui::Modifiers::NONE;
     ctrl_modifiers.ctrl = true;
     let ctrl_input = key_input(egui::Key::X, ctrl_modifiers);
+    let undo_input = key_input(egui::Key::Z, modifiers);
+    let mut alt_modifiers = egui::Modifiers::NONE;
+    alt_modifiers.alt = true;
+    let alt_undo_input = key_input(egui::Key::Z, alt_modifiers);
 
     assert!(text_edit_pre_global_shortcut_consumed(&input, true));
     assert!(text_edit_pre_global_shortcut_consumed(&ctrl_input, true));
+    assert!(text_edit_pre_global_shortcut_consumed(&undo_input, true));
+    assert!(!text_edit_pre_global_shortcut_consumed(
+        &alt_undo_input,
+        true
+    ));
     assert!(!text_edit_pre_global_shortcut_consumed(&input, false));
 }
 
@@ -1206,6 +1215,7 @@ fn base_route_consumes_route_switching_shortcuts_before_agent_tab() {
     for (key, command) in [
         (egui::Key::T, UiCommand::ToggleWorkspaceTerminal),
         (egui::Key::W, UiCommand::AgentMarkdownShortcut),
+        (egui::Key::Z, UiCommand::ToggleOutlineWorkflowTab),
         (egui::Key::K, UiCommand::ToggleNotifications),
         (egui::Key::X, UiCommand::ToggleReviewerHelix),
         (egui::Key::R, UiCommand::OpenReviewerRoute),
@@ -1220,6 +1230,52 @@ fn base_route_consumes_route_switching_shortcuts_before_agent_tab() {
     let mut input = egui::InputState::default();
     input.events.push(egui::Event::Cut);
     assert_eq!(app.read_base_route_command(&input), None);
+}
+
+/// 验证 Cmd/Alt+Z 可以切换 Outline 和 Work-flow tab。
+#[test]
+fn outline_workflow_shortcut_toggles_outline_panel_tab() {
+    let mut app = GsdvGuiApp::from(InitialGuiData {
+        active_workspace: 0,
+        workspaces: vec![test_workspace()],
+        rail_collapsed: false,
+    });
+    let ctx = egui::Context::default();
+
+    assert_eq!(app.outline_panel_tabs[0], OutlinePanelTab::Outline);
+    app.dispatch_ui_command(&ctx, UiCommand::ToggleOutlineWorkflowTab);
+    assert_eq!(app.outline_panel_tabs[0], OutlinePanelTab::Workflow);
+    app.dispatch_ui_command(&ctx, UiCommand::ToggleOutlineWorkflowTab);
+    assert_eq!(app.outline_panel_tabs[0], OutlinePanelTab::Outline);
+}
+
+/// 验证编辑器焦点下 Cmd+Z 仍归文本编辑器撤销处理。
+#[test]
+fn outline_workflow_command_z_does_not_override_editor_undo() {
+    let mut workspace = test_workspace();
+    workspace.center_mode = CenterMode::Editor;
+    let app = GsdvGuiApp::from(InitialGuiData {
+        active_workspace: 0,
+        workspaces: vec![workspace],
+        rail_collapsed: false,
+    });
+    let ctx = egui::Context::default();
+    ctx.input_mut(|input| {
+        *input = key_input(egui::Key::Z, egui::Modifiers::COMMAND);
+    });
+    let mut request = app
+        .input_runtime_request(&ctx, ctx.input(Clone::clone))
+        .unwrap();
+    request.wants_keyboard_input = true;
+
+    let events = process_input_runtime_request(request);
+
+    assert!(!events.iter().any(|event| {
+        matches!(
+            event,
+            AppEvent::InputUiCommand(UiCommand::ToggleOutlineWorkflowTab)
+        )
+    }));
 }
 
 /// 验证 Cmd/Alt+1 会按物理数字键切换 active workspace。
@@ -2301,4 +2357,38 @@ fn reviewer_script_process_receives_network_env() {
         matches!(event, AppEvent::Notification(line) if line.contains("[exit] script.sh"))
     }));
     let _ = fs::remove_dir_all(root);
+}
+
+/// 校验各 terminal surface 使用自己的启动中提示。
+#[test]
+fn terminal_pending_message_matches_surface_kind() {
+    assert_eq!(
+        super::app_terminal_ui::terminal_pending_message_for_kind(TerminalSurfaceKind::Agent),
+        "Starting Agent terminal..."
+    );
+    assert_eq!(
+        super::app_terminal_ui::terminal_pending_message_for_kind(TerminalSurfaceKind::Workspace),
+        "Starting workspace terminal..."
+    );
+    assert_eq!(
+        super::app_terminal_ui::terminal_pending_message_for_kind(TerminalSurfaceKind::Helix),
+        "Starting Helix..."
+    );
+}
+
+/// 校验 Helix 失败时不会复用 Codex/shell 的排查文案。
+#[test]
+fn terminal_error_hint_matches_surface_kind() {
+    assert_eq!(
+        super::app_terminal_ui::terminal_error_hint_for_kind(TerminalSurfaceKind::Agent),
+        "Check that the configured shell or Codex command is available."
+    );
+    assert_eq!(
+        super::app_terminal_ui::terminal_error_hint_for_kind(TerminalSurfaceKind::Workspace),
+        "Check that the configured shell is available."
+    );
+    assert_eq!(
+        super::app_terminal_ui::terminal_error_hint_for_kind(TerminalSurfaceKind::Helix),
+        "Check that the Helix executable `hx` is available."
+    );
 }
