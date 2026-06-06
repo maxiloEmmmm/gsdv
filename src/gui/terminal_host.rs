@@ -901,7 +901,7 @@ impl GuiTerminalHost {
 
     /// Copies selected text while skipping alacritty wide-cell spacers.
     fn override_selected_copy_text(&mut self, ui: &Ui, response: &egui::Response) -> bool {
-        if !response.has_focus() || !copy_requested(ui) {
+        if !response.has_focus() || !terminal_selection_copy_requested(ui) {
             return false;
         }
         let term = self.backend.term.lock();
@@ -1880,20 +1880,49 @@ fn enable_terminal_ime(ui: &Ui, backend: &TerminalBackend, rect: egui::Rect) {
     });
 }
 
-/// Detects copy requests so terminal selection text can be normalized.
-fn copy_requested(ui: &Ui) -> bool {
-    ui.input(|input| {
-        input.events.iter().any(|event| match event {
-            egui::Event::Copy => true,
-            egui::Event::Key {
-                key,
-                pressed: true,
-                modifiers,
-                ..
-            } => terminal_copy_key_event(*key, *modifiers),
-            _ => false,
-        })
+/// Detects copy requests that should copy terminal selection text.
+fn terminal_selection_copy_requested(ui: &Ui) -> bool {
+    ui.input(|input| terminal_selection_copy_requested_from_events(&input.events, input.modifiers))
+}
+
+/// Detects terminal-selection copy without stealing Ctrl+C interrupts.
+fn terminal_selection_copy_requested_from_events(
+    events: &[Event],
+    active_modifiers: Modifiers,
+) -> bool {
+    events.iter().any(|event| match event {
+        egui::Event::Copy => terminal_selection_copy_modifiers(active_modifiers),
+        egui::Event::Key {
+            key,
+            pressed: true,
+            modifiers,
+            ..
+        } => terminal_selection_copy_key_event(*key, *modifiers),
+        _ => false,
     })
+}
+
+/// Detects platform copy events that should copy terminal selection.
+fn terminal_selection_copy_modifiers(modifiers: Modifiers) -> bool {
+    // 触发条件：Linux/Windows 上 Ctrl+C 可同时带 command alias。
+    // 不能把它按平台 Copy 处理：终端里 Ctrl+C 的主语义是 ETX。
+    // 防止回归：有选区时 Ctrl+C 只复制、不再中断子进程。
+    if modifiers.alt {
+        return false;
+    }
+    if modifiers.ctrl {
+        return modifiers.shift && !modifiers.mac_cmd;
+    }
+    modifiers.mac_cmd || modifiers.command
+}
+
+/// Detects key copy chords that should copy terminal selection.
+fn terminal_selection_copy_key_event(key: Key, modifiers: Modifiers) -> bool {
+    terminal_copy_key_event(key, modifiers)
+        || (key == Key::C
+            && !modifiers.ctrl
+            && !modifiers.alt
+            && (modifiers.mac_cmd || modifiers.command))
 }
 
 /// Removes padding cells from the end of a copied terminal line.
