@@ -58,6 +58,7 @@ fn codex_resume_args_include_explicit_cwd_before_subcommand() {
         None,
         None,
         None,
+        None,
         Some(root.as_path()),
     );
 
@@ -78,10 +79,71 @@ fn claude_args_do_not_include_work_dir_cli_arg() {
         None,
         None,
         None,
+        None,
         Some(root.as_path()),
     );
 
     assert!(!claude_args.iter().any(|arg| arg == "-C"));
     assert!(!claude_args.iter().any(|arg| arg == "--cd"));
     assert!(!claude_args.iter().any(|arg| arg == &root_display));
+}
+
+/// 验证 Codex model_provider 覆盖会按 -c 参数传给 CLI。
+#[test]
+fn codex_args_include_model_provider_override() {
+    let config = AgentLaunchConfig::default();
+
+    let args = config.args_for(
+        AgentKind::Codex,
+        None,
+        None,
+        Some("frank"),
+        None,
+        None,
+        None,
+    );
+
+    assert!(
+        args.windows(2)
+            .any(|pair| pair == ["-c", "model_provider=\"frank\""])
+    );
+}
+
+/// 验证 Codex model_provider 覆盖中的字符串特殊字符会被转义。
+#[test]
+fn codex_args_escape_model_provider_override() {
+    let config = AgentLaunchConfig::default();
+
+    let args = config.args_for(
+        AgentKind::Codex,
+        None,
+        None,
+        Some("quote\"slash\\tab\t"),
+        None,
+        None,
+        None,
+    );
+
+    assert!(
+        args.windows(2)
+            .any(|pair| pair == ["-c", "model_provider=\"quote\\\"slash\\\\tab\\t\""])
+    );
+}
+
+/// 验证 Claude 不接收 Codex 专属 model_provider 覆盖。
+#[test]
+fn claude_args_ignore_model_provider_override() {
+    let config = AgentLaunchConfig::default();
+
+    let args = config.args_for(
+        AgentKind::Claude,
+        None,
+        None,
+        Some("frank"),
+        None,
+        None,
+        None,
+    );
+
+    assert!(!args.iter().any(|arg| arg.contains("model_provider")));
 }

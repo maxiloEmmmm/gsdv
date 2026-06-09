@@ -2014,6 +2014,8 @@ enum AppDialog {
         name: String,
         agent_kind: AgentKind,
         agent_model: String,
+        agent_model_provider: String,
+        model_providers: Vec<String>,
         agent_effort: String,
         agent_fast_mode: Option<bool>,
         agent_work_dir: String,
@@ -2030,6 +2032,12 @@ enum AppDialog {
         index: usize,
         slot: AgentSlotId,
         model: String,
+    },
+    SetAgentModelProvider {
+        index: usize,
+        slot: AgentSlotId,
+        model_provider: String,
+        model_providers: Vec<String>,
     },
     SetAgentWorkDir {
         index: usize,
@@ -2099,6 +2107,10 @@ enum AgentTabAction {
     SetModel {
         slot: AgentSlotId,
         model: String,
+    },
+    SetModelProvider {
+        slot: AgentSlotId,
+        model_provider: String,
     },
     SetEffort {
         slot: AgentSlotId,

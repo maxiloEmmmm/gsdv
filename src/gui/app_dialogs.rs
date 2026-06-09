@@ -90,6 +90,7 @@ impl GsdvGuiApp {
         let mut restart_agent = None;
         let mut switch_agent = None;
         let mut set_agent_model = None;
+        let mut set_agent_model_provider = None;
         let mut set_agent_work_dir = None;
         let mut confirm_theme_switch = None;
         let mut restart_agent_without_resume = false;
@@ -116,12 +117,12 @@ impl GsdvGuiApp {
                 | AppDialog::WorkflowRenameStep { .. } => Vec2::new(500.0, 260.0),
                 AppDialog::WorkflowMergeSteps { .. } => Vec2::new(500.0, 260.0),
                 AppDialog::WorkflowDeleteConfirm { .. } => Vec2::new(500.0, 260.0),
-                AppDialog::AddSubagent { .. } => Vec2::new(460.0, 520.0),
+                AppDialog::AddSubagent { .. } => Vec2::new(460.0, 580.0),
                 AppDialog::RestartAgent { .. } => Vec2::new(500.0, 260.0),
                 AppDialog::SwitchAgent { .. } => Vec2::new(520.0, 280.0),
-                AppDialog::SetAgentModel { .. } | AppDialog::SetAgentWorkDir { .. } => {
-                    Vec2::new(520.0, 260.0)
-                }
+                AppDialog::SetAgentModel { .. }
+                | AppDialog::SetAgentModelProvider { .. }
+                | AppDialog::SetAgentWorkDir { .. } => Vec2::new(520.0, 260.0),
                 AppDialog::ConfirmThemeSwitch { .. } => Vec2::new(460.0, 250.0),
                 AppDialog::AgentExitedAbnormally { .. } => Vec2::new(620.0, 340.0),
                 AppDialog::Help => Vec2::new(760.0, 640.0),
@@ -825,6 +826,8 @@ impl GsdvGuiApp {
                     mut name,
                     mut agent_kind,
                     mut agent_model,
+                    mut agent_model_provider,
+                    model_providers,
                     mut agent_effort,
                     mut agent_fast_mode,
                     mut agent_work_dir,
@@ -850,6 +853,8 @@ impl GsdvGuiApp {
                             name: name.clone(),
                             agent_kind,
                             agent_model: agent_model.clone(),
+                            agent_model_provider: agent_model_provider.clone(),
+                            model_providers: model_providers.clone(),
                             agent_effort: agent_effort.clone(),
                             agent_fast_mode,
                             agent_work_dir: agent_work_dir.clone(),
@@ -873,11 +878,16 @@ impl GsdvGuiApp {
                         if !agent_kind.supports_fast_mode() {
                             agent_fast_mode = None;
                         }
+                        if !agent_kind.supports_model_provider() {
+                            agent_model_provider.clear();
+                        }
                         next_dialog = Some(AppDialog::AddSubagent {
                             index,
                             name: name.clone(),
                             agent_kind,
                             agent_model: agent_model.clone(),
+                            agent_model_provider: agent_model_provider.clone(),
+                            model_providers: model_providers.clone(),
                             agent_effort: agent_effort.clone(),
                             agent_fast_mode,
                             agent_work_dir: agent_work_dir.clone(),
@@ -900,11 +910,42 @@ impl GsdvGuiApp {
                             name: name.clone(),
                             agent_kind,
                             agent_model: agent_model.clone(),
+                            agent_model_provider: agent_model_provider.clone(),
+                            model_providers: model_providers.clone(),
                             agent_effort: agent_effort.clone(),
                             agent_fast_mode,
                             agent_work_dir: agent_work_dir.clone(),
                             session_id: session_id.clone(),
                         });
+                    }
+                    if agent_kind.supports_model_provider() {
+                        ui.add_space(10.0);
+                        ui.label(section_label(i18n::text(
+                            self.app_language,
+                            "MODEL PROVIDER (OPTIONAL)",
+                        )));
+                        let provider_before = agent_model_provider.clone();
+                        codex_model_provider_picker(
+                            ui,
+                            self.app_language,
+                            ("add-subagent-model-provider", index),
+                            &mut agent_model_provider,
+                            &model_providers,
+                        );
+                        if agent_model_provider != provider_before {
+                            next_dialog = Some(AppDialog::AddSubagent {
+                                index,
+                                name: name.clone(),
+                                agent_kind,
+                                agent_model: agent_model.clone(),
+                                agent_model_provider: agent_model_provider.clone(),
+                                model_providers: model_providers.clone(),
+                                agent_effort: agent_effort.clone(),
+                                agent_fast_mode,
+                                agent_work_dir: agent_work_dir.clone(),
+                                session_id: session_id.clone(),
+                            });
+                        }
                     }
                     ui.add_space(10.0);
                     ui.label(section_label(i18n::text(
@@ -938,6 +979,8 @@ impl GsdvGuiApp {
                             name: name.clone(),
                             agent_kind,
                             agent_model: agent_model.clone(),
+                            agent_model_provider: agent_model_provider.clone(),
+                            model_providers: model_providers.clone(),
                             agent_effort: agent_effort.clone(),
                             agent_fast_mode,
                             agent_work_dir: agent_work_dir.clone(),
@@ -972,6 +1015,8 @@ impl GsdvGuiApp {
                                 name: name.clone(),
                                 agent_kind,
                                 agent_model: agent_model.clone(),
+                                agent_model_provider: agent_model_provider.clone(),
+                                model_providers: model_providers.clone(),
                                 agent_effort: agent_effort.clone(),
                                 agent_fast_mode,
                                 agent_work_dir: agent_work_dir.clone(),
@@ -995,6 +1040,8 @@ impl GsdvGuiApp {
                             name: name.clone(),
                             agent_kind,
                             agent_model: agent_model.clone(),
+                            agent_model_provider: agent_model_provider.clone(),
+                            model_providers: model_providers.clone(),
                             agent_effort: agent_effort.clone(),
                             agent_fast_mode,
                             agent_work_dir: agent_work_dir.clone(),
@@ -1017,6 +1064,8 @@ impl GsdvGuiApp {
                             name: name.clone(),
                             agent_kind,
                             agent_model: agent_model.clone(),
+                            agent_model_provider: agent_model_provider.clone(),
+                            model_providers: model_providers.clone(),
                             agent_effort: agent_effort.clone(),
                             agent_fast_mode,
                             agent_work_dir: agent_work_dir.clone(),
@@ -1054,6 +1103,14 @@ impl GsdvGuiApp {
                         } else {
                             Some(trimmed_agent_model.to_string())
                         };
+                        let trimmed_agent_model_provider = agent_model_provider.trim();
+                        let agent_model_provider = if agent_kind.supports_model_provider()
+                            && !trimmed_agent_model_provider.is_empty()
+                        {
+                            Some(trimmed_agent_model_provider.to_string())
+                        } else {
+                            None
+                        };
                         let agent_effort = agent_kind
                             .supports_effort(&agent_effort)
                             .then(|| agent_effort.clone())
@@ -1077,6 +1134,7 @@ impl GsdvGuiApp {
                             name.trim().to_string(),
                             agent_kind,
                             agent_model,
+                            agent_model_provider,
                             agent_effort,
                             agent_kind
                                 .supports_fast_mode()
@@ -1231,6 +1289,62 @@ impl GsdvGuiApp {
                     });
                     if save_requested {
                         set_agent_model = Some((index, slot, model));
+                        next_dialog = None;
+                    }
+                }
+                AppDialog::SetAgentModelProvider {
+                    index,
+                    slot,
+                    mut model_provider,
+                    model_providers,
+                } => {
+                    let workspace = self.agent_workspace_for_slot(index, &slot);
+                    ui.label(
+                        RichText::new(i18n::text(self.app_language, "Agent model provider"))
+                            .strong(),
+                    );
+                    if let Some(workspace) = workspace.as_ref() {
+                        ui.label(muted(&format!(
+                            "{} · {}",
+                            workspace.agent_kind.title(),
+                            workspace.name
+                        )));
+                    }
+                    ui.add_space(12.0);
+                    ui.label(section_label(i18n::text(
+                        self.app_language,
+                        "MODEL PROVIDER (OPTIONAL)",
+                    )));
+                    let provider_before = model_provider.clone();
+                    let response = codex_model_provider_picker(
+                        ui,
+                        self.app_language,
+                        ("set-agent-model-provider", index),
+                        &mut model_provider,
+                        &model_providers,
+                    );
+                    if response.changed() || model_provider != provider_before {
+                        next_dialog = Some(AppDialog::SetAgentModelProvider {
+                            index,
+                            slot: slot.clone(),
+                            model_provider: model_provider.clone(),
+                            model_providers: model_providers.clone(),
+                        });
+                    }
+                    ui.add_space(14.0);
+                    let enter_save = response.has_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    let mut save_requested = enter_save;
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if primary_action(ui, i18n::text(self.app_language, "Save")).clicked() {
+                            save_requested = true;
+                        }
+                        if secondary_action(ui, i18n::text(self.app_language, "Cancel")).clicked() {
+                            next_dialog = None;
+                        }
+                    });
+                    if save_requested {
+                        set_agent_model_provider = Some((index, slot, model_provider));
                         next_dialog = None;
                     }
                 }
@@ -1639,6 +1753,7 @@ impl GsdvGuiApp {
             name,
             agent_kind,
             agent_model,
+            agent_model_provider,
             agent_effort,
             agent_fast_mode,
             agent_work_dir,
@@ -1651,6 +1766,7 @@ impl GsdvGuiApp {
                 name,
                 agent_kind,
                 agent_model,
+                agent_model_provider,
                 agent_effort,
                 agent_fast_mode,
                 agent_work_dir,
@@ -1665,6 +1781,9 @@ impl GsdvGuiApp {
         }
         if let Some((index, slot, model)) = set_agent_model {
             self.set_agent_slot_model(ctx, index, slot, model);
+        }
+        if let Some((index, slot, model_provider)) = set_agent_model_provider {
+            self.set_agent_slot_model_provider(ctx, index, slot, model_provider);
         }
         if let Some((index, slot, work_dir)) = set_agent_work_dir {
             self.set_agent_slot_work_dir(ctx, index, slot, work_dir);
@@ -2014,6 +2133,7 @@ fn app_dialog_title(dialog: &AppDialog, language: AppLanguage) -> &str {
         AppDialog::RestartAgent { .. } => "Restart Agent",
         AppDialog::SwitchAgent { .. } => "Switch Agent",
         AppDialog::SetAgentModel { .. } => "Agent model",
+        AppDialog::SetAgentModelProvider { .. } => "Agent model provider",
         AppDialog::SetAgentWorkDir { .. } => "Agent work-dir",
         AppDialog::ConfirmThemeSwitch { .. } => "Switch Theme",
         AppDialog::AgentExitedAbnormally { .. } => "Agent Exited",
@@ -2703,6 +2823,56 @@ fn codex_auth_identity(info: &crate::ai::CodexAuthInfo) -> String {
     info.email
         .clone()
         .unwrap_or_else(|| info.account_id.clone())
+}
+
+/// Draws a Codex model provider picker backed by ~/.codex/config.toml names.
+fn codex_model_provider_picker(
+    ui: &mut Ui,
+    language: AppLanguage,
+    id: impl std::hash::Hash,
+    model_provider: &mut String,
+    model_providers: &[String],
+) -> egui::Response {
+    let response = ui.add(
+        egui::TextEdit::singleline(model_provider)
+            .hint_text(i18n::text(language, "empty passes no -c model_provider"))
+            .desired_width(f32::INFINITY),
+    );
+    ui.add_space(8.0);
+    let mut selected = model_provider.trim().to_string();
+    ui.push_id(id, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .radio_value(&mut selected, String::new(), i18n::text(language, "None"))
+                .clicked()
+            {
+                model_provider.clear();
+            }
+            if ui
+                .radio_value(
+                    &mut selected,
+                    data::CODEX_MODEL_PROVIDER_NEVER.to_string(),
+                    data::CODEX_MODEL_PROVIDER_NEVER,
+                )
+                .clicked()
+            {
+                *model_provider = data::CODEX_MODEL_PROVIDER_NEVER.to_string();
+            }
+            for provider in model_providers {
+                let provider = provider.trim();
+                if provider.is_empty() || provider == data::CODEX_MODEL_PROVIDER_NEVER {
+                    continue;
+                }
+                if ui
+                    .radio_value(&mut selected, provider.to_string(), provider)
+                    .clicked()
+                {
+                    *model_provider = provider.to_string();
+                }
+            }
+        });
+    });
+    response
 }
 
 /// 绘制运行时设置，适用于重绘、Agent 与番茄钟行为。

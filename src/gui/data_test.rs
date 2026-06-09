@@ -535,6 +535,7 @@ fn save_workspace_store_preserves_default_agent_kind() {
         path: root.join("repo"),
         agent_kind: AgentKind::Codex,
         agent_model: None,
+        agent_model_provider: None,
         agent_effort: None,
         agent_fast_mode: None,
         agent_work_dir: None,
@@ -860,6 +861,7 @@ fn save_workspace_store_persists_agent_kind() {
         path: root.join("repo"),
         agent_kind: AgentKind::Claude,
         agent_model: None,
+        agent_model_provider: None,
         agent_effort: None,
         agent_fast_mode: None,
         agent_work_dir: None,
@@ -934,6 +936,7 @@ fn save_workspace_store_persists_non_empty_session_id() {
         path: root.join("repo"),
         agent_kind: AgentKind::Codex,
         agent_model: None,
+        agent_model_provider: None,
         agent_effort: None,
         agent_fast_mode: None,
         agent_work_dir: None,
@@ -1001,6 +1004,7 @@ fn refresh_workspace_agent_statuses_uses_latest_status_file_entry() {
         path: workspace,
         agent_kind: AgentKind::Codex,
         agent_model: None,
+        agent_model_provider: None,
         agent_effort: None,
         agent_fast_mode: None,
         agent_work_dir: None,
@@ -1070,6 +1074,7 @@ fn refresh_workspace_agent_statuses_prefers_matching_agent_id() {
         path: workspace,
         agent_kind: AgentKind::Codex,
         agent_model: None,
+        agent_model_provider: None,
         agent_effort: None,
         agent_fast_mode: None,
         agent_work_dir: None,
@@ -1142,6 +1147,7 @@ fn refresh_workspace_agent_statuses_reads_sessions_keyed_by_session_id() {
         path: workspace,
         agent_kind: AgentKind::Codex,
         agent_model: None,
+        agent_model_provider: None,
         agent_effort: None,
         agent_fast_mode: None,
         agent_work_dir: None,
@@ -1212,6 +1218,7 @@ fn refresh_workspace_agent_statuses_recovers_busy_aborted_turn() {
         path: workspace,
         agent_kind: AgentKind::Codex,
         agent_model: None,
+        agent_model_provider: None,
         agent_effort: None,
         agent_fast_mode: None,
         agent_work_dir: None,
@@ -1282,6 +1289,7 @@ fn refresh_workspace_agent_statuses_keeps_busy_without_matching_abort() {
         path: workspace,
         agent_kind: AgentKind::Codex,
         agent_model: None,
+        agent_model_provider: None,
         agent_effort: None,
         agent_fast_mode: None,
         agent_work_dir: None,
@@ -1342,6 +1350,7 @@ fn refresh_workspace_agent_statuses_filters_other_agent_kinds() {
         path: workspace,
         agent_kind: AgentKind::Codex,
         agent_model: None,
+        agent_model_provider: None,
         agent_effort: None,
         agent_fast_mode: None,
         agent_work_dir: None,
@@ -1499,6 +1508,7 @@ fn test_workspace_data(
         path,
         agent_kind: AgentKind::Codex,
         agent_model: None,
+        agent_model_provider: None,
         agent_effort: None,
         agent_fast_mode: None,
         agent_work_dir: None,
@@ -1518,4 +1528,24 @@ fn test_workspace_data(
         markdown_outline_collapsed: false,
         memo: String::new(),
     }
+}
+
+/// 验证 Codex 配置中的 model provider 表名可被解析。
+#[test]
+fn codex_model_provider_names_reads_top_level_provider_tables() {
+    let content = r#"
+[model_providers.frank]
+base_url = "http://openai2.zettlab.com:8080"
+
+[model_providers.never]
+base_url = "http://never.example"
+
+[model_providers.frank.headers]
+authorization = "redacted"
+"#;
+
+    assert_eq!(
+        codex_model_provider_names_from_config(content),
+        vec!["frank".to_string(), "never".to_string()]
+    );
 }

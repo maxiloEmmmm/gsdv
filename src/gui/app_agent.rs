@@ -138,6 +138,9 @@ impl GsdvGuiApp {
                 if !next_kind.supports_fast_mode() {
                     workspace.agent_fast_mode = None;
                 }
+                if !next_kind.supports_model_provider() {
+                    workspace.agent_model_provider = None;
+                }
                 workspace.session_id = None;
                 workspace.activity = WorkspaceActivity::Unknown;
             }
@@ -157,6 +160,9 @@ impl GsdvGuiApp {
                     }
                     if !next_kind.supports_fast_mode() {
                         subagent.agent_fast_mode = None;
+                    }
+                    if !next_kind.supports_model_provider() {
+                        subagent.agent_model_provider = None;
                     }
                     subagent.session_id = None;
                     subagent.activity = WorkspaceActivity::Unknown;
@@ -205,6 +211,54 @@ impl GsdvGuiApp {
                 i18n::text(self.app_language, "Agent model set")
             } else {
                 i18n::text(self.app_language, "Agent model override cleared")
+            },
+            theme::success(),
+        );
+    }
+
+    /// Updates one agent slot model provider override and restarts that slot.
+    pub(super) fn set_agent_slot_model_provider(
+        &mut self,
+        ctx: &egui::Context,
+        index: usize,
+        slot: AgentSlotId,
+        model_provider: String,
+    ) {
+        let Some(kind) = self.agent_slot_kind(index, &slot) else {
+            return;
+        };
+        let next_provider = normalized_agent_model_provider_value(kind, &model_provider);
+        if self.agent_slot_model_provider(index, &slot) == next_provider {
+            return;
+        }
+        let Some(workspace) = self.workspaces.get_mut(index) else {
+            return;
+        };
+        match &slot {
+            AgentSlotId::Main => {
+                workspace.agent_model_provider = next_provider.clone();
+            }
+            AgentSlotId::Subagent(id) => {
+                let Some(subagent) = workspace
+                    .subagents
+                    .iter_mut()
+                    .find(|subagent| &subagent.id == id)
+                else {
+                    return;
+                };
+                subagent.agent_model_provider = next_provider.clone();
+            }
+        }
+        self.persist_workspaces();
+        if let Some(hosts) = self.terminal_hosts.get_mut(index) {
+            hosts.agents.remove(&slot);
+        }
+        self.spawn_terminal_host_for_workspace(ctx, index, TerminalSurfaceKind::Agent);
+        self.push_toast(
+            if next_provider.is_some() {
+                i18n::text(self.app_language, "Agent model provider set")
+            } else {
+                i18n::text(self.app_language, "Agent model provider override cleared")
             },
             theme::success(),
         );
@@ -369,6 +423,19 @@ impl GsdvGuiApp {
                 .iter()
                 .find(|subagent| &subagent.id == id)
                 .and_then(|subagent| subagent.agent_model.clone()),
+        }
+    }
+
+    /// Returns the configured model provider override for one agent slot.
+    fn agent_slot_model_provider(&self, index: usize, slot: &AgentSlotId) -> Option<String> {
+        let workspace = self.workspaces.get(index)?;
+        match slot {
+            AgentSlotId::Main => workspace.agent_model_provider.clone(),
+            AgentSlotId::Subagent(id) => workspace
+                .subagents
+                .iter()
+                .find(|subagent| &subagent.id == id)
+                .and_then(|subagent| subagent.agent_model_provider.clone()),
         }
     }
 
@@ -641,6 +708,15 @@ impl GsdvGuiApp {
 fn normalized_agent_model_value(model: &str) -> Option<String> {
     let model = model.trim();
     (!model.is_empty()).then(|| model.to_string())
+}
+
+/// Normalizes a Codex model provider override entered by the user.
+fn normalized_agent_model_provider_value(kind: AgentKind, provider: &str) -> Option<String> {
+    if !kind.supports_model_provider() {
+        return None;
+    }
+    let provider = provider.trim();
+    (!provider.is_empty()).then(|| provider.to_string())
 }
 
 /// Normalizes a working directory override entered by the user.

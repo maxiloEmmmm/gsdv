@@ -3678,6 +3678,7 @@ fn terminal_args(
                 workspace.agent_kind,
                 agent_session_id,
                 workspace.agent_model.as_deref(),
+                workspace.agent_model_provider.as_deref(),
                 workspace.agent_effort.as_deref(),
                 workspace.agent_fast_mode,
                 Some(resume_cwd.as_path()),
