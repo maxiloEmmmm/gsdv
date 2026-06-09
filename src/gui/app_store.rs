@@ -12,9 +12,6 @@ impl GsdvGuiApp {
     pub(super) fn mark_workspace_store_dirty(&mut self) {
         self.workspace_store_dirty_at
             .get_or_insert_with(Instant::now);
-        if let Some(ctx) = self.app_repaint_ctx.as_ref() {
-            ctx.request_repaint_after(WORKSPACE_STORE_SAVE_DEBOUNCE);
-        }
     }
 
     /// 处理 workspace store writer 的 dirty 合并和后台保存。
@@ -28,14 +25,19 @@ impl GsdvGuiApp {
         };
         let now = Instant::now();
         if now.duration_since(dirty_at) < WORKSPACE_STORE_SAVE_DEBOUNCE {
-            ctx.request_repaint_after(duration_until_due(dirty_at, WORKSPACE_STORE_SAVE_DEBOUNCE));
+            crate::gui::perf_log::count("app.schedule_timed_update.store_debounce");
+            self.schedule_timed_update(
+                ctx,
+                duration_until_due(dirty_at, WORKSPACE_STORE_SAVE_DEBOUNCE),
+            );
             return;
         }
         if self.workspace_store_save_in_flight.load(Ordering::SeqCst) {
             // 触发条件：保存期间又有业务状态被标记为 dirty。
             // 不能直接再开保存：短时间多次修改会把 writer 打爆。
             // 防止回归：大量 UI 状态变化导致同一 store 快照重复写盘。
-            ctx.request_repaint_after(WORKSPACE_STORE_SAVE_DEBOUNCE);
+            crate::gui::perf_log::count("app.schedule_timed_update.store_in_flight");
+            self.schedule_timed_update(ctx, WORKSPACE_STORE_SAVE_DEBOUNCE);
             return;
         }
         self.workspace_store_dirty_at = None;
@@ -44,7 +46,7 @@ impl GsdvGuiApp {
         let rail_collapsed = self.rail_collapsed;
         let save_in_flight = Arc::clone(&self.workspace_store_save_in_flight);
         let repaint_ctx = ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         save_in_flight.store(true, Ordering::SeqCst);
         self.background_runtime.spawn(async move {
             let _ = tokio::task::spawn_blocking(move || {
@@ -52,7 +54,7 @@ impl GsdvGuiApp {
             })
             .await;
             save_in_flight.store(false, Ordering::SeqCst);
-            repaint_ctx.request_repaint_after(repaint_after);
+            repaint_controller.request_repaint(&repaint_ctx);
         });
     }
 

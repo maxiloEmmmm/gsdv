@@ -417,11 +417,11 @@ impl GsdvGuiApp {
         theme::set_mode(ctx, mode);
         self.spawn_theme_mode_save(mode);
         self.queue_app_event(AppEvent::SyncTerminalEventRepaintFlags);
-        self.request_app_repaint(ctx);
+        self.request_app_repaint();
     }
 
     /// Restarts the selected agent after a theme change requires a terminal reload.
-    pub(super) fn restart_active_agent_after_theme_switch(&mut self, ctx: &egui::Context) {
+    pub(super) fn restart_active_agent_after_theme_switch(&mut self, _ctx: &egui::Context) {
         let index = self.active_workspace;
         let Some(hosts) = self.terminal_hosts.get_mut(index) else {
             return;
@@ -448,7 +448,6 @@ impl GsdvGuiApp {
             i18n::text(self.app_language, "Agent will restart to apply the theme"),
             theme::warning(),
         );
-        self.request_app_repaint_after(ctx, AGENT_THEME_RESTART_DELAY);
     }
 
     /// Restarts the active agent slot and forces it to create a new session.
@@ -609,16 +608,12 @@ impl GsdvGuiApp {
     pub(super) fn finish_pending_agent_theme_restarts(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
         let mut restart_indexes = Vec::new();
-        let mut next_deadline = None;
         for (index, pending) in self.pending_agent_theme_restarts.iter().enumerate() {
             let Some(deadline) = *pending else {
                 continue;
             };
             if now >= deadline {
                 restart_indexes.push(index);
-            } else {
-                next_deadline =
-                    Some(next_deadline.map_or(deadline, |current: Instant| current.min(deadline)));
             }
         }
         for index in restart_indexes {
@@ -638,9 +633,6 @@ impl GsdvGuiApp {
                 i18n::text(self.app_language, "Agent resumed after theme switch"),
                 theme::success(),
             );
-        }
-        if let Some(deadline) = next_deadline {
-            self.request_app_repaint_after(ctx, deadline.saturating_duration_since(now));
         }
     }
 }

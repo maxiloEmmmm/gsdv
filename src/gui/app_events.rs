@@ -8,6 +8,7 @@ use super::*;
 impl GsdvGuiApp {
     /// 事件总控入口，只允许通过唯一队列修改跨组件 UI 状态。
     pub(super) fn process_update_events(&mut self, ctx: &egui::Context) {
+        crate::gui::perf_log::count("app.process_update_events");
         let started_at = Instant::now();
         let budget = self.max_repaint_interval();
         self.suppress_default_agent_input = false;
@@ -16,6 +17,7 @@ impl GsdvGuiApp {
         self.enqueue_update_events(ctx);
         self.send_input_runtime_request(ctx);
         self.drain_app_events(ctx, started_at, budget);
+        crate::gui::perf_log::duration_us("app.process_update_events_us", started_at.elapsed());
     }
 
     /// 把本帧到期信号转换成 AppEvent，避免 update 分散消费多路状态。
@@ -75,10 +77,11 @@ impl GsdvGuiApp {
     /// channel 关闭只会发生在 app 退出阶段，丢弃错误即可。
     /// 入队后主动唤醒 UI，避免 render/handler 后半段产生的事件滞留。
     pub(super) fn queue_app_event(&self, event: AppEvent) {
+        crate::gui::perf_log::count("app.queue_event");
         if self.app_event_tx.send(event).is_ok()
             && let Some(ctx) = self.app_repaint_ctx.as_ref()
         {
-            ctx.request_repaint_after(self.max_repaint_interval());
+            self.repaint_controller.request_repaint(ctx);
         }
     }
 
@@ -173,7 +176,7 @@ impl GsdvGuiApp {
             terminal_surface_owns_input,
             terminal_kitty_keyboard_protocol,
             repaint_ctx: ctx.clone(),
-            repaint_after: self.max_repaint_interval(),
+            repaint_controller: self.repaint_controller.clone(),
             pomodoro_enabled: self.runtime_settings.pomodoro_enabled,
             pomodoro_phase: self.pomodoro.phase,
         })
@@ -255,6 +258,7 @@ impl GsdvGuiApp {
         ctx: &egui::Context,
         event: TerminalRuntimeEvent,
     ) {
+        crate::gui::perf_log::count(terminal_runtime_app_event_label(event.kind));
         if std::env::var_os("GSDV_AGENT_ESC_DEBUG").is_some()
             && let Some((workspace_index, slot)) = self.agent_terminal_slot_by_id(event.id)
         {
@@ -266,7 +270,46 @@ impl GsdvGuiApp {
         if event.kind == TerminalRuntimeEventKind::Output {
             self.record_agent_terminal_output(event.id);
         }
-        self.request_app_repaint(ctx);
+        if crate::gui::perf_log::enabled() {
+            if self.terminal_runtime_event_visible(event.id) {
+                crate::gui::perf_log::count("app.terminal_runtime.visible");
+            } else {
+                crate::gui::perf_log::count("app.terminal_runtime.hidden");
+            }
+        }
+        self.request_app_repaint();
+    }
+
+    /// 判断 terminal runtime 事件是否来自当前可见 terminal surface。
+    pub(super) fn terminal_runtime_event_visible(&self, terminal_id: u64) -> bool {
+        let Some(workspace) = self.current_workspace() else {
+            return false;
+        };
+        if workspace.route == Route::Workspace
+            && workspace.center_mode == CenterMode::Agent
+            && self
+                .agent_terminal_slot_by_id(terminal_id)
+                .is_some_and(|(index, slot)| {
+                    index == self.active_workspace && slot == self.active_agent_slot()
+                })
+        {
+            return true;
+        }
+        if self.workspace_terminal_drawer_is_open()
+            && self
+                .terminal_hosts
+                .get(self.active_workspace)
+                .and_then(|hosts| hosts.workspace.as_ref())
+                .is_some_and(|host| host.id() == terminal_id)
+        {
+            return true;
+        }
+        self.reviewer_helix_drawer_is_open()
+            && self
+                .terminal_hosts
+                .get(self.active_workspace)
+                .and_then(|hosts| hosts.helix.as_ref())
+                .is_some_and(|host| host.id() == terminal_id)
     }
 
     /// 记录指定 terminal 的 Agent 输出，用于 busy watchdog。
@@ -348,7 +391,7 @@ impl GsdvGuiApp {
             // 不能走普通按键路径：当前焦点可能在别的 workspace 或弹窗里。
             // 防止后台 Codex 卡在等待继续输入时无人值守。
             host.write_bytes(AGENT_BUSY_AUTO_GO_INPUT);
-            self.request_app_repaint(ctx);
+            self.request_app_repaint();
         }
     }
 
@@ -370,7 +413,7 @@ impl GsdvGuiApp {
                         "{minutes}",
                         self.runtime_settings.pomodoro_rest_minutes.to_string(),
                     ));
-                    self.request_app_repaint(ctx);
+                    self.request_app_repaint();
                 }
             }
             PomodoroPhase::WaitingForRestQuiet => {
@@ -382,7 +425,7 @@ impl GsdvGuiApp {
                         self.app_language,
                         "Quiet now, continue resting",
                     ));
-                    self.request_app_repaint(ctx);
+                    self.request_app_repaint();
                 }
             }
             PomodoroPhase::Resting => {
@@ -394,7 +437,7 @@ impl GsdvGuiApp {
                         self.app_language,
                         "Rest ended, press any key to start work",
                     ));
-                    self.request_app_repaint(ctx);
+                    self.request_app_repaint();
                 }
             }
             PomodoroPhase::ReadyToWork => {}
@@ -409,7 +452,7 @@ impl GsdvGuiApp {
                         "{minutes}",
                         self.runtime_settings.pomodoro_work_minutes.to_string(),
                     ));
-                    self.request_app_repaint(ctx);
+                    self.request_app_repaint();
                 }
             }
         }
@@ -424,7 +467,7 @@ impl GsdvGuiApp {
         match self.pomodoro.phase {
             PomodoroPhase::WaitingForRestQuiet => {
                 self.pomodoro.wait_for_rest_quiet(now);
-                self.request_app_repaint(ctx);
+                self.request_app_repaint();
             }
             PomodoroPhase::Resting => {
                 self.pomodoro.wait_for_rest_quiet(now);
@@ -432,7 +475,7 @@ impl GsdvGuiApp {
                     self.app_language,
                     "Input detected, waiting for quiet to continue rest",
                 ));
-                self.request_app_repaint(ctx);
+                self.request_app_repaint();
             }
             PomodoroPhase::ReadyToWork => {
                 self.pomodoro.start_returning_to_work(now);
@@ -441,7 +484,7 @@ impl GsdvGuiApp {
                     self.app_language,
                     "Input detected, returning to work",
                 ));
-                self.request_app_repaint(ctx);
+                self.request_app_repaint();
             }
             PomodoroPhase::Working | PomodoroPhase::ReturningToWork => {}
         }
@@ -457,7 +500,7 @@ impl GsdvGuiApp {
         if started_at.elapsed() < budget {
             return false;
         }
-        self.request_app_repaint(ctx);
+        self.request_app_repaint();
         true
     }
 
@@ -473,9 +516,10 @@ impl GsdvGuiApp {
         budget: Duration,
     ) {
         while let Ok(event) = self.app_event_rx.try_recv() {
+            crate::gui::perf_log::count("app.drain_event");
             self.handle_app_event(ctx, event);
             if started_at.elapsed() >= budget {
-                self.request_app_repaint(ctx);
+                self.request_app_repaint();
                 break;
             }
         }
@@ -1292,6 +1336,7 @@ impl GsdvGuiApp {
             return;
         }
         if target == TerminalSurfaceKind::Agent && terminal_agent_input_submit_bytes(&bytes) {
+            crate::gui::perf_log::count("app.input_terminal_submitted");
             self.clear_agent_input_translation_state();
         }
         if target != TerminalSurfaceKind::Helix {
@@ -1324,5 +1369,14 @@ impl GsdvGuiApp {
             }
             host.write_bytes(&bytes);
         }
+    }
+}
+
+/// 返回 AppEvent 层 terminal runtime 事件的性能日志标签。
+fn terminal_runtime_app_event_label(kind: TerminalRuntimeEventKind) -> &'static str {
+    match kind {
+        TerminalRuntimeEventKind::Output => "app.terminal_runtime.output",
+        TerminalRuntimeEventKind::StateChanged => "app.terminal_runtime.state_changed",
+        TerminalRuntimeEventKind::Repaint => "app.terminal_runtime.repaint",
     }
 }

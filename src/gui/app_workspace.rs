@@ -361,7 +361,7 @@ impl GsdvGuiApp {
             states.remove(&slot);
         }
         self.persist_workspaces();
-        self.request_app_repaint(ctx);
+        self.request_app_repaint();
     }
 
     /// Moves one subagent one tab to the left inside its workspace.
@@ -469,7 +469,7 @@ impl GsdvGuiApp {
         }
 
         self.persist_workspaces();
-        self.request_app_repaint(ctx);
+        self.request_app_repaint();
     }
 
     /// Returns the current subagent index inside one workspace.
@@ -509,7 +509,7 @@ impl GsdvGuiApp {
         let subagent = workspace.subagents.remove(current);
         workspace.subagents.insert(target, subagent);
         self.persist_workspaces();
-        self.request_app_repaint(ctx);
+        self.request_app_repaint();
     }
 
     /// 标记 workspace metadata 和 subagent sidecar 需要异步保存。

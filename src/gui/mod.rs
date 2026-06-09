@@ -6,6 +6,8 @@ mod diff_viewer;
 mod i18n;
 mod markdown_preview;
 mod outline;
+mod perf_log;
+mod repaint_gate;
 mod reviewer_adapter;
 mod terminal_host;
 mod theme;

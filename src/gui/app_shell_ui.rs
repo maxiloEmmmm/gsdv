@@ -183,13 +183,12 @@ impl GsdvGuiApp {
                 ui.add_space(8.0);
 
                 let mut rail_action = None;
-                let repaint_after = self.max_repaint_interval();
                 for (index, workspace) in self.workspaces.iter().enumerate() {
                     let response = workspace_rail_row(
                         ui,
                         workspace,
                         index == self.active_workspace,
-                        repaint_after,
+                        &self.repaint_controller,
                     );
                     response.context_menu(|ui| {
                         if ui
@@ -243,13 +242,12 @@ impl GsdvGuiApp {
                 ui.add_space(18.0);
 
                 let mut rail_action = None;
-                let repaint_after = self.max_repaint_interval();
                 for (index, workspace) in self.workspaces.iter().enumerate() {
                     let response = compact_workspace_rail_row(
                         ui,
                         workspace,
                         index == self.active_workspace,
-                        repaint_after,
+                        &self.repaint_controller,
                     );
                     response.context_menu(|ui| {
                         if ui
@@ -582,7 +580,7 @@ impl GsdvGuiApp {
                     state.collapsed_project_keys.insert(key);
                 }
             }
-            self.request_app_repaint(ui.ctx());
+            self.request_app_repaint();
         } else if let Some(target) = target {
             self.request_workflow_target(ui.ctx(), target);
         }
@@ -956,7 +954,7 @@ impl GsdvGuiApp {
                                                     .pomodoro_rest_minutes
                                                     .to_string(),
                                             ));
-                                            self.request_app_repaint(ui.ctx());
+                                            self.request_app_repaint();
                                         }
                                         if help_entry_button(ui, self.app_language).clicked() {
                                             self.set_active_app_dialog(Some(AppDialog::Help));
@@ -1031,6 +1029,7 @@ impl GsdvGuiApp {
                         "main",
                         workspace.activity,
                         active == AgentSlotId::Main,
+                        &self.repaint_controller,
                     );
                     main_response.context_menu(|ui| {
                         agent_slot_context_menu(
@@ -1057,6 +1056,7 @@ impl GsdvGuiApp {
                             &subagent.name,
                             subagent.activity,
                             active == slot,
+                            &self.repaint_controller,
                         );
                         response.context_menu(|ui| {
                             agent_slot_context_menu(
@@ -1159,7 +1159,7 @@ impl GsdvGuiApp {
             if let Some(active) = self.active_agent_slots.get_mut(self.active_workspace) {
                 *active = slot;
             }
-            self.request_app_repaint(ui.ctx());
+            self.request_app_repaint();
         }
         if add_clicked {
             self.set_active_app_dialog(Some(AppDialog::AddSubagent {
@@ -1312,7 +1312,7 @@ impl GsdvGuiApp {
                 state.step_selection_task_path = Some(task.path.clone());
             }
         }
-        self.request_app_repaint(ctx);
+        self.request_app_repaint();
     }
 
     /// 返回当前 workflow task 工作台对应的项目名和 task 节点。
@@ -1831,7 +1831,6 @@ impl GsdvGuiApp {
 
 /// 绘制 footer 上的工作剩余进度条。
 fn pomodoro_work_remaining_footer_bar(ui: &mut Ui, remaining_fraction: f32, warning: bool) {
-    ui.ctx().request_repaint_after(Duration::from_secs(1));
     let size = Vec2::new(132.0, 8.0);
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     let radius = CornerRadius::same(3);

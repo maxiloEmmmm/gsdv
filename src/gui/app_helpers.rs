@@ -4,6 +4,8 @@
 //! app 状态，也不能直接触发后台工作。
 
 use super::*;
+use crate::gui::repaint_gate;
+use std::thread;
 
 /// 判断 workspace watcher 是否应该忽略这个路径。
 ///
@@ -429,7 +431,7 @@ pub(super) fn reviewer_script_dir() -> Option<PathBuf> {
 pub(super) fn run_reviewer_script_process(
     tx: Sender<AppEvent>,
     repaint_ctx: Option<egui::Context>,
-    repaint_after: Duration,
+    repaint_controller: repaint_gate::RepaintController,
     script_label: String,
     script_path: PathBuf,
     target_label: String,
@@ -466,7 +468,7 @@ pub(super) fn run_reviewer_script_process(
             send_notification(
                 &tx,
                 repaint_ctx.as_ref(),
-                repaint_after,
+                &repaint_controller,
                 format!("[script] failed to start {script_label} for {target_label}: {error}"),
             );
             return;
@@ -480,7 +482,7 @@ pub(super) fn run_reviewer_script_process(
             "stdout",
             tx.clone(),
             repaint_ctx.clone(),
-            repaint_after,
+            repaint_controller.clone(),
         ));
     }
     if let Some(stderr) = child.stderr.take() {
@@ -489,7 +491,7 @@ pub(super) fn run_reviewer_script_process(
             "stderr",
             tx.clone(),
             repaint_ctx.clone(),
-            repaint_after,
+            repaint_controller.clone(),
         ));
     }
 
@@ -507,14 +509,14 @@ pub(super) fn run_reviewer_script_process(
             send_notification(
                 &tx,
                 repaint_ctx.as_ref(),
-                repaint_after,
+                &repaint_controller,
                 format!("[exit] {script_label} for {target_label}: {exit}"),
             );
         }
         Err(error) => send_notification(
             &tx,
             repaint_ctx.as_ref(),
-            repaint_after,
+            &repaint_controller,
             format!("[exit] {script_label} for {target_label}: wait failed: {error}"),
         ),
     }
@@ -536,7 +538,7 @@ pub(super) fn spawn_script_pipe_reader<R>(
     stream: &'static str,
     tx: Sender<AppEvent>,
     repaint_ctx: Option<egui::Context>,
-    repaint_after: Duration,
+    repaint_controller: repaint_gate::RepaintController,
 ) -> thread::JoinHandle<()>
 where
     R: Read + Send + 'static,
@@ -554,7 +556,7 @@ where
                     send_notification(
                         &tx,
                         repaint_ctx.as_ref(),
-                        repaint_after,
+                        &repaint_controller,
                         format!("[{stream}] {text}"),
                     );
                 }
@@ -562,7 +564,7 @@ where
                     send_notification(
                         &tx,
                         repaint_ctx.as_ref(),
-                        repaint_after,
+                        &repaint_controller,
                         format!("[{stream}] read failed: {error}"),
                     );
                     break;
@@ -585,13 +587,13 @@ pub(super) fn trim_line_ending(bytes: &mut Vec<u8>) {
 pub(super) fn send_notification(
     tx: &Sender<AppEvent>,
     repaint_ctx: Option<&egui::Context>,
-    repaint_after: Duration,
+    repaint_controller: &repaint_gate::RepaintController,
     line: String,
 ) {
     if tx.send(AppEvent::Notification(line)).is_ok()
         && let Some(ctx) = repaint_ctx
     {
-        ctx.request_repaint_after(repaint_after);
+        repaint_controller.request_repaint(ctx);
     }
 }
 

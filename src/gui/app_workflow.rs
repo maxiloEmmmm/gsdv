@@ -15,7 +15,7 @@ impl GsdvGuiApp {
         if tab == OutlinePanelTab::Workflow {
             self.request_workflow_tree_refresh(ctx, self.active_workspace);
         }
-        self.request_app_repaint(ctx);
+        self.request_app_repaint();
     }
 
     /// 在普通 outline 和 workflow outline 之间切换。
@@ -141,7 +141,7 @@ impl GsdvGuiApp {
     ) {
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         self.background_runtime.spawn(async move {
             let event_workspace_path = workspace_path.clone();
             let result = tokio::task::spawn_blocking(move || {
@@ -154,7 +154,7 @@ impl GsdvGuiApp {
                 workspace_path: event_workspace_path,
                 result,
             });
-            repaint_ctx.request_repaint_after(repaint_after);
+            repaint_controller.request_repaint(&repaint_ctx);
         });
     }
 
@@ -258,7 +258,7 @@ impl GsdvGuiApp {
                 if let Some(workspace) = self.current_workspace_mut() {
                     workspace.center_mode = CenterMode::Editor;
                 }
-                self.request_app_repaint(ctx);
+                self.request_app_repaint();
             }
             WorkflowSelectionTarget::Step {
                 task_path,
@@ -281,7 +281,7 @@ impl GsdvGuiApp {
                 if let Some(workspace) = self.current_workspace_mut() {
                     workspace.center_mode = CenterMode::Editor;
                 }
-                self.request_app_repaint(ctx);
+                self.request_app_repaint();
             }
         }
     }
@@ -400,7 +400,7 @@ impl GsdvGuiApp {
     ) {
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         let target = selected.unwrap_or_else(|| WorkflowSelectionTarget::Task {
             task_path: request.task_path.clone(),
         });
@@ -415,7 +415,7 @@ impl GsdvGuiApp {
                 target,
                 result,
             });
-            repaint_ctx.request_repaint_after(repaint_after);
+            repaint_controller.request_repaint(&repaint_ctx);
         });
     }
 
@@ -488,7 +488,7 @@ impl GsdvGuiApp {
     ) {
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         self.background_runtime.spawn(async move {
             let request_for_task = request.clone();
             let result = tokio::task::spawn_blocking(move || {
@@ -501,7 +501,7 @@ impl GsdvGuiApp {
                 request,
                 result,
             });
-            repaint_ctx.request_repaint_after(repaint_after);
+            repaint_controller.request_repaint(&repaint_ctx);
         });
     }
 

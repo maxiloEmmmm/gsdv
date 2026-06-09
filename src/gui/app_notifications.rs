@@ -4,6 +4,7 @@
 //! 回到唯一事件队列。
 
 use super::*;
+use std::thread;
 
 impl GsdvGuiApp {
     pub(super) fn push_toast(&mut self, message: impl Into<String>, color: Color32) {
@@ -117,7 +118,7 @@ impl GsdvGuiApp {
         let network_settings = self.network_settings.clone();
         let tx = self.app_event_tx.clone();
         let repaint_ctx = self.app_repaint_ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
 
         self.open_notifications();
         self.push_notification_line(reviewer_script_reason_line(
@@ -136,7 +137,7 @@ impl GsdvGuiApp {
             run_reviewer_script_process(
                 tx,
                 repaint_ctx,
-                repaint_after,
+                repaint_controller,
                 script_label,
                 script_path,
                 target_label,

@@ -267,7 +267,7 @@ impl GsdvGuiApp {
             },
             theme::success(),
         );
-        self.request_app_repaint(ctx);
+        self.request_app_repaint();
     }
 
     /// 切换一个 Markdown 文件的收藏状态，并按 Home/workspace 分区保存。

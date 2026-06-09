@@ -56,7 +56,7 @@ impl GsdvGuiApp {
             let markdown_outline_collapsed = workspace.markdown_outline_collapsed;
             self.spawn_document_load_task(*index, path, absolute, markdown_outline_collapsed);
         }
-        self.request_app_repaint(ctx);
+        self.request_app_repaint();
     }
 
     /// Dispatches outline refreshes whose workspace roots emitted filesystem events.
@@ -71,7 +71,7 @@ impl GsdvGuiApp {
             };
             let tx = self.app_event_tx.clone();
             let repaint_ctx = ctx.clone();
-            let repaint_after = self.max_repaint_interval();
+            let repaint_controller = self.repaint_controller.clone();
             self.background_runtime.spawn(async move {
                 let result = tokio::task::spawn_blocking(move || {
                     let mut workspace = workspace;
@@ -82,7 +82,7 @@ impl GsdvGuiApp {
                 if let Ok(workspace) = result {
                     let _ = tx.send(AppEvent::WorkspaceOutlineRefreshed { index, workspace });
                 }
-                repaint_ctx.request_repaint_after(repaint_after);
+                repaint_controller.request_repaint(&repaint_ctx);
             });
         }
     }
@@ -178,12 +178,12 @@ impl GsdvGuiApp {
     }
 
     /// 处理 IME fallback 请求的下一帧 repaint。
-    pub(super) fn process_pending_input_repaint(&mut self, ctx: &egui::Context) {
+    pub(super) fn process_pending_input_repaint(&mut self, _ctx: &egui::Context) {
         if !self.pending_input_repaint {
             return;
         }
         self.pending_input_repaint = false;
-        self.request_app_repaint_after(ctx, self.max_repaint_interval());
+        self.request_app_repaint();
     }
 
     /// 后台读取字体文件并构建 egui 字体定义。
@@ -194,7 +194,7 @@ impl GsdvGuiApp {
     ) {
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         self.background_runtime.spawn(async move {
             let event_settings = settings.clone();
             let fonts =
@@ -206,7 +206,7 @@ impl GsdvGuiApp {
                     fonts,
                 });
             }
-            repaint_ctx.request_repaint_after(repaint_after);
+            repaint_controller.request_repaint(&repaint_ctx);
         });
     }
 
@@ -220,7 +220,7 @@ impl GsdvGuiApp {
     ) {
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         self.background_runtime.spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
                 let path = path.canonicalize().unwrap_or(path);
@@ -247,7 +247,7 @@ impl GsdvGuiApp {
             .await
             .map_err(|error| error.to_string());
             let _ = tx.send(AppEvent::WorkspaceAddPrepared { result });
-            repaint_ctx.request_repaint_after(repaint_after);
+            repaint_controller.request_repaint(&repaint_ctx);
         });
     }
 
@@ -260,7 +260,7 @@ impl GsdvGuiApp {
     ) {
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         self.background_runtime.spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
                 let outline_entries = markdown_outline_entries(&text);
@@ -276,7 +276,7 @@ impl GsdvGuiApp {
                     preview_blocks,
                 });
             }
-            repaint_ctx.request_repaint_after(repaint_after);
+            repaint_controller.request_repaint(&repaint_ctx);
         });
     }
 
@@ -290,7 +290,7 @@ impl GsdvGuiApp {
     ) {
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         self.background_runtime.spawn(async move {
             let error = async {
                 let Some(path) = data::workspace_memo_path(&workspace_path) else {
@@ -308,7 +308,7 @@ impl GsdvGuiApp {
             }
             .await;
             let _ = tx.send(AppEvent::MemoSaved { index, error });
-            repaint_ctx.request_repaint_after(repaint_after);
+            repaint_controller.request_repaint(&repaint_ctx);
         });
     }
 
@@ -322,7 +322,7 @@ impl GsdvGuiApp {
     ) {
         let tx = self.app_event_tx.clone();
         let repaint_ctx = self.app_repaint_ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         self.background_runtime.spawn(async move {
             let result = match tokio::fs::read_to_string(&absolute).await {
                 Ok(text) => tokio::task::spawn_blocking(move || LoadedDocument {
@@ -344,7 +344,7 @@ impl GsdvGuiApp {
             // The request is made by the task because completion may happen
             // after the dispatch-triggered frame has already been consumed.
             if let Some(ctx) = repaint_ctx {
-                ctx.request_repaint_after(repaint_after);
+                repaint_controller.request_repaint(&ctx);
             }
         });
     }
@@ -361,7 +361,7 @@ impl GsdvGuiApp {
     ) {
         let tx = self.app_event_tx.clone();
         let repaint_ctx = self.app_repaint_ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         self.background_runtime.spawn(async move {
             let result = tokio::fs::write(&absolute, text.as_bytes())
                 .await
@@ -381,7 +381,7 @@ impl GsdvGuiApp {
                 diff_history_error,
             });
             if let Some(ctx) = repaint_ctx {
-                ctx.request_repaint_after(repaint_after);
+                repaint_controller.request_repaint(&ctx);
             }
         });
     }
@@ -395,7 +395,7 @@ impl GsdvGuiApp {
     ) {
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         self.background_runtime.spawn(async move {
             let event_workspace_path = workspace_path.clone();
             let result = tokio::task::spawn_blocking(move || {
@@ -408,7 +408,7 @@ impl GsdvGuiApp {
                 workspace_path: event_workspace_path,
                 result,
             });
-            repaint_ctx.request_repaint_after(repaint_after);
+            repaint_controller.request_repaint(&repaint_ctx);
         });
     }
 
@@ -422,7 +422,7 @@ impl GsdvGuiApp {
     ) {
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         self.background_runtime.spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
                 build_recent_markdown_diff_prompt(&workspace_root, &recent_paths, since_ms)
@@ -430,7 +430,7 @@ impl GsdvGuiApp {
             .await
             .unwrap_or_else(|error| Err(error.to_string()));
             let _ = tx.send(AppEvent::MarkdownDiffPromptBuilt { result });
-            repaint_ctx.request_repaint_after(repaint_after);
+            repaint_controller.request_repaint(&repaint_ctx);
         });
     }
 
@@ -459,7 +459,7 @@ impl GsdvGuiApp {
         };
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         self.background_runtime.spawn(async move {
             let result = translate_agent_input_with_ai(client, content).await;
             let _ = tx.send(AppEvent::AgentInputTranslationFinished {
@@ -469,7 +469,7 @@ impl GsdvGuiApp {
                 source_has_images,
                 result,
             });
-            repaint_ctx.request_repaint_after(repaint_after);
+            repaint_controller.request_repaint(&repaint_ctx);
         });
     }
 
@@ -509,7 +509,7 @@ impl GsdvGuiApp {
     pub(super) fn spawn_file_mutation_task(&self, task: FileMutationTask) {
         let tx = self.app_event_tx.clone();
         let repaint_ctx = self.app_repaint_ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         self.background_runtime.spawn(async move {
             let event = match task {
                 FileMutationTask::CreateMarkdown {
@@ -577,7 +577,7 @@ impl GsdvGuiApp {
             };
             let _ = tx.send(AppEvent::FileMutationFinished(event));
             if let Some(ctx) = repaint_ctx {
-                ctx.request_repaint_after(repaint_after);
+                repaint_controller.request_repaint(&ctx);
             }
         });
     }
@@ -586,7 +586,7 @@ impl GsdvGuiApp {
     pub(super) fn spawn_screenshot_save_task(&self, path: PathBuf, image: Arc<egui::ColorImage>) {
         let tx = self.app_event_tx.clone();
         let repaint_ctx = self.app_repaint_ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         self.background_runtime.spawn(async move {
             let event_path = path.clone();
             let result = tokio::task::spawn_blocking(move || {
@@ -601,7 +601,7 @@ impl GsdvGuiApp {
                 result,
             });
             if let Some(ctx) = repaint_ctx {
-                ctx.request_repaint_after(repaint_after);
+                repaint_controller.request_repaint(&ctx);
             }
         });
     }
@@ -611,7 +611,7 @@ impl GsdvGuiApp {
         self.screenshot_request_read_in_flight = true;
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         self.background_runtime.spawn(async move {
             let request_path = screenshot_request_path();
             let result = match tokio::fs::read_to_string(&request_path).await {
@@ -623,7 +623,7 @@ impl GsdvGuiApp {
                 Err(error) => Err(error.to_string()),
             };
             let _ = tx.send(AppEvent::ScreenshotRequestLoaded { result });
-            repaint_ctx.request_repaint_after(repaint_after);
+            repaint_controller.request_repaint(&repaint_ctx);
         });
     }
 
@@ -632,7 +632,7 @@ impl GsdvGuiApp {
         let mut workspaces = self.workspaces.clone();
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         self.background_runtime.spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
                 let changed = data::refresh_workspace_agent_statuses(&mut workspaces);
@@ -645,7 +645,7 @@ impl GsdvGuiApp {
                     changed,
                 });
             }
-            repaint_ctx.request_repaint_after(repaint_after);
+            repaint_controller.request_repaint(&repaint_ctx);
         });
     }
 
@@ -654,7 +654,7 @@ impl GsdvGuiApp {
         self.reviewer_scripts.last_refresh = Some(Instant::now());
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         self.background_runtime.spawn(async move {
             let result = tokio::task::spawn_blocking(|| {
                 load_reviewer_scripts().map_err(|error| error.to_string())
@@ -662,7 +662,7 @@ impl GsdvGuiApp {
             .await
             .unwrap_or_else(|error| Err(error.to_string()));
             let _ = tx.send(AppEvent::ReviewerScriptsLoaded { result });
-            repaint_ctx.request_repaint_after(repaint_after);
+            repaint_controller.request_repaint(&repaint_ctx);
         });
     }
 
@@ -678,14 +678,15 @@ impl GsdvGuiApp {
         }
         let agent_launch = self.agent_launch.clone();
         let network_settings = self.network_settings.clone();
-        let repaint_after = self.max_repaint_interval();
         let spawn_ctx = ctx.clone();
         let repaint_ctx = ctx.clone();
+        let repaint_controller = self.repaint_controller.clone();
         let theme_mode = self.theme_mode;
         let terminal_runtime_handle = self.background_runtime.handle().clone();
         let terminal_event_sink = self.terminal_runtime_event_sink(ctx);
         let tx = self.app_event_tx.clone();
         self.background_runtime.spawn(async move {
+            let terminal_repaint_controller = repaint_controller.clone();
             let result = tokio::task::spawn_blocking(move || {
                 GuiTerminalHost::spawn(
                     &spawn_ctx,
@@ -693,7 +694,7 @@ impl GsdvGuiApp {
                     key.kind,
                     &agent_launch,
                     &network_settings,
-                    repaint_after,
+                    terminal_repaint_controller,
                     theme_mode,
                     terminal_runtime_handle,
                     terminal_event_sink,
@@ -703,7 +704,7 @@ impl GsdvGuiApp {
             .await
             .unwrap_or_else(|error| Err(error.to_string()));
             let _ = tx.send(AppEvent::TerminalHostSpawned { key, result });
-            repaint_ctx.request_repaint_after(repaint_after);
+            repaint_controller.request_repaint(&repaint_ctx);
         });
     }
 
@@ -754,21 +755,22 @@ impl GsdvGuiApp {
             return;
         }
         let network_settings = self.network_settings.clone();
-        let repaint_after = self.max_repaint_interval();
         let spawn_ctx = ctx.clone();
         let repaint_ctx = ctx.clone();
+        let repaint_controller = self.repaint_controller.clone();
         let theme_mode = self.theme_mode;
         let terminal_runtime_handle = self.background_runtime.handle().clone();
         let terminal_event_sink = self.terminal_runtime_event_sink(ctx);
         let tx = self.app_event_tx.clone();
         self.background_runtime.spawn(async move {
+            let terminal_repaint_controller = repaint_controller.clone();
             let result = tokio::task::spawn_blocking(move || {
                 GuiTerminalHost::spawn_helix(
                     &spawn_ctx,
                     &workspace,
                     spec,
                     &network_settings,
-                    repaint_after,
+                    terminal_repaint_controller,
                     theme_mode,
                     terminal_runtime_handle,
                     terminal_event_sink,
@@ -778,7 +780,7 @@ impl GsdvGuiApp {
             .await
             .unwrap_or_else(|error| Err(error.to_string()));
             let _ = tx.send(AppEvent::TerminalHostSpawned { key, result });
-            repaint_ctx.request_repaint_after(repaint_after);
+            repaint_controller.request_repaint(&repaint_ctx);
         });
     }
 
@@ -789,10 +791,11 @@ impl GsdvGuiApp {
     ) -> TerminalRuntimeEventSink {
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         Arc::new(move |event| {
+            crate::gui::perf_log::count(terminal_runtime_sink_event_label(event.kind));
             let _ = tx.send(AppEvent::TerminalRuntime(event));
-            repaint_ctx.request_repaint_after(repaint_after);
+            repaint_controller.request_repaint(&repaint_ctx);
         })
     }
 
@@ -807,7 +810,7 @@ impl GsdvGuiApp {
     ) {
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         self.background_runtime.spawn(async move {
             let spec = tokio::task::spawn_blocking(move || HelixLaunchSpec {
                 workdir: terminal_file_helix_workdir(&workspace_dir, &file),
@@ -821,7 +824,7 @@ impl GsdvGuiApp {
                     spec,
                 });
             }
-            repaint_ctx.request_repaint_after(repaint_after);
+            repaint_controller.request_repaint(&repaint_ctx);
         });
     }
 
@@ -834,7 +837,7 @@ impl GsdvGuiApp {
     ) {
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         self.background_runtime.spawn(async move {
             let click =
                 tokio::task::spawn_blocking(move || classify_terminal_output_path_click(click))
@@ -845,7 +848,7 @@ impl GsdvGuiApp {
                     click,
                 });
             }
-            repaint_ctx.request_repaint_after(repaint_after);
+            repaint_controller.request_repaint(&repaint_ctx);
         });
     }
 
@@ -862,7 +865,7 @@ impl GsdvGuiApp {
         self.helix_binary_check_in_flight = true;
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         self.background_runtime.spawn(async move {
             let available = tokio::task::spawn_blocking(|| {
                 Command::new("hx")
@@ -873,7 +876,7 @@ impl GsdvGuiApp {
             .await
             .unwrap_or(false);
             let _ = tx.send(AppEvent::HelixBinaryChecked { available });
-            repaint_ctx.request_repaint_after(repaint_after);
+            repaint_controller.request_repaint(&repaint_ctx);
         });
     }
 
@@ -881,13 +884,13 @@ impl GsdvGuiApp {
     pub(super) fn spawn_reveal_path_task(&self, ctx: &egui::Context, absolute: PathBuf) {
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         self.background_runtime.spawn(async move {
             let result = tokio::task::spawn_blocking(move || reveal_path_command(&absolute))
                 .await
                 .unwrap_or_else(|error| Err(error.to_string()));
             let _ = tx.send(AppEvent::RevealPathFinished { result });
-            repaint_ctx.request_repaint_after(repaint_after);
+            repaint_controller.request_repaint(&repaint_ctx);
         });
     }
 
@@ -905,7 +908,7 @@ impl GsdvGuiApp {
         let network_settings = self.network_settings.clone();
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         self.background_runtime.spawn(async move {
             let result = match codex_auth_client(&network_settings) {
                 Ok(client) => crate::ai::complete_browser_auth_flow(&client, flow)
@@ -914,7 +917,7 @@ impl GsdvGuiApp {
                 Err(error) => Err(error),
             };
             let _ = tx.send(AppEvent::CodexAuthFinished { result });
-            repaint_ctx.request_repaint_after(repaint_after);
+            repaint_controller.request_repaint(&repaint_ctx);
         });
     }
 
@@ -926,7 +929,7 @@ impl GsdvGuiApp {
     ) {
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         self.background_runtime.spawn(async move {
             let task_repo = repo.clone();
             let result = tokio::task::spawn_blocking(move || {
@@ -938,7 +941,7 @@ impl GsdvGuiApp {
             .await
             .unwrap_or_else(|error| Err(error.to_string()));
             let _ = tx.send(AppEvent::ReviewerBranchChoicesLoaded { repo, result });
-            repaint_ctx.request_repaint_after(repaint_after);
+            repaint_controller.request_repaint(&repaint_ctx);
         });
     }
 
@@ -959,7 +962,7 @@ impl GsdvGuiApp {
         let checkout = branch.checkout.clone();
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         self.background_runtime.spawn(async move {
             let task_repo = repo.clone();
             let result = tokio::task::spawn_blocking(move || {
@@ -974,7 +977,7 @@ impl GsdvGuiApp {
                 target,
                 result,
             });
-            repaint_ctx.request_repaint_after(repaint_after);
+            repaint_controller.request_repaint(&repaint_ctx);
         });
     }
 
@@ -990,7 +993,7 @@ impl GsdvGuiApp {
         }
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         self.background_runtime.spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
                 ReviewerAdapter::new(project_dir).map_err(|error| error.to_string())
@@ -998,7 +1001,7 @@ impl GsdvGuiApp {
             .await
             .unwrap_or_else(|error| Err(error.to_string()));
             let _ = tx.send(AppEvent::ReviewerAdapterLoaded { index, result });
-            repaint_ctx.request_repaint_after(repaint_after);
+            repaint_controller.request_repaint(&repaint_ctx);
         });
     }
 
@@ -1052,7 +1055,7 @@ impl GsdvGuiApp {
         };
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         self.background_runtime.spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
                 crate::reviewer::app::load_reviewer_git_data(request)
@@ -1061,7 +1064,7 @@ impl GsdvGuiApp {
             .await
             .unwrap_or_else(|error| Err(error.to_string()));
             let _ = tx.send(AppEvent::ReviewerGitDataLoaded { index, result });
-            repaint_ctx.request_repaint_after(repaint_after);
+            repaint_controller.request_repaint(&repaint_ctx);
         });
     }
 
@@ -1087,7 +1090,7 @@ impl GsdvGuiApp {
         };
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         self.background_runtime.spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
                 let mut adapter = adapter;
@@ -1130,7 +1133,7 @@ impl GsdvGuiApp {
                 result,
                 effect,
             });
-            repaint_ctx.request_repaint_after(repaint_after);
+            repaint_controller.request_repaint(&repaint_ctx);
         });
     }
 
@@ -1177,6 +1180,15 @@ impl GsdvGuiApp {
             self.pending_reviewer_adapter_tasks.remove(&index);
         }
         next
+    }
+}
+
+/// 返回 terminal runtime sink 事件的性能日志标签。
+fn terminal_runtime_sink_event_label(kind: TerminalRuntimeEventKind) -> &'static str {
+    match kind {
+        TerminalRuntimeEventKind::Output => "terminal.sink.output",
+        TerminalRuntimeEventKind::StateChanged => "terminal.sink.state_changed",
+        TerminalRuntimeEventKind::Repaint => "terminal.sink.repaint",
     }
 }
 

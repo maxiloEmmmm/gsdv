@@ -106,6 +106,8 @@ impl GsdvGuiApp {
         let terminal_size = Vec2::new(ui.available_width(), ui.available_height().max(1.0));
         let theme_mode = self.theme_mode;
         let terminal_font_size = terminal_font_size_for_kind(&self.font_settings, kind);
+        let include_agent_input_rect =
+            kind == TerminalSurfaceKind::Agent && self.agent_input_translation_popup.is_some();
         let custom_quick_replies = self.runtime_settings.agent_custom_quick_replies.clone();
         let terminal_output = ui.allocate_ui(terminal_size, |ui| {
             let shortcut_scope = match kind {
@@ -119,6 +121,7 @@ impl GsdvGuiApp {
                 ui,
                 theme_mode,
                 terminal_font_size,
+                include_agent_input_rect,
                 request_focus,
                 accept_input,
                 shortcut_scope,
@@ -132,8 +135,9 @@ impl GsdvGuiApp {
         });
         let (agent_exit, host_output) = terminal_output.inner;
         if kind == TerminalSurfaceKind::Agent {
-            self.active_agent_terminal_rect =
-                host_output.as_ref().and_then(|output| output.input_rect);
+            self.active_agent_terminal_rect = include_agent_input_rect
+                .then(|| host_output.as_ref().and_then(|output| output.input_rect))
+                .flatten();
             if host_output
                 .as_ref()
                 .is_some_and(|output| output.input_submitted)
@@ -361,7 +365,6 @@ impl GsdvGuiApp {
                 changed_at: now,
                 last_requested_text: None,
             });
-            self.request_app_repaint_after(ctx, AGENT_INPUT_TRANSLATION_IDLE_DEBOUNCE);
             return;
         }
         let Some(watch) = self.agent_input_translation_watch.as_mut() else {
@@ -369,7 +372,6 @@ impl GsdvGuiApp {
         };
         let idle = now.saturating_duration_since(watch.changed_at);
         if idle < AGENT_INPUT_TRANSLATION_IDLE_DEBOUNCE {
-            self.request_app_repaint_after(ctx, AGENT_INPUT_TRANSLATION_IDLE_DEBOUNCE - idle);
             return;
         }
         if watch.last_requested_text.as_ref() == Some(&watch.text) {
@@ -377,7 +379,6 @@ impl GsdvGuiApp {
         }
         let key = (watch.workspace_index, watch.agent_slot.clone());
         if self.agent_input_translation_in_flight.contains(&key) {
-            self.request_app_repaint_after(ctx, AGENT_INPUT_TRANSLATION_IDLE_DEBOUNCE);
             return;
         }
         let workspace_index = watch.workspace_index;
@@ -828,6 +829,7 @@ impl GsdvGuiApp {
                 ui,
                 theme_mode,
                 terminal_font_size,
+                false,
                 true,
                 accept_input,
                 TerminalInputShortcutScope::HelixDrawerSurface,

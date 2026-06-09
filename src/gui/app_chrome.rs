@@ -4,6 +4,7 @@
 //! 避免 `app.rs` 同时承担顶层状态机和具体控件实现。
 
 use super::*;
+use crate::gui::repaint_gate;
 
 pub(super) fn panel_frame() -> Frame {
     Frame::new()
@@ -96,6 +97,7 @@ pub(super) fn agent_slot_tab_button(
     label: &str,
     activity: WorkspaceActivity,
     active: bool,
+    repaint_controller: &repaint_gate::RepaintController,
 ) -> egui::Response {
     let (dot, _) = activity_style(activity);
     let response = ui.add_sized(
@@ -120,7 +122,7 @@ pub(super) fn agent_slot_tab_button(
         )),
     );
     let center = egui::pos2(response.rect.left() + 10.0, response.rect.center().y);
-    paint_activity_dot(ui, center, dot, activity, true, Duration::from_millis(500));
+    paint_activity_dot(ui, center, dot, activity, true, repaint_controller);
     response
 }
 
@@ -510,7 +512,7 @@ pub(super) fn compact_workspace_rail_row(
     ui: &mut Ui,
     workspace: &WorkspaceViewData,
     active: bool,
-    repaint_after: Duration,
+    repaint_controller: &repaint_gate::RepaintController,
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(38.0, 38.0), Sense::click());
     let fill = if active {
@@ -548,7 +550,7 @@ pub(super) fn compact_workspace_rail_row(
         dot_color,
         activity,
         true,
-        repaint_after,
+        repaint_controller,
     );
     response.on_hover_text(format!("{}\n{}", workspace.name, status))
 }
@@ -557,7 +559,7 @@ pub(super) fn workspace_rail_row(
     ui: &mut Ui,
     workspace: &WorkspaceViewData,
     active: bool,
-    repaint_after: Duration,
+    repaint_controller: &repaint_gate::RepaintController,
 ) -> egui::Response {
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 52.0), Sense::click());
@@ -599,7 +601,7 @@ pub(super) fn workspace_rail_row(
         dot_color,
         activity,
         false,
-        repaint_after,
+        repaint_controller,
     );
     ui.painter().text(
         egui::pos2(text_x + 15.0, paint_rect.top() + 35.0),
@@ -798,10 +800,10 @@ pub(super) fn paint_activity_dot(
     color: Color32,
     activity: WorkspaceActivity,
     compact: bool,
-    repaint_after: Duration,
+    repaint_controller: &repaint_gate::RepaintController,
 ) {
     if activity == WorkspaceActivity::Busy {
-        paint_busy_activity_indicator(ui, center, compact, repaint_after);
+        paint_busy_activity_indicator(ui, center, compact, repaint_controller);
     } else {
         ui.painter().circle_filled(center, 3.2, color);
     }
@@ -811,10 +813,9 @@ pub(super) fn paint_busy_activity_indicator(
     ui: &Ui,
     center: egui::Pos2,
     compact: bool,
-    repaint_after: Duration,
+    repaint_controller: &repaint_gate::RepaintController,
 ) {
-    ui.ctx()
-        .request_repaint_after(Duration::from_millis(80).max(repaint_after));
+    repaint_controller.request_repaint(ui.ctx());
 
     let time = ui.input(|input| input.time) as f32;
     let colors = [theme::primary(), theme::warning(), theme::danger()];
