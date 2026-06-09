@@ -34,7 +34,7 @@ impl GsdvGuiApp {
                 let (rect, _) = ui.allocate_exact_size(POMODORO_CAT_SIZE, Sense::hover());
                 draw_hajimi_work_warning_cat(ui, rect, &texture, reveal, elapsed);
             });
-        ctx.request_repaint_after(POMODORO_ANIMATION_FRAME);
+        self.request_app_repaint();
     }
 
     /// 绘制休息相关阶段的哈基米和右键菜单。
@@ -122,7 +122,7 @@ impl GsdvGuiApp {
                 "{minutes}",
                 self.runtime_settings.pomodoro_work_minutes.to_string(),
             ));
-            self.request_app_repaint(ctx);
+            self.request_app_repaint();
             return;
         }
         self.update_pomodoro_meows(now);

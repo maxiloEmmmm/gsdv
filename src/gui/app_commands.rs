@@ -271,7 +271,7 @@ impl GsdvGuiApp {
                 ReviewerAdapterTaskEffect::None,
             );
         }
-        self.request_app_repaint(ctx);
+        self.request_app_repaint();
     }
 
     /// 返回当前 reviewer snapshot 中 diff 行的复制文本。

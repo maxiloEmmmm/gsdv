@@ -244,7 +244,7 @@ impl GsdvGuiApp {
         }
         self.extra_tools.open = true;
         self.mark_extra_tools_scan_due();
-        self.request_app_repaint(ctx);
+        self.request_app_repaint();
     }
 
     /// 关闭外置工具 modal。
@@ -259,11 +259,17 @@ impl GsdvGuiApp {
 
     /// 返回外置工具是否有到期事件需要进入 AppEvent。
     pub(super) fn extra_tools_event_due(&self) -> bool {
+        if !self.extra_tools.open {
+            return false;
+        }
         self.extra_tools_scan_due() || self.extra_tools_value_refresh_due()
     }
 
     /// 返回下一次外置工具后台工作需要唤醒 UI 的延迟。
     pub(super) fn next_extra_tools_delay(&self) -> Option<Duration> {
+        if !self.extra_tools.open {
+            return None;
+        }
         let mut next = Some(
             self.extra_tools
                 .next_scan_at
@@ -319,7 +325,7 @@ impl GsdvGuiApp {
                 );
             }
         }
-        self.request_app_repaint(ctx);
+        self.request_app_repaint();
     }
 
     /// 合并单个 value 刷新结果。
@@ -357,7 +363,7 @@ impl GsdvGuiApp {
         if let Some(notification) = notification {
             self.push_notification_line(notification);
         }
-        self.request_app_repaint(ctx);
+        self.request_app_repaint();
     }
 
     /// 合并 action 执行结果并触发一次 value 刷新。
@@ -384,7 +390,7 @@ impl GsdvGuiApp {
         if let Some(refresh_key) = refresh_key {
             self.spawn_extra_tool_value_task(ctx, refresh_key);
         }
-        self.request_app_repaint(ctx);
+        self.request_app_repaint();
     }
 
     /// 绘制外置工具右侧抽屉。
@@ -507,7 +513,7 @@ impl GsdvGuiApp {
         self.extra_tools.scan_in_flight = true;
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         let network_settings = self.network_settings.clone();
         let workspace_path = self
             .current_workspace()
@@ -519,9 +525,9 @@ impl GsdvGuiApp {
                 workspace_path: workspace_path_for_event,
                 result,
             });
-            repaint_ctx.request_repaint_after(repaint_after);
+            repaint_controller.request_repaint(&repaint_ctx);
         });
-        self.request_app_repaint(ctx);
+        self.request_app_repaint();
     }
 
     /// 启动所有到期 value 刷新任务。
@@ -556,7 +562,7 @@ impl GsdvGuiApp {
         let script = ExtraToolScriptRef::from_card(card);
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         let network_settings = self.network_settings.clone();
         let workspace_path = self
             .current_workspace()
@@ -568,9 +574,9 @@ impl GsdvGuiApp {
                 key: script.key,
                 result,
             });
-            repaint_ctx.request_repaint_after(repaint_after);
+            repaint_controller.request_repaint(&repaint_ctx);
         });
-        self.request_app_repaint(ctx);
+        self.request_app_repaint();
     }
 
     /// 启动单个 action 后台任务。
@@ -606,7 +612,7 @@ impl GsdvGuiApp {
         let script = ExtraToolScriptRef::from_card(card);
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
-        let repaint_after = self.max_repaint_interval();
+        let repaint_controller = self.repaint_controller.clone();
         let network_settings = self.network_settings.clone();
         self.background_runtime.spawn(async move {
             let result = run_extra_tool_action(
@@ -623,9 +629,9 @@ impl GsdvGuiApp {
                 action,
                 result,
             });
-            repaint_ctx.request_repaint_after(repaint_after);
+            repaint_controller.request_repaint(&repaint_ctx);
         });
-        self.request_app_repaint(ctx);
+        self.request_app_repaint();
     }
 
     /// 请求中断当前 action。
@@ -640,7 +646,7 @@ impl GsdvGuiApp {
         if let Some(label) = label {
             self.push_notification_line(format!("[extra-tools] interrupt requested for {label}"));
         }
-        self.request_app_repaint(ctx);
+        self.request_app_repaint();
     }
 
     /// 保留用户输入和运行状态后合并扫描结果。

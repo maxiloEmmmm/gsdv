@@ -108,7 +108,7 @@ impl GsdvGuiApp {
     pub(super) fn request_egui_screenshot(&mut self, ctx: &egui::Context, source: &str) {
         let path = self.next_screenshot_path(source);
         ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(path)));
-        self.request_app_repaint(ctx);
+        self.request_app_repaint();
     }
 
     pub(super) fn next_screenshot_path(&mut self, source: &str) -> PathBuf {

@@ -13,6 +13,7 @@ use crate::gui::outline::{
     outline_path_is_global, recent_markdown_outline_dialog_content, recent_markdown_outline_nodes,
     render_favorite_outline_node, render_outline_node, toggle_path_in_set,
 };
+use crate::gui::repaint_gate;
 use crate::gui::reviewer_adapter::{ReviewerAdapter, ReviewerBranchTarget};
 use crate::gui::terminal_host::{
     AgentProcessExit, GuiTerminalHost, HelixLaunchSpec, TerminalFileLineClick, TerminalHost,
@@ -287,7 +288,7 @@ fn spawn_input_runtime(
     runtime_handle.spawn(async move {
         while let Some(request) = rx.recv().await {
             let repaint_ctx = request.repaint_ctx.clone();
-            let repaint_after = request.repaint_after;
+            let repaint_controller = request.repaint_controller.clone();
             let events = process_input_runtime_request(request);
             if events.is_empty() {
                 continue;
@@ -295,7 +296,7 @@ fn spawn_input_runtime(
             for event in events {
                 let _ = app_event_tx.send(event);
             }
-            repaint_ctx.request_repaint_after(repaint_after);
+            repaint_controller.request_repaint(&repaint_ctx);
         }
     });
     tx
@@ -478,6 +479,8 @@ struct GsdvGuiApp {
     rendering_frame: bool,
     /// 后台任务完成后用于唤醒 app 的最近 egui context。
     app_repaint_ctx: Option<egui::Context>,
+    /// app 主动 repaint 的无锁 FPS 控制器。
+    repaint_controller: repaint_gate::RepaintController,
     /// 正在 UI 路径之外创建的 terminal host。
     pending_terminal_spawns: BTreeSet<TerminalSpawnKey>,
     /// 当前是否正在检查 `hx --version`。
@@ -860,6 +863,7 @@ impl GsdvGuiApp {
         let memo_save_errors = (0..value.workspaces.len()).map(|_| None).collect();
         let (app_event_tx, app_event_rx) = mpsc::channel();
         let background_runtime = Arc::new(build_background_runtime());
+        let repaint_controller = repaint_gate::RepaintController::new();
         let input_runtime_tx =
             spawn_input_runtime(background_runtime.handle().clone(), app_event_tx.clone());
         let mut app = Self {
@@ -898,7 +902,10 @@ impl GsdvGuiApp {
             rail_collapsed: value.rail_collapsed,
             default_agent_kind: agent_launch.kind,
             agent_launch,
-            fs_watcher: Arc::new(Mutex::new(FsWatcherService::new(app_event_tx.clone()))),
+            fs_watcher: Arc::new(Mutex::new(FsWatcherService::new(
+                app_event_tx.clone(),
+                repaint_controller.clone(),
+            ))),
             fs_watch_dirty: FsWatchDirtyState::new(),
             pending_memo_saves: BTreeSet::new(),
             pending_markdown_reparse: BTreeSet::new(),
@@ -918,6 +925,7 @@ impl GsdvGuiApp {
             render_dirty: true,
             rendering_frame: false,
             app_repaint_ctx: None,
+            repaint_controller,
             pending_terminal_spawns: BTreeSet::new(),
             helix_binary_check_in_flight: false,
             pending_helix_open_request: None,
@@ -1216,6 +1224,8 @@ struct FsWatcherService {
     event_tx: Sender<AppEvent>,
     /// watcher callback 用来唤醒 UI 的可选 egui context。
     repaint_ctx: Arc<Mutex<Option<egui::Context>>>,
+    /// watcher callback 唤醒 UI 时使用的 FPS 控制器。
+    repaint_controller: repaint_gate::RepaintController,
     /// 递归注册的 workspace root。
     workspace_roots: Vec<PathBuf>,
     /// 变化后需要触发重载的 reviewer script 目录。
@@ -1232,12 +1242,16 @@ struct FsWatcherService {
 
 impl FsWatcherService {
     /// 创建 app 级全局文件系统 watcher。
-    fn new(event_tx: Sender<AppEvent>) -> Self {
+    fn new(
+        event_tx: Sender<AppEvent>,
+        repaint_controller: repaint_gate::RepaintController,
+    ) -> Self {
         let repaint_ctx = Arc::new(Mutex::new(None));
         let mut service = Self {
             watcher: None,
             event_tx,
             repaint_ctx,
+            repaint_controller,
             workspace_roots: Vec::new(),
             reviewer_script_dir: None,
             reviewer_script_watch_path: None,
@@ -1263,12 +1277,13 @@ impl FsWatcherService {
         }
         let event_tx = self.event_tx.clone();
         let repaint_ctx = self.repaint_ctx.clone();
+        let repaint_controller = self.repaint_controller.clone();
         match notify::recommended_watcher(move |event| {
             let _ = event_tx.send(AppEvent::FsWatch(event));
             if let Ok(repaint_ctx) = repaint_ctx.lock()
                 && let Some(ctx) = repaint_ctx.as_ref()
             {
-                ctx.request_repaint();
+                repaint_controller.request_repaint(ctx);
             }
         }) {
             Ok(watcher) => {
@@ -1753,8 +1768,8 @@ struct InputRuntimeRequest {
     terminal_kitty_keyboard_protocol: bool,
     /// input runtime 投回 AppEvent 后用于唤醒 UI。
     repaint_ctx: egui::Context,
-    /// app FPS gate 对应的 repaint 间隔。
-    repaint_after: Duration,
+    /// input runtime 投回 AppEvent 后使用的 FPS 控制器。
+    repaint_controller: repaint_gate::RepaintController,
     /// 番茄钟是否启用。
     pomodoro_enabled: bool,
     /// 当前番茄钟阶段。
@@ -2187,9 +2202,15 @@ impl eframe::App for GsdvGuiApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        crate::gui::perf_log::count("app.update");
+        crate::gui::perf_log::count(runtime_max_fps_label(self.runtime_settings.max_frame_rate));
+        log_egui_repaint_causes(ctx);
         self.app_repaint_ctx = Some(ctx.clone());
+        self.repaint_controller
+            .frame_started(self.max_repaint_interval());
         self.process_update_events(ctx);
         self.process_workspace_store_writer(ctx);
+        self.wait_for_full_frame_slot();
         self.paint_update_frame(ctx);
         self.process_agent_input_translation_auto_trigger(ctx);
         self.schedule_next_update(ctx);
@@ -2199,6 +2220,8 @@ impl eframe::App for GsdvGuiApp {
 impl GsdvGuiApp {
     /// Runs egui layout and paint for the current immutable app state.
     fn paint_update_frame(&mut self, ctx: &egui::Context) {
+        crate::gui::perf_log::count("app.paint_frame");
+        let paint_started_at = Instant::now();
         self.render_dirty = false;
         self.rendering_frame = true;
 
@@ -2243,8 +2266,28 @@ impl GsdvGuiApp {
         self.rendering_frame = false;
         self.last_full_frame_at = Some(Instant::now());
         if self.render_dirty {
-            self.schedule_dirty_render(ctx);
+            self.schedule_dirty_render();
         }
+        crate::gui::perf_log::duration_us("app.paint_frame_us", paint_started_at.elapsed());
+    }
+
+    /// 等待完整 UI paint 的 FPS 时间片，适用于 update 被外部提前唤醒时。
+    fn wait_for_full_frame_slot(&self) {
+        let Some(last_full_frame_at) = self.last_full_frame_at else {
+            return;
+        };
+        let frame_interval = self.max_repaint_interval();
+        let elapsed = last_full_frame_at.elapsed();
+        if elapsed >= frame_interval {
+            return;
+        }
+        let sleep_for = frame_interval - elapsed;
+        crate::gui::perf_log::count("app.paint_gate_wait");
+        crate::gui::perf_log::duration_us("app.paint_gate_wait_us", sleep_for);
+        // 触发条件：eframe 提前调用 update，但还没到配置 FPS 的下一帧。
+        // 不能跳过整帧：egui 本帧没有 shapes 时窗口会闪。
+        // 防止回归：事件风暴绕过 request gate 后仍按显示器刷新率完整绘制。
+        thread::sleep(sleep_for);
     }
 
     fn current_workspace(&self) -> Option<&WorkspaceViewData> {
@@ -2260,55 +2303,88 @@ impl GsdvGuiApp {
         max_frame_rate_interval(self.runtime_settings.max_frame_rate)
     }
 
-    /// Requests a UI pass through the app repaint throttle.
-    fn request_app_repaint(&mut self, ctx: &egui::Context) {
-        self.mark_render_dirty(ctx);
+    /// 请求一次完整 UI repaint，适用于可见状态已经变脏的场景。
+    fn request_app_repaint(&mut self) {
+        crate::gui::perf_log::count("app.request_repaint");
+        self.mark_render_dirty();
     }
 
-    /// Requests a delayed UI pass while preserving the app repaint throttle.
-    fn request_app_repaint_after(&self, ctx: &egui::Context, duration: Duration) {
-        ctx.request_repaint_after(duration.max(self.max_repaint_interval()));
+    /// 通过无参 FPS 闸门请求一次 egui 唤醒。
+    fn request_repaint(&self) {
+        crate::gui::perf_log::count("app.request_repaint_gate");
+        let Some(ctx) = self.app_repaint_ctx.as_ref() else {
+            crate::gui::perf_log::count("app.request_repaint_no_ctx");
+            return;
+        };
+        self.repaint_controller.request_repaint(ctx);
     }
 
-    /// Marks a frame dirty and schedules the next allowed full render.
-    fn mark_render_dirty(&mut self, ctx: &egui::Context) {
+    /// 标记完整 UI frame 已变脏，并调度下一次允许的 repaint。
+    fn mark_render_dirty(&mut self) {
+        crate::gui::perf_log::count("app.mark_render_dirty");
         self.render_dirty = true;
         if !self.rendering_frame {
-            self.schedule_dirty_render(ctx);
+            self.schedule_dirty_render();
         }
     }
 
-    /// Wakes the UI when the FPS gate allows a dirty frame to be consumed.
-    fn schedule_dirty_render(&self, ctx: &egui::Context) {
-        let delay = self
-            .last_full_frame_at
-            .map(|last_frame| {
-                self.max_repaint_interval()
-                    .saturating_sub(last_frame.elapsed())
-            })
-            .unwrap_or(Duration::ZERO);
-        ctx.request_repaint_after(delay);
+    /// 唤醒 UI，让 FPS 闸门决定具体 repaint 时间。
+    fn schedule_dirty_render(&self) {
+        crate::gui::perf_log::count("app.schedule_dirty_render");
+        self.request_repaint();
     }
 
     /// 调度没有原生事件唤醒的 route 和后台工作。
     fn schedule_next_update(&self, ctx: &egui::Context) {
+        crate::gui::perf_log::count("app.schedule_next_update");
         let mut next = self.screenshot_request_poll_enabled.then(|| {
+            crate::gui::perf_log::count("app.next_update.screenshot_poll");
             duration_until_due(
                 self.last_screenshot_request_poll,
                 SCREENSHOT_REQUEST_POLL_INTERVAL,
             )
         });
-        next = min_optional_duration(next, self.next_fs_watch_dirty_delay());
-        next = min_optional_duration(next, self.next_workspace_store_save_delay());
-        next = min_optional_duration(next, self.next_agent_busy_watchdog_delay());
-        next = min_optional_duration(next, self.next_pending_agent_theme_restart_delay());
-        next = min_optional_duration(next, self.next_toast_expiration_delay());
-        next = min_optional_duration(next, self.next_pomodoro_state_delay());
-        next = min_optional_duration(next, self.next_pomodoro_delay());
-        next = min_optional_duration(next, self.next_extra_tools_delay());
+        let fs_watch = self.next_fs_watch_dirty_delay();
+        count_next_update_candidate("app.next_update.fs_watch", fs_watch);
+        next = min_optional_duration(next, fs_watch);
+        let workspace_store = self.next_workspace_store_save_delay();
+        count_next_update_candidate("app.next_update.workspace_store", workspace_store);
+        next = min_optional_duration(next, workspace_store);
+        let busy_watchdog = self.next_agent_busy_watchdog_delay();
+        count_next_update_candidate("app.next_update.busy_watchdog", busy_watchdog);
+        next = min_optional_duration(next, busy_watchdog);
+        let theme_restart = self.next_pending_agent_theme_restart_delay();
+        count_next_update_candidate("app.next_update.theme_restart", theme_restart);
+        next = min_optional_duration(next, theme_restart);
+        let translation = self.next_agent_input_translation_delay();
+        count_next_update_candidate("app.next_update.translation", translation);
+        next = min_optional_duration(next, translation);
+        let toast = self.next_toast_expiration_delay();
+        count_next_update_candidate("app.next_update.toast", toast);
+        next = min_optional_duration(next, toast);
+        let pomodoro_state = self.next_pomodoro_state_delay();
+        count_next_update_candidate("app.next_update.pomodoro_state", pomodoro_state);
+        next = min_optional_duration(next, pomodoro_state);
+        let pomodoro = self.next_pomodoro_delay();
+        count_next_update_candidate("app.next_update.pomodoro", pomodoro);
+        next = min_optional_duration(next, pomodoro);
+        let extra_tools = self.next_extra_tools_delay();
+        count_next_update_candidate("app.next_update.extra_tools", extra_tools);
+        next = min_optional_duration(next, extra_tools);
         if let Some(duration) = next {
-            self.request_app_repaint_after(ctx, duration);
+            crate::gui::perf_log::count("app.schedule_timed_update.next");
+            self.schedule_timed_update(ctx, duration);
         }
+    }
+
+    /// 调度业务 deadline 唤醒，最终 repaint 仍由无参 FPS 闸门消费。
+    fn schedule_timed_update(&self, ctx: &egui::Context, duration: Duration) {
+        crate::gui::perf_log::count("app.schedule_timed_update");
+        // 触发条件：store debounce、poll、动画等业务 deadline 尚未到期。
+        // 不能直接走 request_repaint：否则会按 FPS 空转等待长 deadline。
+        // 防止回归：后台空闲时仍以 30fps 唤醒导致风扇升高。
+        self.repaint_controller
+            .request_timed_update(ctx, duration.max(self.max_repaint_interval()));
     }
 
     /// 判断番茄钟状态机是否需要进入事件队列。
@@ -2406,6 +2482,23 @@ impl GsdvGuiApp {
             .min()
     }
 
+    /// 返回 Agent 输入自动翻译 idle 检查的最近唤醒时间。
+    fn next_agent_input_translation_delay(&self) -> Option<Duration> {
+        if !self.runtime_settings.agent_input_translation_auto_trigger {
+            return None;
+        }
+        let watch = self.agent_input_translation_watch.as_ref()?;
+        let now = Instant::now();
+        let idle = now.saturating_duration_since(watch.changed_at);
+        if idle < AGENT_INPUT_TRANSLATION_IDLE_DEBOUNCE {
+            return Some(AGENT_INPUT_TRANSLATION_IDLE_DEBOUNCE - idle);
+        }
+        let key = (watch.workspace_index, watch.agent_slot.clone());
+        self.agent_input_translation_in_flight
+            .contains(&key)
+            .then_some(AGENT_INPUT_TRANSLATION_IDLE_DEBOUNCE)
+    }
+
     /// 返回 toast 过期的最近时间，避免过期 UI 残留。
     fn next_toast_expiration_delay(&self) -> Option<Duration> {
         let now = Instant::now();
@@ -2434,6 +2527,59 @@ impl GsdvGuiApp {
                 .copied()
                 .unwrap_or(false)
     }
+}
+
+/// 返回运行时 FPS 配置日志桶，适用于确认内存设置是否等于 store。
+fn runtime_max_fps_label(max_frame_rate: u16) -> &'static str {
+    match max_frame_rate {
+        0..=15 => "app.max_fps_le_15",
+        16..=30 => "app.max_fps_16_30",
+        31..=60 => "app.max_fps_31_60",
+        61..=120 => "app.max_fps_61_120",
+        _ => "app.max_fps_gt_120",
+    }
+}
+
+/// 记录存在的定时唤醒候选，适用于定位 UI 空转来源。
+fn count_next_update_candidate(label: &'static str, duration: Option<Duration>) {
+    if duration.is_some() {
+        crate::gui::perf_log::count(label);
+    }
+}
+
+/// 记录 egui 自己声明的 repaint 原因，适用于定位绕过 app gate 的 repaint。
+fn log_egui_repaint_causes(ctx: &egui::Context) {
+    if !crate::gui::perf_log::enabled() {
+        return;
+    }
+    let causes = ctx.repaint_causes();
+    if causes.is_empty() {
+        return;
+    }
+    crate::gui::perf_log::count("egui.repaint_causes");
+    for cause in &causes {
+        crate::gui::perf_log::count(egui_repaint_cause_label(cause));
+    }
+    let message = causes
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" | ");
+    crate::gui::perf_log::note_throttled("egui.repaint_causes", Duration::from_secs(1), &message);
+}
+
+/// 把 egui repaint cause 粗分桶，适用于保持主 perf 日志可聚合。
+fn egui_repaint_cause_label(cause: &egui::RepaintCause) -> &'static str {
+    if cause.file.contains("/src/gui/") || cause.file.starts_with("src/gui/") {
+        return "egui.repaint_cause.gsdv_gui";
+    }
+    if cause.file.contains("/egui-") {
+        return "egui.repaint_cause.egui";
+    }
+    if cause.file.contains("/eframe-") {
+        return "egui.repaint_cause.eframe";
+    }
+    "egui.repaint_cause.other"
 }
 
 #[cfg(test)]

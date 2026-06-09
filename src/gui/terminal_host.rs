@@ -1,5 +1,6 @@
 use crate::gui::agent::AgentLaunchConfig;
 use crate::gui::data::{self, NetworkSettings, WorkspaceActivity, WorkspaceViewData};
+use crate::gui::repaint_gate::RepaintController;
 use crate::gui::theme as gui_theme;
 use alacritty_terminal::event::{Event as PtyEvent, EventListener, Notify, OnResize, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier};
@@ -32,6 +33,9 @@ static TERMINAL_ID: AtomicU64 = AtomicU64::new(1);
 static TERMINAL_SPAWN_ENV_LOCK: Mutex<()> = Mutex::new(());
 const TERMINAL_SCROLLBACK_HISTORY_LINES: usize = 2_000;
 const TERMINAL_BELL_FLASH_DURATION: Duration = Duration::from_millis(180);
+const TERMINAL_WAKEUP_FORWARD_INTERVAL: Duration = Duration::from_millis(100);
+const TERMINAL_REPAINT_FORWARD_INTERVAL: Duration = Duration::from_millis(200);
+const TERMINAL_TITLE_FORWARD_INTERVAL: Duration = Duration::from_millis(500);
 
 // alacritty_terminal emits ColorRequest with its internal dynamic color indexes:
 // 256 = default foreground, 257 = default background, 258 = cursor.
@@ -46,6 +50,15 @@ pub enum TerminalSurfaceKind {
     Agent,
     Workspace,
     Helix,
+}
+
+/// 返回 terminal host UI 计数标签，适用于区分当前可见 surface 类型。
+fn terminal_host_ui_label(kind: TerminalSurfaceKind) -> &'static str {
+    match kind {
+        TerminalSurfaceKind::Agent => "terminal.host_ui.agent",
+        TerminalSurfaceKind::Workspace => "terminal.host_ui.workspace",
+        TerminalSurfaceKind::Helix => "terminal.host_ui.helix",
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,9 +94,9 @@ pub enum TerminalOutputClick {
 pub struct TerminalHostUiOutput {
     /// 实际 terminal widget 的交互响应。
     pub response: egui::Response,
-    /// Agent composer/input line rect when visible.
+    /// Agent 输入行位置，仅在调用方需要锚点时计算。
     pub input_rect: Option<Rect>,
-    /// Agent composer was submitted by this frame's terminal input bytes.
+    /// 本帧 terminal 输入字节是否提交了 Agent composer。
     pub input_submitted: bool,
     /// Agent terminal 输出里的可点击目标。
     pub output_click: Option<TerminalOutputClick>,
@@ -214,6 +227,8 @@ struct TerminalSize {
     cell_width: f32,
     /// 单个 cell 的 egui 物理点高度。
     cell_height: f32,
+    /// 当前字体是否允许把 ASCII 文本合并成一段绘制。
+    ascii_text_runs: bool,
     /// 可见终端列数。
     cols: u16,
     /// 可见终端行数。
@@ -227,6 +242,7 @@ impl Default for TerminalSize {
         Self {
             cell_width: 8.0,
             cell_height: 16.0,
+            ascii_text_runs: true,
             cols: 80,
             lines: 24,
             layout_size: Vec2::ZERO,
@@ -259,6 +275,8 @@ struct TerminalBackend {
     runtime_size: Arc<Mutex<TerminalSize>>,
     /// PTY 内容变化是否允许唤醒 egui repaint。
     repaint_enabled: Arc<AtomicBool>,
+    /// 终端本地动画和 PTY 事件共用的 FPS 控制器。
+    repaint_controller: RepaintController,
 }
 
 /// 将 alacritty 终端事件轻量转发到 UI 线程。
@@ -270,31 +288,104 @@ struct TerminalEventProxy {
     tx: UnboundedSender<(u64, PtyEvent)>,
     /// egui context 只用于唤醒 immediate-mode render loop。
     egui_ctx: egui::Context,
-    /// 终端输出唤醒 repaint 的最小间隔。
-    repaint_interval: Duration,
+    /// 终端输出唤醒 repaint 时使用的全局 FPS 控制器。
+    repaint_controller: RepaintController,
     /// 当前终端是否允许 PTY 输出唤醒 repaint。
     ///
     /// repaint 只是唤醒 app update；状态变化由 terminal runtime 投 AppEvent。
     repaint_enabled: Arc<AtomicBool>,
+    /// 高频 PTY 通知节流的毫秒起点。
+    throttle_origin: Instant,
+    /// 下一次允许转发 Wakeup 的毫秒刻度。
+    next_wakeup_forward_ms: Arc<AtomicU64>,
+    /// 下一次允许转发 repaint-only 事件的毫秒刻度。
+    next_repaint_forward_ms: Arc<AtomicU64>,
+    /// 下一次允许转发 title 状态事件的毫秒刻度。
+    next_title_forward_ms: Arc<AtomicU64>,
 }
 
 impl EventListener for TerminalEventProxy {
     fn send_event(&self, event: PtyEvent) {
         if matches!(event, PtyEvent::Wakeup) {
+            crate::gui::perf_log::count("terminal.proxy.wakeup");
+            if !self.forward_due(
+                &self.next_wakeup_forward_ms,
+                TERMINAL_WAKEUP_FORWARD_INTERVAL,
+            ) {
+                crate::gui::perf_log::count("terminal.proxy.wakeup_coalesced");
+                return;
+            }
             // 触发条件：PTY 读线程解析到新的终端内容。
             // 不能只 repaint：watchdog 需要看到输出事件本身。
             // 防止后台 Agent 正常输出时被误判为卡死。
             let _ = self.tx.send((self.id, event));
             if self.repaint_enabled.load(Ordering::Relaxed) {
-                self.egui_ctx.request_repaint_after(self.repaint_interval);
+                self.repaint_controller.request_repaint(&self.egui_ctx);
             }
             return;
         }
+        if matches!(
+            event,
+            PtyEvent::MouseCursorDirty | PtyEvent::CursorBlinkingChange
+        ) {
+            crate::gui::perf_log::count("terminal.proxy.repaint_only");
+            if !self.forward_due(
+                &self.next_repaint_forward_ms,
+                TERMINAL_REPAINT_FORWARD_INTERVAL,
+            ) {
+                crate::gui::perf_log::count("terminal.proxy.repaint_only_coalesced");
+                return;
+            }
+            let _ = self.tx.send((self.id, event));
+            if self.repaint_enabled.load(Ordering::Relaxed) {
+                self.repaint_controller.request_repaint(&self.egui_ctx);
+            }
+            return;
+        }
+        if matches!(event, PtyEvent::Title(_) | PtyEvent::ResetTitle) {
+            crate::gui::perf_log::count("terminal.proxy.title");
+            if !self.forward_due(&self.next_title_forward_ms, TERMINAL_TITLE_FORWARD_INTERVAL) {
+                crate::gui::perf_log::count("terminal.proxy.title_coalesced");
+                return;
+            }
+            let _ = self.tx.send((self.id, event));
+            if self.repaint_enabled.load(Ordering::Relaxed) {
+                self.repaint_controller.request_repaint(&self.egui_ctx);
+            }
+            return;
+        }
+        crate::gui::perf_log::count("terminal.proxy.other");
         let _ = self.tx.send((self.id, event));
         if self.repaint_enabled.load(Ordering::Relaxed) {
-            self.egui_ctx.request_repaint_after(self.repaint_interval);
+            self.repaint_controller.request_repaint(&self.egui_ctx);
         }
     }
+}
+
+impl TerminalEventProxy {
+    /// 判断高频 PTY 通知是否到达转发时间片。
+    fn forward_due(&self, next_forward_ms: &AtomicU64, interval: Duration) -> bool {
+        let now_ms = terminal_elapsed_millis(self.throttle_origin);
+        let current = next_forward_ms.load(Ordering::Acquire);
+        if current > now_ms {
+            return false;
+        }
+        next_forward_ms.store(
+            now_ms.saturating_add(terminal_duration_millis(interval)),
+            Ordering::Release,
+        );
+        true
+    }
+}
+
+/// 计算 terminal 节流起点到现在经过的毫秒数。
+fn terminal_elapsed_millis(origin: Instant) -> u64 {
+    origin.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+/// 将 terminal 节流间隔转成至少 1ms 的毫秒数。
+fn terminal_duration_millis(duration: Duration) -> u64 {
+    (duration.as_millis().min(u128::from(u64::MAX)) as u64).max(1)
 }
 
 impl TerminalBackend {
@@ -314,13 +405,19 @@ impl TerminalBackend {
         let runtime_size = Arc::new(Mutex::new(size));
         let pty = tty::new(&pty_config, size.into(), id)?;
         let repaint_enabled = Arc::new(AtomicBool::new(false));
+        let throttle_origin = Instant::now();
         let proxy = TerminalEventProxy {
             id,
             tx: event_tx,
             egui_ctx,
-            repaint_interval: settings.repaint_interval,
+            repaint_controller: settings.repaint_controller,
             repaint_enabled: repaint_enabled.clone(),
+            throttle_origin,
+            next_wakeup_forward_ms: Arc::new(AtomicU64::new(0)),
+            next_repaint_forward_ms: Arc::new(AtomicU64::new(0)),
+            next_title_forward_ms: Arc::new(AtomicU64::new(0)),
         };
+        let repaint_controller = proxy.repaint_controller.clone();
         let term = Term::new(
             terminal_config(),
             &AlacrittyTermSize::from(size),
@@ -341,6 +438,7 @@ impl TerminalBackend {
             size,
             runtime_size,
             repaint_enabled,
+            repaint_controller,
         })
     }
 
@@ -364,14 +462,15 @@ impl TerminalBackend {
     }
 
     /// 同步 resize terminal emulator grid 和底层 PTY。
-    fn resize(&mut self, layout_size: Vec2, font_size: Vec2) {
-        let cell_width = font_size.x.max(1.0);
-        let cell_height = font_size.y.max(1.0);
+    fn resize(&mut self, layout_size: Vec2, font_measure: TerminalFontMeasure) {
+        let cell_width = font_measure.cell_size.x.max(1.0);
+        let cell_height = font_measure.cell_size.y.max(1.0);
         let cols = (layout_size.x / cell_width).floor().max(1.0) as u16;
         let lines = (layout_size.y / cell_height).floor().max(1.0) as u16;
         let next = TerminalSize {
             cell_width,
             cell_height,
+            ascii_text_runs: font_measure.ascii_text_runs,
             cols,
             lines,
             layout_size,
@@ -474,8 +573,8 @@ struct BackendSettings {
     args: Vec<String>,
     /// Optional working directory for the child process.
     working_directory: Option<PathBuf>,
-    /// Minimum delay between terminal-driven repaint requests.
-    repaint_interval: Duration,
+    /// 终端驱动 repaint 时使用的全局 FPS 控制器。
+    repaint_controller: RepaintController,
     /// 子进程输出前先写入模拟器的历史文本快照。
     initial_history: Option<String>,
 }
@@ -522,7 +621,7 @@ impl GuiTerminalHost {
         kind: TerminalSurfaceKind,
         agent_launch: &AgentLaunchConfig,
         network_settings: &NetworkSettings,
-        repaint_interval: Duration,
+        repaint_controller: RepaintController,
         theme_mode: gui_theme::ThemeMode,
         runtime_handle: Handle,
         event_sink: TerminalRuntimeEventSink,
@@ -533,7 +632,7 @@ impl GuiTerminalHost {
             kind,
             agent_launch,
             network_settings,
-            repaint_interval,
+            repaint_controller,
             theme_mode,
             runtime_handle,
             event_sink,
@@ -546,7 +645,7 @@ impl GuiTerminalHost {
         workspace: &WorkspaceViewData,
         agent_launch: &AgentLaunchConfig,
         network_settings: &NetworkSettings,
-        repaint_interval: Duration,
+        repaint_controller: RepaintController,
         theme_mode: gui_theme::ThemeMode,
         runtime_handle: Handle,
         event_sink: TerminalRuntimeEventSink,
@@ -557,7 +656,7 @@ impl GuiTerminalHost {
             TerminalSurfaceKind::Agent,
             agent_launch,
             network_settings,
-            repaint_interval,
+            repaint_controller,
             theme_mode,
             runtime_handle,
             event_sink,
@@ -571,7 +670,7 @@ impl GuiTerminalHost {
         kind: TerminalSurfaceKind,
         agent_launch: &AgentLaunchConfig,
         network_settings: &NetworkSettings,
-        repaint_interval: Duration,
+        repaint_controller: RepaintController,
         theme_mode: gui_theme::ThemeMode,
         runtime_handle: Handle,
         event_sink: TerminalRuntimeEventSink,
@@ -601,7 +700,7 @@ impl GuiTerminalHost {
                 shell,
                 args,
                 working_directory: Some(working_directory),
-                repaint_interval,
+                repaint_controller,
                 initial_history,
             },
             &env,
@@ -644,7 +743,7 @@ impl GuiTerminalHost {
         workspace: &WorkspaceViewData,
         spec: HelixLaunchSpec,
         network_settings: &NetworkSettings,
-        repaint_interval: Duration,
+        repaint_controller: RepaintController,
         theme_mode: gui_theme::ThemeMode,
         runtime_handle: Handle,
         event_sink: TerminalRuntimeEventSink,
@@ -663,7 +762,7 @@ impl GuiTerminalHost {
                 shell: "hx".to_string(),
                 args,
                 working_directory: Some(spec.workdir.clone()),
-                repaint_interval,
+                repaint_controller,
                 initial_history: None,
             },
             &terminal_env(workspace, TerminalSurfaceKind::Helix, network_settings),
@@ -771,10 +870,13 @@ impl GuiTerminalHost {
         ui: &mut Ui,
         theme_mode: gui_theme::ThemeMode,
         font_size: f32,
+        include_input_rect: bool,
         request_focus: bool,
         accept_input: bool,
         shortcut_scope: TerminalInputShortcutScope,
     ) -> Option<TerminalHostUiOutput> {
+        let ui_started_at = Instant::now();
+        crate::gui::perf_log::count(terminal_host_ui_label(self.kind));
         self.set_runtime_theme_mode(theme_mode);
         // 触发条件：隐藏终端收到 OSC52 后重新进入可见绘制。
         // 不能在这里 drain PTY：绘制路径只能补交 UI clipboard 副作用。
@@ -859,13 +961,17 @@ impl GuiTerminalHost {
             }
             input_submitted = self.kind == TerminalSurfaceKind::Agent
                 && terminal_agent_input_submit_bytes(&bytes);
+            if input_submitted {
+                crate::gui::perf_log::count("terminal.input_submitted");
+            }
             self.write_bytes(&bytes);
             enable_terminal_ime(ui, &self.backend, response.rect);
             self.write_ime_commits(ui);
         }
-        let input_rect = (self.kind == TerminalSurfaceKind::Agent)
+        let input_rect = (include_input_rect && self.kind == TerminalSurfaceKind::Agent)
             .then(|| terminal_agent_input_rect(&self.backend, response.rect))
             .flatten();
+        crate::gui::perf_log::duration_us("terminal.host_ui_us", ui_started_at.elapsed());
         Some(TerminalHostUiOutput {
             response,
             input_rect,
@@ -896,7 +1002,7 @@ impl GuiTerminalHost {
         let alpha = terminal_bell_flash_alpha(remaining);
         ui.painter()
             .rect_filled(rect, 0.0, Color32::from_white_alpha(alpha));
-        ui.ctx().request_repaint_after(remaining);
+        self.backend.repaint_controller.request_repaint(ui.ctx());
     }
 
     /// Copies selected text while skipping alacritty wide-cell spacers.
@@ -1007,6 +1113,7 @@ impl GuiTerminalHost {
 
     /// 提交当前 terminal 应用里的输入草稿。
     pub fn submit_current_input(&mut self) {
+        crate::gui::perf_log::count("terminal.submit_current_input");
         // 触发条件：Codex TUI 启用 kitty 增强键盘协议后需要区分
         // Enter 和 Ctrl+M。
         // 不能直接写 \r：新版 keymap 会把 Ctrl+M 当成插入换行。
@@ -1126,6 +1233,7 @@ fn handle_terminal_runtime_event(drainer: &TerminalRuntimeDrainer, event: PtyEve
     }
     match event {
         PtyEvent::Wakeup => {
+            crate::gui::perf_log::count("terminal.drain.wakeup");
             emit_terminal_runtime_event(drainer, TerminalRuntimeEventKind::Output);
         }
         PtyEvent::ColorRequest(index, formatter) => {
@@ -1200,6 +1308,7 @@ fn handle_terminal_runtime_event(drainer: &TerminalRuntimeDrainer, event: PtyEve
             emit_terminal_runtime_event(drainer, TerminalRuntimeEventKind::Repaint);
         }
         PtyEvent::MouseCursorDirty | PtyEvent::CursorBlinkingChange => {
+            crate::gui::perf_log::count("terminal.drain.repaint_only");
             emit_terminal_runtime_event(drainer, TerminalRuntimeEventKind::Repaint);
         }
         other => {
@@ -2068,8 +2177,8 @@ fn terminal_view(
         response.surrender_focus();
     }
 
-    let font_size = terminal_font_measure(ui, &font_id);
-    backend.resize(size, font_size);
+    let font_measure = terminal_font_measure(ui, &font_id);
+    backend.resize(size, font_measure);
     if accept_input {
         handle_terminal_pointer(ui, backend, rect, &response);
         update_terminal_mouse_cursor(ui, backend, &response);
@@ -2101,8 +2210,16 @@ fn terminal_bell_flash_alpha(remaining: Duration) -> u8 {
     (48.0 * fraction).round() as u8
 }
 
-/// Measures the terminal monospace cell used for PTY resize calculations.
-fn terminal_font_measure(ui: &Ui, font_id: &FontId) -> Vec2 {
+/// 终端字体测量结果，适用于 PTY 尺寸和绘制策略共用。
+struct TerminalFontMeasure {
+    /// 单个终端 cell 的 egui 尺寸。
+    cell_size: Vec2,
+    /// 当前 ASCII 字体是否可以安全合并成 text run。
+    ascii_text_runs: bool,
+}
+
+/// 测量终端字体 cell，适用于 PTY resize 和 ASCII 绘制合并判断。
+fn terminal_font_measure(ui: &Ui, font_id: &FontId) -> TerminalFontMeasure {
     let ascii_galley = ui.painter().layout_no_wrap(
         "0123456789abcdefghijklmnopqrstuvwxyz".to_string(),
         font_id.clone(),
@@ -2112,6 +2229,9 @@ fn terminal_font_measure(ui: &Ui, font_id: &FontId) -> Vec2 {
         ascii_sample_width: ascii_galley.rect.width(),
         ascii_sample_chars: 36,
         space_width: fonts.glyph_width(font_id, ' '),
+        narrow_width: fonts.glyph_width(font_id, 'i'),
+        wide_width: fonts.glyph_width(font_id, 'W'),
+        digit_width: fonts.glyph_width(font_id, '0'),
         row_height: fonts.row_height(font_id),
     });
     let cjk_galley = ui.painter().layout_no_wrap(
@@ -2129,33 +2249,39 @@ fn terminal_font_measure(ui: &Ui, font_id: &FontId) -> Vec2 {
     )
 }
 
-/// Primary terminal font metrics from egui's font database.
+/// egui 字体库里读取到的主终端字体指标。
 struct TerminalFontMetrics {
-    /// Total width of a mixed ASCII sample in the active terminal font.
+    /// 当前终端字体中混合 ASCII 样本的总宽度。
     ascii_sample_width: f32,
-    /// Number of characters in the mixed ASCII sample.
+    /// 混合 ASCII 样本包含的字符数。
     ascii_sample_chars: usize,
-    /// Width of the space glyph used by terminal blanks.
+    /// 终端空白格使用的空格字形宽度。
     space_width: f32,
-    /// Row height reported for the primary terminal font family.
+    /// 窄 ASCII 字形宽度，用于识别比例字体。
+    narrow_width: f32,
+    /// 宽 ASCII 字形宽度，用于识别比例字体。
+    wide_width: f32,
+    /// 数字字形宽度，用于识别终端等宽行为。
+    digit_width: f32,
+    /// 主终端字体族上报的行高。
     row_height: f32,
 }
 
-/// CJK fallback metrics measured through an actual laid-out sample.
+/// 通过真实布局样本测得的 CJK fallback 指标。
 struct CjkTerminalFontMetrics {
-    /// Total width of the measured CJK sample.
+    /// CJK 样本布局后的总宽度。
     sample_width: f32,
-    /// Number of CJK chars in the sample.
+    /// CJK 样本包含的字符数。
     sample_chars: usize,
-    /// Height of the measured CJK sample.
+    /// CJK 样本布局后的高度。
     sample_height: f32,
 }
 
-/// Combines primary and CJK fallback metrics into one terminal cell size.
+/// 组合主字体和 CJK fallback 指标，适用于终端 cell 测量。
 fn terminal_cell_measure_from_metrics(
     primary: TerminalFontMetrics,
     cjk: CjkTerminalFontMetrics,
-) -> Vec2 {
+) -> TerminalFontMeasure {
     // 触发条件：Agent 终端同时启用 ASCII 等宽字体和中文 fallback 字体。
     // 不能用 CJK fallback 宽度抬高列宽：PTY 会收到偏小的列数，
     // 子进程的原始输出会按错误宽度重排并插入大量对齐空格。
@@ -2164,10 +2290,27 @@ fn terminal_cell_measure_from_metrics(
     let _ = cjk.sample_width;
     let _ = cjk.sample_chars;
     let ascii_cell_width = primary.ascii_sample_width / primary.ascii_sample_chars.max(1) as f32;
-    Vec2::new(
-        ascii_cell_width.max(primary.space_width).max(1.0),
-        primary.row_height.max(cjk.sample_height).ceil().max(1.0),
-    )
+    let cell_width = ascii_cell_width.max(primary.space_width).max(1.0);
+    TerminalFontMeasure {
+        cell_size: Vec2::new(
+            cell_width,
+            primary.row_height.max(cjk.sample_height).ceil().max(1.0),
+        ),
+        ascii_text_runs: terminal_ascii_text_runs_are_safe(&primary, cell_width),
+    }
+}
+
+/// 判断 ASCII run 是否安全合并，适用于避免比例字体造成列漂移。
+fn terminal_ascii_text_runs_are_safe(primary: &TerminalFontMetrics, cell_width: f32) -> bool {
+    let tolerance = 0.35;
+    [
+        primary.space_width,
+        primary.narrow_width,
+        primary.wide_width,
+        primary.digit_width,
+    ]
+    .into_iter()
+    .all(|width| (width - cell_width).abs() <= tolerance)
 }
 
 /// Handles pointer selection and scroll against the borrowed terminal backend.
@@ -3026,7 +3169,7 @@ fn url_trim_char(value: char) -> bool {
     )
 }
 
-/// Paints visible terminal cells without cloning alacritty's grid.
+/// 绘制可见终端 cell，适用于避免复制 alacritty grid。
 fn paint_terminal(
     ui: &Ui,
     backend: &TerminalBackend,
@@ -3034,6 +3177,7 @@ fn paint_terminal(
     mode: gui_theme::ThemeMode,
     font_id: &FontId,
 ) {
+    let paint_started_at = Instant::now();
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, gui_theme::bg_for(mode));
 
@@ -3048,6 +3192,12 @@ fn paint_terminal(
     let mut run_next_column = 0usize;
     let mut run_fg = gui_theme::text();
     let mut run_text = String::with_capacity(backend.size.cols as usize);
+    let mut visible_cells = 0u64;
+    let mut text_cells = 0u64;
+    let mut bg_cells = 0u64;
+    let mut text_runs = 0u64;
+    let mut joined_text_cells = 0u64;
+    let mut cell_text_calls = 0u64;
 
     for indexed in content.display_iter {
         let cell = indexed.cell;
@@ -3063,6 +3213,7 @@ fn paint_terminal(
         if y > rect.bottom() {
             continue;
         }
+        visible_cells += 1;
         let cell_rect = Rect::from_min_size(
             Pos2::new(x, y),
             Vec2::new(
@@ -3073,17 +3224,23 @@ fn paint_terminal(
         let selected = selection.is_some_and(|range| range.contains(indexed.point));
         let (fg, bg) = terminal_cell_colors(cell, selected, colors, mode);
         if bg != gui_theme::bg_for(mode) {
+            bg_cells += 1;
             painter.rect_filled(cell_rect, 0.0, bg);
+        }
+        if cell.c != ' ' && cell.c != '\t' && !cell.flags.contains(Flags::HIDDEN) {
+            text_cells += 1;
+            text_cells += cell.zerowidth().map_or(0, |marks| marks.len() as u64);
         }
         if cursor.point == indexed.point && cursor.shape != CursorShape::Hidden {
             paint_terminal_cursor(&painter, cell_rect, cursor.shape, fg);
         }
-        let can_join_run = terminal_cell_can_join_text_run(cell, cursor.point == indexed.point);
+        let can_join_run = backend.size.ascii_text_runs
+            && terminal_cell_can_join_text_run(cell, cursor.point == indexed.point);
         if can_join_run {
             let column = indexed.point.column.0;
             let same_run = run_line == Some(line) && run_next_column == column && run_fg == fg;
             if !same_run {
-                paint_terminal_text_run(
+                if paint_terminal_text_run(
                     &painter,
                     rect,
                     backend.size.cell_width,
@@ -3093,7 +3250,9 @@ fn paint_terminal(
                     run_start_column,
                     run_fg,
                     &mut run_text,
-                );
+                ) {
+                    text_runs += 1;
+                }
                 run_line = Some(line);
                 run_start_column = column;
                 run_fg = fg;
@@ -3103,8 +3262,9 @@ fn paint_terminal(
                 run_text.push(*mark);
             }
             run_next_column = column + 1;
+            joined_text_cells += 1;
         } else {
-            paint_terminal_text_run(
+            if paint_terminal_text_run(
                 &painter,
                 rect,
                 backend.size.cell_width,
@@ -3114,13 +3274,15 @@ fn paint_terminal(
                 run_start_column,
                 run_fg,
                 &mut run_text,
-            );
+            ) {
+                text_runs += 1;
+            }
             run_line = None;
-            paint_terminal_cell_text(&painter, cell, x, y, font_id, fg);
+            cell_text_calls += paint_terminal_cell_text(&painter, cell, x, y, font_id, fg);
         }
         paint_terminal_decoration(&painter, cell, cell_rect, fg);
     }
-    paint_terminal_text_run(
+    if paint_terminal_text_run(
         &painter,
         rect,
         backend.size.cell_width,
@@ -3130,20 +3292,42 @@ fn paint_terminal(
         run_start_column,
         run_fg,
         &mut run_text,
-    );
+    ) {
+        text_runs += 1;
+    }
+    crate::gui::perf_log::count("terminal.paint");
+    crate::gui::perf_log::add("terminal.paint_cells", visible_cells);
+    crate::gui::perf_log::add("terminal.paint_text_cells", text_cells);
+    crate::gui::perf_log::add("terminal.paint_bg_cells", bg_cells);
+    crate::gui::perf_log::add("terminal.paint_text_runs", text_runs);
+    crate::gui::perf_log::add("terminal.paint_joined_text_cells", joined_text_cells);
+    crate::gui::perf_log::add("terminal.paint_cell_text_calls", cell_text_calls);
+    if backend.size.ascii_text_runs {
+        crate::gui::perf_log::count("terminal.paint_ascii_runs_enabled");
+    } else {
+        crate::gui::perf_log::count("terminal.paint_ascii_runs_disabled");
+    }
+    crate::gui::perf_log::duration_us("terminal.paint_us", paint_started_at.elapsed());
 }
 
-/// Returns whether a cell can be merged into a single egui text layout run.
+/// 判断一个 cell 是否能合并到 egui 文本段里。
 fn terminal_cell_can_join_text_run(cell: &Cell, is_cursor: bool) -> bool {
-    let _ = (cell, is_cursor);
     // 触发条件：当前终端字体或 fallback 的 ASCII 字宽不是严格等宽。
-    // 不能合并成整段 text run：egui 会按真实字形宽度排版，
-    // 但光标和背景按终端 cell 坐标绘制，字符越多误差越大。
-    // 防止回归：Agent 输出、语法高亮和光标都按同一 cell 网格对齐。
-    false
+    // 不能合并宽字符、组合字符和光标格：这些格子的视觉宽度或层级特殊。
+    // 防止回归：中文、选区、光标、下划线仍按终端 cell 网格对齐。
+    !is_cursor
+        && !cell.flags.intersects(
+            Flags::WIDE_CHAR
+                | Flags::WIDE_CHAR_SPACER
+                | Flags::LEADING_WIDE_CHAR_SPACER
+                | Flags::HIDDEN,
+        )
+        && cell.zerowidth().map_or(true, |marks| marks.is_empty())
+        && cell.c.is_ascii()
+        && !cell.c.is_ascii_control()
 }
 
-/// Paints and clears one contiguous terminal text run.
+/// 绘制并清空一个连续终端文本段，适用于减少 egui text layout 次数。
 fn paint_terminal_text_run(
     painter: &egui::Painter,
     rect: Rect,
@@ -3154,18 +3338,18 @@ fn paint_terminal_text_run(
     start_column: usize,
     color: egui::Color32,
     text: &mut String,
-) {
+) -> bool {
     if text.trim().is_empty() {
         text.clear();
-        return;
+        return false;
     }
     let Some(line) = line else {
         text.clear();
-        return;
+        return false;
     };
-    // Trigger: terminal painting sees thousands of visible cells per frame.
-    // Why not cell-by-cell text: egui lays out every text call separately.
-    // Prevents: millions of LayoutJob/String allocations during agent output.
+    // 触发条件：终端单帧有大量可见字符。
+    // 不能逐 cell 画 ASCII：egui 每次 text 都会单独布局。
+    // 防止回归：Agent 输出高频刷新时产生海量 LayoutJob。
     painter.text(
         Pos2::new(
             rect.left() + cell_width * start_column as f32,
@@ -3177,9 +3361,10 @@ fn paint_terminal_text_run(
         color,
     );
     text.clear();
+    true
 }
 
-/// Paints one terminal cell that cannot safely join a text run.
+/// 绘制不能安全合并的单个终端 cell。
 fn paint_terminal_cell_text(
     painter: &egui::Painter,
     cell: &Cell,
@@ -3187,10 +3372,11 @@ fn paint_terminal_cell_text(
     y: f32,
     font_id: &FontId,
     color: egui::Color32,
-) {
+) -> u64 {
     if cell.c == ' ' || cell.c == '\t' || cell.flags.contains(Flags::HIDDEN) {
-        return;
+        return 0;
     }
+    let mut calls = 1;
     painter.text(
         Pos2::new(x, y),
         Align2::LEFT_TOP,
@@ -3199,6 +3385,7 @@ fn paint_terminal_cell_text(
         color,
     );
     for mark in cell.zerowidth().unwrap_or_default() {
+        calls += 1;
         painter.text(
             Pos2::new(x, y),
             Align2::LEFT_TOP,
@@ -3207,6 +3394,7 @@ fn paint_terminal_cell_text(
             color,
         );
     }
+    calls
 }
 
 /// Returns the visual width for a terminal cell.
