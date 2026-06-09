@@ -27,6 +27,8 @@ pub const MIN_POMODORO_MINUTES: u16 = 1;
 pub const MAX_POMODORO_MINUTES: u16 = 180;
 pub const MIN_POMODORO_WARNING_REMAINING_PERCENT: u8 = 1;
 pub const MAX_POMODORO_WARNING_REMAINING_PERCENT: u8 = 99;
+/// Fixed Codex model provider option requested by the UI.
+pub const CODEX_MODEL_PROVIDER_NEVER: &str = "never";
 
 /// Cache key for Codex transcript aborted-turn checks.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -87,6 +89,8 @@ pub struct WorkspaceViewData {
     pub agent_kind: AgentKind,
     /// Per-workspace main agent model override.
     pub agent_model: Option<String>,
+    /// Per-workspace Codex model provider override.
+    pub agent_model_provider: Option<String>,
     /// Per-workspace main agent effort override.
     pub agent_effort: Option<String>,
     /// Per-workspace Codex fast-mode override.
@@ -138,6 +142,9 @@ pub struct SubagentViewData {
     /// Per-subagent model override passed to the agent CLI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_model: Option<String>,
+    /// Per-subagent Codex model provider override passed to the agent CLI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_model_provider: Option<String>,
     /// Per-subagent effort override passed to the agent CLI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_effort: Option<String>,
@@ -510,6 +517,8 @@ struct StoredWorkspace {
     agent_kind: Option<AgentKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     agent_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_model_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     agent_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1104,6 +1113,7 @@ pub fn new_workspace(path: PathBuf, agent_kind: AgentKind) -> WorkspaceViewData 
             path: path.to_string_lossy().to_string(),
             agent_kind: Some(agent_kind),
             agent_model: None,
+            agent_model_provider: None,
             agent_effort: None,
             agent_fast_mode: None,
             agent_work_dir: None,
@@ -1147,6 +1157,10 @@ pub fn save_workspace_store(workspaces: &[WorkspaceViewData], active: usize, rai
                 path: workspace.path.to_string_lossy().to_string(),
                 agent_kind: Some(workspace.agent_kind),
                 agent_model: workspace.agent_model.clone(),
+                agent_model_provider: normalize_stored_agent_model_provider(
+                    workspace.agent_kind,
+                    workspace.agent_model_provider.clone(),
+                ),
                 agent_effort: workspace.agent_effort.clone(),
                 agent_fast_mode: normalize_stored_agent_fast_mode(
                     workspace.agent_kind,
@@ -1199,6 +1213,19 @@ fn normalize_stored_agent_model(model: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// 返回清理后的 Codex model provider 覆盖值。
+fn normalize_stored_agent_model_provider(
+    kind: AgentKind,
+    provider: Option<String>,
+) -> Option<String> {
+    if kind != AgentKind::Codex {
+        return None;
+    }
+    provider
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 /// 返回清理后的 agent effort 覆盖值。
 fn normalize_stored_agent_effort(kind: AgentKind, effort: Option<String>) -> Option<String> {
     effort
@@ -1215,6 +1242,39 @@ pub fn normalize_stored_agent_work_dir(work_dir: Option<PathBuf>) -> Option<Path
     work_dir
         .map(|path| normalize_path(&path))
         .filter(|path| path.is_dir())
+}
+
+/// Reads model provider names from the user's Codex config.
+pub fn load_codex_model_provider_names() -> Vec<String> {
+    let Some(path) = home_dir().map(|home| home.join(".codex").join("config.toml")) else {
+        return Vec::new();
+    };
+    let Ok(content) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    codex_model_provider_names_from_config(&content)
+}
+
+/// Extracts `[model_providers.<name>]` table names from Codex TOML.
+pub fn codex_model_provider_names_from_config(content: &str) -> Vec<String> {
+    let mut names = BTreeSet::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed
+            .strip_prefix("[model_providers.")
+            .and_then(|value| value.strip_suffix(']'))
+        else {
+            continue;
+        };
+        if rest.contains('.') || rest.trim().is_empty() {
+            continue;
+        }
+        let name = rest.trim_matches('"').trim();
+        if !name.is_empty() {
+            names.insert(name.to_string());
+        }
+    }
+    names.into_iter().collect()
 }
 
 /// 保存 workspace 级 outline 收藏。
@@ -1251,6 +1311,7 @@ pub fn new_subagent(
     name: String,
     agent_kind: AgentKind,
     agent_model: Option<String>,
+    agent_model_provider: Option<String>,
     agent_effort: Option<String>,
     agent_fast_mode: Option<bool>,
     agent_work_dir: Option<PathBuf>,
@@ -1263,6 +1324,10 @@ pub fn new_subagent(
         name,
         agent_kind,
         agent_model,
+        agent_model_provider: normalize_stored_agent_model_provider(
+            agent_kind,
+            agent_model_provider,
+        ),
         agent_effort,
         agent_fast_mode: normalize_stored_agent_fast_mode(agent_kind, agent_fast_mode),
         agent_work_dir: normalize_stored_agent_work_dir(agent_work_dir),
@@ -1296,6 +1361,10 @@ fn load_workspace_subagents(
                 subagent.agent_kind = default_agent_kind;
             }
             subagent.agent_model = normalize_stored_agent_model(subagent.agent_model);
+            subagent.agent_model_provider = normalize_stored_agent_model_provider(
+                subagent.agent_kind,
+                subagent.agent_model_provider,
+            );
             subagent.agent_effort =
                 normalize_stored_agent_effort(subagent.agent_kind, subagent.agent_effort);
             subagent.agent_fast_mode =
@@ -1379,6 +1448,10 @@ fn build_workspace(
         path,
         agent_kind,
         agent_model: normalize_stored_agent_model(stored.agent_model),
+        agent_model_provider: normalize_stored_agent_model_provider(
+            agent_kind,
+            stored.agent_model_provider,
+        ),
         agent_effort: normalize_stored_agent_effort(agent_kind, stored.agent_effort),
         agent_fast_mode: normalize_stored_agent_fast_mode(agent_kind, stored.agent_fast_mode),
         agent_work_dir: normalize_stored_agent_work_dir(stored.agent_work_dir),

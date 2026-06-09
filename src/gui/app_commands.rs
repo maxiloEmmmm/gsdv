@@ -470,6 +470,18 @@ impl GsdvGuiApp {
                     model,
                 }));
             }
+            AgentTabAction::SetModelProvider {
+                slot,
+                model_provider,
+            } => {
+                self.set_active_agent_slot(self.active_workspace, slot.clone());
+                self.set_active_app_dialog(Some(AppDialog::SetAgentModelProvider {
+                    index: self.active_workspace,
+                    slot,
+                    model_provider,
+                    model_providers: data::load_codex_model_provider_names(),
+                }));
+            }
             AgentTabAction::SetEffort { slot, effort } => {
                 self.set_active_agent_slot(self.active_workspace, slot.clone());
                 self.set_agent_slot_effort(ctx, self.active_workspace, slot, effort);

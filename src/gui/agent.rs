@@ -54,6 +54,11 @@ impl AgentKind {
         matches!(self, Self::Codex)
     }
 
+    /// Returns whether this agent CLI supports model provider overrides.
+    pub fn supports_model_provider(self) -> bool {
+        matches!(self, Self::Codex)
+    }
+
     pub fn all() -> [Self; 2] {
         [Self::Codex, Self::Claude]
     }
@@ -207,7 +212,7 @@ impl AgentLaunchConfig {
 
     /// Builds CLI args for the configured default agent.
     pub fn args(&self, session_id: Option<&str>) -> Vec<String> {
-        self.args_for(self.kind, session_id, None, None, None, None)
+        self.args_for(self.kind, session_id, None, None, None, None, None)
     }
 
     /// Builds CLI args and applies per-agent overrides when present.
@@ -216,6 +221,7 @@ impl AgentLaunchConfig {
         kind: AgentKind,
         session_id: Option<&str>,
         model: Option<&str>,
+        model_provider: Option<&str>,
         effort: Option<&str>,
         fast_mode: Option<bool>,
         resume_cwd: Option<&Path>,
@@ -227,6 +233,13 @@ impl AgentLaunchConfig {
         if let Some(model) = normalized_agent_model_arg(model) {
             args.push("--model".to_string());
             args.push(model.to_string());
+        }
+        if let Some(provider) = normalized_agent_model_provider_arg(kind, model_provider) {
+            args.push("-c".to_string());
+            args.push(format!(
+                "model_provider={}",
+                codex_config_basic_string(provider)
+            ));
         }
         if let Some(effort) = normalized_agent_effort_arg(kind, effort) {
             match kind {
@@ -252,6 +265,32 @@ impl AgentLaunchConfig {
 /// Returns a non-empty model override suitable for CLI args.
 fn normalized_agent_model_arg(model: Option<&str>) -> Option<&str> {
     model.map(str::trim).filter(|value| !value.is_empty())
+}
+
+/// Returns a non-empty Codex model provider override suitable for CLI args.
+fn normalized_agent_model_provider_arg(kind: AgentKind, provider: Option<&str>) -> Option<&str> {
+    if !kind.supports_model_provider() {
+        return None;
+    }
+    provider.map(str::trim).filter(|value| !value.is_empty())
+}
+
+/// Escapes a value for Codex `-c key=<basic string>` CLI overrides.
+fn codex_config_basic_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            character => escaped.push(character),
+        }
+    }
+    escaped.push('"');
+    escaped
 }
 
 /// Returns Codex's explicit cwd arg for resume sessions.

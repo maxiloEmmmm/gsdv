@@ -132,6 +132,7 @@ pub(super) fn agent_slot_context_menu(
     slot: AgentSlotId,
     current_agent_kind: AgentKind,
     current_agent_model: Option<&str>,
+    current_agent_model_provider: Option<&str>,
     current_agent_effort: Option<&str>,
     current_agent_fast_mode: Option<bool>,
     current_agent_work_dir: Option<&Path>,
@@ -158,6 +159,17 @@ pub(super) fn agent_slot_context_menu(
         *action = Some(AgentTabAction::SetModel {
             slot: slot.clone(),
             model: current_agent_model.unwrap_or_default().to_string(),
+        });
+        ui.close_menu();
+    }
+    if current_agent_kind.supports_model_provider()
+        && ui
+            .button(i18n::text(language, "Set model provider"))
+            .clicked()
+    {
+        *action = Some(AgentTabAction::SetModelProvider {
+            slot: slot.clone(),
+            model_provider: current_agent_model_provider.unwrap_or_default().to_string(),
         });
         ui.close_menu();
     }
