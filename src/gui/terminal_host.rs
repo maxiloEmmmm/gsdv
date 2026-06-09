@@ -242,7 +242,7 @@ impl Default for TerminalSize {
         Self {
             cell_width: 8.0,
             cell_height: 16.0,
-            ascii_text_runs: true,
+            ascii_text_runs: false,
             cols: 80,
             lines: 24,
             layout_size: Vec2::ZERO,
@@ -2229,9 +2229,6 @@ fn terminal_font_measure(ui: &Ui, font_id: &FontId) -> TerminalFontMeasure {
         ascii_sample_width: ascii_galley.rect.width(),
         ascii_sample_chars: 36,
         space_width: fonts.glyph_width(font_id, ' '),
-        narrow_width: fonts.glyph_width(font_id, 'i'),
-        wide_width: fonts.glyph_width(font_id, 'W'),
-        digit_width: fonts.glyph_width(font_id, '0'),
         row_height: fonts.row_height(font_id),
     });
     let cjk_galley = ui.painter().layout_no_wrap(
@@ -2257,12 +2254,6 @@ struct TerminalFontMetrics {
     ascii_sample_chars: usize,
     /// 终端空白格使用的空格字形宽度。
     space_width: f32,
-    /// 窄 ASCII 字形宽度，用于识别比例字体。
-    narrow_width: f32,
-    /// 宽 ASCII 字形宽度，用于识别比例字体。
-    wide_width: f32,
-    /// 数字字形宽度，用于识别终端等宽行为。
-    digit_width: f32,
     /// 主终端字体族上报的行高。
     row_height: f32,
 }
@@ -2296,21 +2287,11 @@ fn terminal_cell_measure_from_metrics(
             cell_width,
             primary.row_height.max(cjk.sample_height).ceil().max(1.0),
         ),
-        ascii_text_runs: terminal_ascii_text_runs_are_safe(&primary, cell_width),
+        // 触发条件：terminal cell 可以拥有独立前景色、反显和装饰。
+        // 不能跨 cell 合并 text run：egui 单段文本只有一套绘制样式。
+        // 防止回归：Agent 和 workspace terminal 的 ANSI 颜色被合并路径吃掉。
+        ascii_text_runs: false,
     }
-}
-
-/// 判断 ASCII run 是否安全合并，适用于避免比例字体造成列漂移。
-fn terminal_ascii_text_runs_are_safe(primary: &TerminalFontMetrics, cell_width: f32) -> bool {
-    let tolerance = 0.35;
-    [
-        primary.space_width,
-        primary.narrow_width,
-        primary.wide_width,
-        primary.digit_width,
-    ]
-    .into_iter()
-    .all(|width| (width - cell_width).abs() <= tolerance)
 }
 
 /// Handles pointer selection and scroll against the borrowed terminal backend.
@@ -3312,19 +3293,12 @@ fn paint_terminal(
 
 /// 判断一个 cell 是否能合并到 egui 文本段里。
 fn terminal_cell_can_join_text_run(cell: &Cell, is_cursor: bool) -> bool {
-    // 触发条件：当前终端字体或 fallback 的 ASCII 字宽不是严格等宽。
-    // 不能合并宽字符、组合字符和光标格：这些格子的视觉宽度或层级特殊。
-    // 防止回归：中文、选区、光标、下划线仍按终端 cell 网格对齐。
-    !is_cursor
-        && !cell.flags.intersects(
-            Flags::WIDE_CHAR
-                | Flags::WIDE_CHAR_SPACER
-                | Flags::LEADING_WIDE_CHAR_SPACER
-                | Flags::HIDDEN,
-        )
-        && cell.zerowidth().map_or(true, |marks| marks.is_empty())
-        && cell.c.is_ascii()
-        && !cell.c.is_ascii_control()
+    let _ = cell;
+    let _ = is_cursor;
+    // 触发条件：终端输出包含 ANSI 前景色、反显、下划线或光标格。
+    // 不能合并成整段 text run：egui 会按一套样式绘制整段文本。
+    // 防止回归：Agent 输出和 workspace terminal 的颜色被相邻 cell 吃掉。
+    false
 }
 
 /// 绘制并清空一个连续终端文本段，适用于减少 egui text layout 次数。
