@@ -136,8 +136,12 @@ jobs:
             asset_prefix: linux-amd64
             binary_name: gsdv
             binary_path: target/release/gsdv
-          - runner: macos-latest
-            asset_prefix: macos
+          - runner: macos-15-intel
+            asset_prefix: macos-intel
+            binary_name: gsdv
+            binary_path: target/release/gsdv
+          - runner: macos-15
+            asset_prefix: macos-arm64
             binary_name: gsdv
             binary_path: target/release/gsdv
           - runner: windows-latest
