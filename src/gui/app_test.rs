@@ -637,22 +637,6 @@ fn preview_scroll_capture_offset_parses_and_clamps() {
     assert_eq!(preview_scroll_capture_offset("preview-scroll:nope"), None);
 }
 
-/// 验证哈基米菜单锚在猫上方且不会飞出屏幕。
-#[test]
-fn pomodoro_cat_menu_pos_stays_above_cat_inside_screen() {
-    let screen = Rect::from_min_size(egui::pos2(0.0, 0.0), Vec2::new(800.0, 600.0));
-    let cat_pos = egui::pos2(300.0, 240.0);
-
-    let pos = pomodoro_cat_menu_pos(screen, cat_pos);
-
-    assert!(pos.y < cat_pos.y);
-    assert!(pos.x >= screen.left() + 8.0);
-    assert!(pos.x <= screen.right() - 140.0 - 8.0);
-
-    let top_pos = pomodoro_cat_menu_pos(screen, egui::pos2(300.0, 4.0));
-    assert_eq!(top_pos.y, screen.top() + 8.0);
-}
-
 /// 验证工作预警哈基米复用休息模式的弹跳移动。
 #[test]
 fn pomodoro_warning_cat_uses_rest_bounce_motion() {

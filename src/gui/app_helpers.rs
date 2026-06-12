@@ -724,25 +724,31 @@ pub(super) fn rest_entry_button(
     })
 }
 
-/// 构造哈基米右键菜单里的开始工作按钮。
-pub(super) fn pomodoro_start_work_menu_button(
+/// 构造右上角手动工作按钮。
+pub(super) fn work_entry_button(
     ui: &mut Ui,
+    enabled: bool,
     language: AppLanguage,
 ) -> egui::Response {
-    let start_work_button = Button::new(
-        RichText::new(i18n::text(language, "Start work now"))
-            .font(egui::FontId::new(13.0, theme::editor_system_font_family())),
-    );
-    ui.add_sized([128.0, 28.0], start_work_button)
-}
-
-/// 计算锚在哈基米上方的菜单位置。
-pub(super) fn pomodoro_cat_menu_pos(screen: Rect, cat_pos: egui::Pos2) -> egui::Pos2 {
-    let menu_size = Vec2::new(140.0, 42.0);
-    let x = (cat_pos.x + (POMODORO_CAT_SIZE.x - menu_size.x) * 0.5)
-        .clamp(screen.left() + 8.0, screen.right() - menu_size.x - 8.0);
-    let y = (cat_pos.y - menu_size.y - 6.0).max(screen.top() + 8.0);
-    egui::pos2(x, y)
+    ui.add_enabled_ui(enabled, |ui| {
+        ui.add_sized(
+            [104.0, 28.0],
+            Button::new(
+                RichText::new(i18n::text(language, "Work"))
+                    .strong()
+                    .color(theme::primary()),
+            )
+            .fill(theme::surface_elevated())
+            .stroke(Stroke::new(1.0, theme::border()))
+            .corner_radius(CornerRadius::same(theme::RADIUS_SM)),
+        )
+    })
+    .inner
+    .on_hover_text(if enabled {
+        i18n::text(language, "Start work now")
+    } else {
+        i18n::text(language, "Pomodoro is disabled in settings")
+    })
 }
 
 /// 返回配置里的工作时长。
