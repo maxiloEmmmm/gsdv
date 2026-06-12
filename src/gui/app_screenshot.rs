@@ -10,10 +10,27 @@ impl GsdvGuiApp {
     pub(super) fn handle_screenshot_captured(
         &mut self,
         ctx: &egui::Context,
-        path: Option<PathBuf>,
+        purpose: Option<ScreenshotPurpose>,
         image: Arc<egui::ColorImage>,
     ) {
-        let path = path.unwrap_or_else(|| self.next_screenshot_path("event"));
+        match purpose {
+            Some(ScreenshotPurpose::UserCapture { path }) => {
+                self.save_user_screenshot_capture(ctx, path, image);
+            }
+            None => {
+                let path = self.next_screenshot_path("event");
+                self.save_user_screenshot_capture(ctx, path, image);
+            }
+        }
+    }
+
+    /// 保存用户显式触发的截图，并复制图片到剪贴板。
+    fn save_user_screenshot_capture(
+        &self,
+        ctx: &egui::Context,
+        path: PathBuf,
+        image: Arc<egui::ColorImage>,
+    ) {
         // 触发条件：用户在 Agent 等界面触发截图复制。
         // 不能只保存文件：系统剪贴板需要显式写入图片命令。
         // 防止快捷键截图后只能找到文件、无法直接粘贴图片。
@@ -107,7 +124,9 @@ impl GsdvGuiApp {
 
     pub(super) fn request_egui_screenshot(&mut self, ctx: &egui::Context, source: &str) {
         let path = self.next_screenshot_path(source);
-        ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(path)));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
+            ScreenshotPurpose::UserCapture { path },
+        )));
         self.request_app_repaint();
     }
 

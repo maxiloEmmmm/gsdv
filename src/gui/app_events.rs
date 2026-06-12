@@ -479,7 +479,6 @@ impl GsdvGuiApp {
             }
             PomodoroPhase::ReadyToWork => {
                 self.pomodoro.start_returning_to_work(now);
-                self.pomodoro_cat_menu_open = false;
                 self.push_pomodoro_notification(i18n::text(
                     self.app_language,
                     "Input detected, returning to work",
@@ -801,8 +800,8 @@ impl GsdvGuiApp {
                     );
                 }
             },
-            AppEvent::ScreenshotCaptured { path, image } => {
-                self.handle_screenshot_captured(ctx, path, image);
+            AppEvent::ScreenshotCaptured { purpose, image } => {
+                self.handle_screenshot_captured(ctx, purpose, image);
             }
             AppEvent::ScreenshotRequestLoaded { result } => {
                 self.screenshot_request_read_in_flight = false;

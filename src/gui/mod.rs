@@ -3,6 +3,7 @@ pub(crate) mod agent_status_hook;
 mod app;
 mod data;
 mod diff_viewer;
+mod glow_gravity_lens;
 mod i18n;
 mod markdown_preview;
 mod outline;

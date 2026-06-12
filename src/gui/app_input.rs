@@ -47,13 +47,13 @@ pub(super) fn process_input_runtime_request(request: InputRuntimeRequest) -> Vec
             user_data, image, ..
         } = event
         {
-            let path = user_data
+            let purpose = user_data
                 .data
                 .as_ref()
-                .and_then(|data| data.downcast_ref::<PathBuf>())
+                .and_then(|data| data.downcast_ref::<ScreenshotPurpose>())
                 .cloned();
             events.push(AppEvent::ScreenshotCaptured {
-                path,
+                purpose,
                 image: image.clone(),
             });
         }

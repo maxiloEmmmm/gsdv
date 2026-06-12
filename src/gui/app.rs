@@ -171,6 +171,7 @@ const POMODORO_RETURN_QUESTION_COUNT: usize = 5;
 const POMODORO_REST_QUIET_DURATION: Duration = Duration::from_secs(10);
 const POMODORO_REST_QUIET_QUESTION_COUNT: usize = 5;
 const POMODORO_PEEK_ORBIT_TEXT: &str = "差不多到时间咯";
+const POMODORO_GRAVITY_LENS_RADIUS: f32 = 170.0;
 const WORKSPACE_WATCH_IGNORED_DIRS: &[&str] = &[
     ".git",
     ".hg",
@@ -220,6 +221,7 @@ pub fn run() -> eframe::Result<()> {
         });
     }
     let options = eframe::NativeOptions {
+        renderer: eframe::Renderer::Glow,
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1560.0, 980.0])
             .with_min_inner_size([1280.0, 800.0])
@@ -544,6 +546,8 @@ struct GsdvGuiApp {
     pomodoro: PomodoroState,
     /// 哈基米右键菜单是否打开。
     pomodoro_cat_menu_open: bool,
+    /// 哈基米黑洞透镜使用的 OpenGL 后处理状态。
+    pomodoro_gravity_lens_gl: Arc<crate::gui::glow_gravity_lens::GravityLensGlState>,
     /// Cached texture for the user-provided Hajimi pixel sprite.
     hajimi_texture: Option<egui::TextureHandle>,
     suppress_default_agent_input: bool,
@@ -708,6 +712,13 @@ impl PomodoroState {
         self.rest_quiet_animation_started_at = now;
         self.meows.clear();
     }
+}
+
+#[derive(Debug, Clone)]
+/// egui 截图请求的用途。
+enum ScreenshotPurpose {
+    /// 普通截图：落盘并复制到剪贴板。
+    UserCapture { path: PathBuf },
 }
 
 /// Agent Busy 期间的无输出自动继续状态。
@@ -963,6 +974,9 @@ impl GsdvGuiApp {
             editor_fallback_font_filter: FontPickerFilter::default(),
             pomodoro: PomodoroState::new(Instant::now()),
             pomodoro_cat_menu_open: false,
+            pomodoro_gravity_lens_gl: Arc::new(
+                crate::gui::glow_gravity_lens::GravityLensGlState::new(),
+            ),
             hajimi_texture: None,
             suppress_default_agent_input: false,
         };
@@ -1614,7 +1628,7 @@ enum AppEvent {
     },
     /// input runtime 解析出的截图完成事件。
     ScreenshotCaptured {
-        path: Option<PathBuf>,
+        purpose: Option<ScreenshotPurpose>,
         image: Arc<egui::ColorImage>,
     },
     /// 可选截图请求文件读取完成。
