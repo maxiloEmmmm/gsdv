@@ -822,18 +822,13 @@ pub(super) fn draw_hajimi_cat(
     rect: Rect,
     texture: &egui::TextureHandle,
     phase: PomodoroPhase,
-    hovered: bool,
     phase_elapsed: Duration,
 ) {
     let painter = ui.painter();
     let t = phase_elapsed.as_secs_f32();
-    let bounce = if hovered { 0.0 } else { (t * 8.0).sin() * 3.0 };
-    let sway = if hovered { 0.0 } else { (t * 3.2).sin() * 4.0 };
-    let scale = if hovered {
-        1.0
-    } else {
-        1.0 + (t * 5.4).sin() * 0.012
-    };
+    let bounce = (t * 8.0).sin() * 3.0;
+    let sway = (t * 3.2).sin() * 4.0;
+    let scale = 1.0 + (t * 5.4).sin() * 0.012;
     let animated = Rect::from_center_size(rect.center(), rect.size() * scale);
     let base = animated.translate(Vec2::new(sway, bounce));
     painter.image(

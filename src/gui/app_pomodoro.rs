@@ -45,7 +45,6 @@ impl GsdvGuiApp {
         }
         let now = Instant::now();
         let screen = ctx.screen_rect();
-        let mut start_work = false;
         let phase = self.pomodoro.phase;
         let phase_elapsed = if phase == PomodoroPhase::WaitingForRestQuiet {
             now.duration_since(self.pomodoro.rest_quiet_animation_started_at)
@@ -61,7 +60,6 @@ impl GsdvGuiApp {
             return;
         };
         let area_pos = self.pomodoro.cat_pos;
-        let mut hovered = false;
 
         egui::Area::new("pomodoro-foreground-overlay".into())
             .order(egui::Order::Foreground)
@@ -71,82 +69,18 @@ impl GsdvGuiApp {
                     self.paint_pomodoro_gravity_lens(ui, screen, now);
                 }
                 let cat_rect = Rect::from_min_size(area_pos, POMODORO_CAT_SIZE);
-                let response = ui.allocate_rect(cat_rect, Sense::click());
-                if response.secondary_clicked() {
-                    self.pomodoro_cat_menu_open = true;
-                }
-                hovered = response.hovered();
-                draw_hajimi_cat(ui, cat_rect, &texture, phase, hovered, phase_elapsed);
+                draw_hajimi_cat(ui, cat_rect, &texture, phase, phase_elapsed);
             });
 
-        if self.pomodoro_cat_menu_open {
-            let mut close_menu = false;
-            let menu_size = Vec2::new(140.0, 42.0);
-            let menu_pos = egui::pos2(
-                (self.pomodoro.cat_pos.x + (POMODORO_CAT_SIZE.x - menu_size.x) * 0.5)
-                    .clamp(screen.left() + 8.0, screen.right() - menu_size.x - 8.0),
-                (self.pomodoro.cat_pos.y - menu_size.y - 6.0).max(screen.top() + 8.0),
-            );
-            let menu_response = egui::Area::new("pomodoro-cat-context-menu".into())
-                .order(egui::Order::Tooltip)
-                .fixed_pos(menu_pos)
-                .show(ctx, |ui| {
-                    Frame::new()
-                        .fill(theme::surface())
-                        .stroke(Stroke::new(1.0, theme::border()))
-                        .corner_radius(CornerRadius::same(theme::RADIUS_SM))
-                        .inner_margin(Margin::same(6))
-                        .show(ui, |ui| {
-                            if work_entry_button(
-                                ui,
-                                self.runtime_settings.pomodoro_enabled,
-                                self.app_language,
-                            )
-                            .clicked()
-                            {
-                                start_work = true;
-                                close_menu = true;
-                            }
-                        })
-                        .response
-                })
-                .inner;
-            let cat_rect = Rect::from_min_size(self.pomodoro.cat_pos, POMODORO_CAT_SIZE);
-            let clicked_outside = ctx.input(|input| {
-                input.pointer.any_click()
-                    && input.pointer.interact_pos().is_some_and(|pos| {
-                        !menu_response.rect.contains(pos) && !cat_rect.contains(pos)
-                    })
-            });
-            if close_menu || clicked_outside {
-                self.pomodoro_cat_menu_open = false;
-            }
-        }
-
-        if !hovered
-            && !self.pomodoro_cat_menu_open
-            && matches!(
-                phase,
-                PomodoroPhase::WaitingForRestQuiet | PomodoroPhase::Resting
-            )
-        {
+        if matches!(
+            phase,
+            PomodoroPhase::WaitingForRestQuiet | PomodoroPhase::Resting
+        ) {
             self.animate_pomodoro_cat(screen, now);
         } else {
             self.pomodoro.last_animation_at = now;
         }
 
-        if start_work {
-            self.pomodoro_cat_menu_open = false;
-            self.pomodoro.start_working(now);
-            self.push_pomodoro_notification(i18n::text_with_arg(
-                self.app_language,
-                "Starting work for {minutes} minutes",
-                "{minutes}",
-                self.runtime_settings.pomodoro_work_minutes.to_string(),
-            ));
-            self.request_app_repaint();
-            return;
-        }
         self.update_pomodoro_meows(now);
         if self.pomodoro.phase == PomodoroPhase::Resting {
             self.pomodoro_meow_overlay(ctx, now);

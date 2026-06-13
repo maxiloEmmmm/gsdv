@@ -347,17 +347,45 @@ void main() {
     }
 
     float radius_factor = 1.0 - distance / u_radius;
-    float gravity = pow(radius_factor, 0.78);
-    float horizon = pow(1.0 - clamp(distance / 92.0, 0.0, 1.0), 2.0);
+    // 触发条件：哈基米不是规则圆形，耳朵和头顶会露出背景。
+    // 不能直接画黑核：黑核会从哈基米轮廓外漏出来。
+    // 防止回归：中心看起来变成黑圆，而不是哈基米本体。
+    float inner_clear = min(u_radius * 0.32, 86.0);
+    float inner_fade = smoothstep(inner_clear, inner_clear + 58.0, distance);
+    // 外圈必须同时削弱位移和混合，避免出现圆形玻璃罩边界。
+    float outer_fade = 1.0 - smoothstep(u_radius * 0.48, u_radius, distance);
+    float displacement_fade = outer_fade * outer_fade;
+    float gravity = pow(radius_factor, 0.42) * displacement_fade * inner_fade;
+    float horizon_radius = min(u_radius * 0.42, 112.0);
+    float horizon = (1.0 - smoothstep(horizon_radius * 0.46, horizon_radius, distance))
+        * inner_fade;
+    float ring = 1.0 - smoothstep(
+        horizon_radius * 0.34,
+        horizon_radius * 0.92,
+        abs(distance - horizon_radius * 1.04)
+    ) * outer_fade * inner_fade;
     vec2 radial = delta / distance;
     vec2 tangent = vec2(-radial.y, radial.x);
-    float pull = gravity * 42.0 + horizon * 54.0;
-    float swirl = gravity * 1.1 + horizon * 1.55 + sin(u_time) * 0.05;
-    vec2 sample_pos = pos + radial * pull + tangent * swirl * 24.0;
+    float pulse = sin(u_time * 1.7 + distance * 0.035) * 0.08;
+    float pull = gravity * 92.0 + horizon * 92.0 + ring * 34.0;
+    float swirl = gravity * 3.8 + horizon * 4.8 + ring * 2.2 + pulse;
+    vec2 sample_pos = pos + radial * pull + tangent * swirl * 38.0;
+    vec2 streak_pos_a = sample_pos + tangent * (gravity * 58.0 + ring * 72.0);
+    vec2 streak_pos_b = sample_pos - tangent * (gravity * 34.0 + ring * 48.0);
+    vec2 streak_pos_c = sample_pos + radial * (horizon * 42.0) + tangent * ring * 118.0;
     vec2 sample_uv = clamp(sample_pos / u_size, vec2(0.0), vec2(1.0));
+    vec2 streak_uv_a = clamp(streak_pos_a / u_size, vec2(0.0), vec2(1.0));
+    vec2 streak_uv_b = clamp(streak_pos_b / u_size, vec2(0.0), vec2(1.0));
+    vec2 streak_uv_c = clamp(streak_pos_c / u_size, vec2(0.0), vec2(1.0));
     vec4 original = texture(u_sampler, v_uv);
-    vec4 warped = texture(u_sampler, sample_uv);
-    float edge = smoothstep(u_radius, u_radius - 18.0, distance);
-    out_color = mix(original, warped, edge);
+    vec4 warped = texture(u_sampler, sample_uv) * 0.46
+        + texture(u_sampler, streak_uv_a) * 0.24
+        + texture(u_sampler, streak_uv_b) * 0.18
+        + texture(u_sampler, streak_uv_c) * 0.12;
+    vec4 ring_color = vec4(0.95, 0.72, 0.38, 1.0);
+    float edge = smoothstep(0.0, 1.0, outer_fade) * inner_fade;
+    vec4 lensed = mix(warped, warped + ring_color * ring * 0.18, ring * 0.45);
+    lensed.rgb *= 1.0 - horizon * 0.28;
+    out_color = mix(original, lensed, edge);
 }
 "#;
