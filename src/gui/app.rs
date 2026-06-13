@@ -171,7 +171,7 @@ const POMODORO_RETURN_QUESTION_COUNT: usize = 5;
 const POMODORO_REST_QUIET_DURATION: Duration = Duration::from_secs(10);
 const POMODORO_REST_QUIET_QUESTION_COUNT: usize = 5;
 const POMODORO_PEEK_ORBIT_TEXT: &str = "差不多到时间咯";
-const POMODORO_GRAVITY_LENS_RADIUS: f32 = 170.0;
+const POMODORO_GRAVITY_LENS_RADIUS: f32 = 260.0;
 const WORKSPACE_WATCH_IGNORED_DIRS: &[&str] = &[
     ".git",
     ".hg",
@@ -544,8 +544,6 @@ struct GsdvGuiApp {
     editor_fallback_font_filter: FontPickerFilter,
     /// Global in-memory pomodoro state for the current app session.
     pomodoro: PomodoroState,
-    /// 哈基米右键菜单是否打开。
-    pomodoro_cat_menu_open: bool,
     /// 哈基米黑洞透镜使用的 OpenGL 后处理状态。
     pomodoro_gravity_lens_gl: Arc<crate::gui::glow_gravity_lens::GravityLensGlState>,
     /// Cached texture for the user-provided Hajimi pixel sprite.
@@ -973,7 +971,6 @@ impl GsdvGuiApp {
             editor_font_filter: FontPickerFilter::default(),
             editor_fallback_font_filter: FontPickerFilter::default(),
             pomodoro: PomodoroState::new(Instant::now()),
-            pomodoro_cat_menu_open: false,
             pomodoro_gravity_lens_gl: Arc::new(
                 crate::gui::glow_gravity_lens::GravityLensGlState::new(),
             ),
