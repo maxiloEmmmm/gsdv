@@ -406,16 +406,15 @@ void main() {
     vec2 pos = v_uv * u_size;
     vec2 delta = pos - u_center;
     float distance = length(delta);
-    if (distance >= u_radius || distance <= 0.5) {
-        discard;
+    if (distance <= 0.5) {
+        vec4 center_color = TEXTURE(u_sampler, v_uv);
+        OUT_COLOR = vec4(center_color.rgb, 1.0);
         return;
     }
 
-    float radius_factor = 1.0 - distance / u_radius;
-    float body_clear = min(u_radius * 0.28, 74.0);
-    float body_fade = smoothstep(body_clear, body_clear + 44.0, distance);
-    float edge_fade = 1.0 - smoothstep(u_radius * 0.72, u_radius, distance);
-    float gravity = pow(radius_factor, 0.58) * edge_fade * body_fade;
+    float radius_factor = max(1.0 - distance / u_radius, 0.0);
+    float edge_fade = 1.0 - smoothstep(u_radius * 0.68, u_radius, distance);
+    float gravity = pow(radius_factor, 0.58) * edge_fade;
     vec2 radial = delta / distance;
     vec2 tangent = vec2(-radial.y, radial.x);
     float pulse = sin(u_time * 1.4 + distance * 0.03) * 0.04;
@@ -424,12 +423,9 @@ void main() {
     vec2 sample_pos = pos + radial * pull + tangent * swirl;
     vec2 sample_uv = clamp(sample_pos / u_size, vec2(0.0), vec2(1.0));
     vec4 warped = TEXTURE(u_sampler, sample_uv);
-    // 触发条件：后处理画在原 UI 上方，半透明混合会让原始线条残留。
-    // 不能再采样 original 做颜色混合：会主动把未扭曲文字画回来。
-    // 防止回归：透镜主体内背景没有被真正覆盖。
-    float edge_alpha = 1.0 - smoothstep(u_radius * 0.68, u_radius, distance);
-    float distortion_alpha = smoothstep(0.0, 0.08, gravity);
-    float cover_alpha = edge_alpha * distortion_alpha;
-    OUT_COLOR = vec4(warped.rgb * cover_alpha, cover_alpha);
+    // 触发条件：猫现在后画，不会进入 framebuffer 输入。
+    // 不能再混 original：边缘会把未扭曲横线主动画回来。
+    // 防止回归：透镜边缘出现原线和扭曲线叠在一起。
+    OUT_COLOR = vec4(warped.rgb, 1.0);
 }
 "#;
