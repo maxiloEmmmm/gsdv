@@ -2329,7 +2329,7 @@ fn reviewer_script_process_receives_network_env() {
     run_reviewer_script_process(
         tx,
         None,
-        Duration::from_millis(16),
+        repaint_gate::RepaintController::new(),
         "script.sh".to_string(),
         script,
         "repo".to_string(),
