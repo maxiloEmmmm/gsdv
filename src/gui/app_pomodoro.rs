@@ -95,8 +95,7 @@ impl GsdvGuiApp {
         now: Instant,
     ) {
         let center = self.pomodoro.cat_pos + Vec2::new(126.0, 116.0);
-        let rect = Rect::from_center_size(center, Vec2::splat(POMODORO_GRAVITY_LENS_RADIUS * 2.0))
-            .intersect(screen);
+        let rect = screen;
         if rect.is_negative() || rect.width() < 4.0 || rect.height() < 4.0 {
             return;
         }
