@@ -1478,7 +1478,7 @@ pub(super) fn agent_input_bytes_from_events_with_kitty_protocol(
     app_shortcut_scope: Option<TerminalInputShortcutScope>,
 ) -> Vec<u8> {
     let suppress_shortcut_text =
-        active_modifiers.mac_cmd || (active_modifiers.alt && !active_modifiers.ctrl);
+        active_modifiers.mac_cmd || active_modifiers.alt || active_modifiers.ctrl;
     let mut bytes = Vec::new();
     for event in events {
         match event {
@@ -1517,20 +1517,55 @@ pub(super) fn agent_input_bytes_from_events_with_kitty_protocol(
                     kitty_plain_key_event_sequence(*key, *modifiers, kitty_keyboard_protocol)
                 {
                     bytes.extend_from_slice(sequence.as_bytes());
+                } else if let Some(sequence) = kitty_modified_printable_key_event_sequence(
+                    *key,
+                    *modifiers,
+                    kitty_keyboard_protocol,
+                ) {
+                    bytes.extend_from_slice(sequence.as_bytes());
                 } else if let Some(sequence) = meta_key_event_sequence(*key, *modifiers) {
                     bytes.extend_from_slice(&sequence);
+                } else if let Some(byte) = control_key_byte(*key, *modifiers) {
+                    bytes.push(byte);
                 } else if suppress_shortcut_text {
                     continue;
                 } else if let Some(sequence) = key_event_sequence(*key, *modifiers) {
                     bytes.extend_from_slice(sequence.as_bytes());
-                } else if let Some(byte) = control_key_byte(*key, *modifiers) {
-                    bytes.push(byte);
                 }
             }
             _ => {}
         }
     }
     bytes
+}
+
+/// 编码 kitty keyboard protocol 下带 Alt/Ctrl 的可打印键。
+fn kitty_modified_printable_key_event_sequence(
+    key: Key,
+    modifiers: Modifiers,
+    kitty_keyboard_protocol: bool,
+) -> Option<String> {
+    if !kitty_keyboard_protocol || modifiers.mac_cmd || (!modifiers.alt && !modifiers.ctrl) {
+        return None;
+    }
+    let byte = printable_key_byte(key, modifiers.shift)?;
+    let modifier = kitty_modifier_parameter(modifiers)?;
+    Some(format!("\x1b[{};{}u", byte, modifier))
+}
+
+/// 返回 kitty CSI-u 修饰键参数。
+fn kitty_modifier_parameter(modifiers: Modifiers) -> Option<u8> {
+    let mut parameter = 1;
+    if modifiers.shift {
+        parameter += 1;
+    }
+    if modifiers.alt {
+        parameter += 2;
+    }
+    if modifiers.ctrl {
+        parameter += 4;
+    }
+    (parameter > 1).then_some(parameter)
 }
 
 /// Encodes supported Super/Cmd key chords with kitty's CSI-u keyboard protocol.
@@ -1946,6 +1981,7 @@ fn control_key_byte(key: Key, modifiers: Modifiers) -> Option<u8> {
         return None;
     }
     let offset = match key {
+        Key::Space => 0,
         Key::A => 1,
         Key::B => 2,
         Key::C => 3,
@@ -1972,6 +2008,11 @@ fn control_key_byte(key: Key, modifiers: Modifiers) -> Option<u8> {
         Key::X => 24,
         Key::Y => 25,
         Key::Z => 26,
+        Key::OpenBracket => 27,
+        Key::Backslash | Key::Pipe => 28,
+        Key::CloseBracket => 29,
+        Key::Num6 => 30,
+        Key::Minus => 31,
         _ => return None,
     };
     Some(offset)

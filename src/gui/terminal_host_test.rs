@@ -406,6 +406,93 @@ fn alt_printable_key_event_is_forwarded_as_escape_prefixed_terminal_input() {
     );
 }
 
+/// 验证 kitty 协议下 Alt+[ 不会退化成普通 [。
+#[test]
+fn kitty_alt_open_bracket_is_forwarded_as_alt_csi_u() {
+    let modifiers = Modifiers {
+        alt: true,
+        ..Modifiers::default()
+    };
+    let events = vec![Event::Key {
+        key: Key::OpenBracket,
+        physical_key: Some(Key::OpenBracket),
+        pressed: true,
+        repeat: false,
+        modifiers,
+    }];
+
+    assert_eq!(
+        agent_input_bytes_from_events_with_kitty_protocol(&events, modifiers, true, true, None),
+        b"\x1b[91;3u"
+    );
+}
+
+/// 验证 kitty 协议下普通 Alt 字母也走通用 CSI-u。
+#[test]
+fn kitty_alt_letter_is_forwarded_as_alt_csi_u() {
+    let modifiers = Modifiers {
+        alt: true,
+        ..Modifiers::default()
+    };
+    let events = vec![Event::Key {
+        key: Key::W,
+        physical_key: Some(Key::W),
+        pressed: true,
+        repeat: false,
+        modifiers,
+    }];
+
+    assert_eq!(
+        agent_input_bytes_from_events_with_kitty_protocol(&events, modifiers, true, true, None),
+        b"\x1b[119;3u"
+    );
+}
+
+/// 验证 kitty 协议下 Alt+] 不会退化成普通 ]。
+#[test]
+fn kitty_alt_close_bracket_is_forwarded_as_alt_csi_u() {
+    let modifiers = Modifiers {
+        alt: true,
+        ..Modifiers::default()
+    };
+    let events = vec![Event::Key {
+        key: Key::CloseBracket,
+        physical_key: Some(Key::CloseBracket),
+        pressed: true,
+        repeat: false,
+        modifiers,
+    }];
+
+    assert_eq!(
+        agent_input_bytes_from_events_with_kitty_protocol(&events, modifiers, true, true, None),
+        b"\x1b[93;3u"
+    );
+}
+
+/// 验证 Ctrl+[ 会作为 ESC 控制字节转发。
+#[test]
+fn control_open_bracket_text_event_does_not_leak_plain_bracket() {
+    let modifiers = Modifiers {
+        ctrl: true,
+        ..Modifiers::default()
+    };
+    let events = vec![
+        Event::Text("[".to_string()),
+        Event::Key {
+            key: Key::OpenBracket,
+            physical_key: Some(Key::OpenBracket),
+            pressed: true,
+            repeat: false,
+            modifiers,
+        },
+    ];
+
+    assert_eq!(
+        agent_input_bytes_from_events(&events, modifiers, true),
+        b"\x1b"
+    );
+}
+
 /// 验证 workspace terminal 抽屉不会把 Alt+X 当成 app 保留键。
 #[test]
 fn workspace_terminal_drawer_forwards_alt_x_to_terminal() {
@@ -600,6 +687,7 @@ fn terminal_size_converts_to_alacritty_window_size() {
     let size = TerminalSize {
         cell_width: 7.6,
         cell_height: 15.2,
+        ascii_text_runs: false,
         cols: 101,
         lines: 37,
         layout_size: Vec2::new(768.0, 562.0),
@@ -615,7 +703,7 @@ fn terminal_size_converts_to_alacritty_window_size() {
 /// 验证终端 cell 尺寸会给 CJK fallback 留出空间。
 #[test]
 fn terminal_cell_measure_includes_cjk_fallback_metrics() {
-    let size = terminal_cell_measure_from_metrics(
+    let measure = terminal_cell_measure_from_metrics(
         TerminalFontMetrics {
             ascii_sample_width: 28.0,
             ascii_sample_chars: 4,
@@ -629,7 +717,8 @@ fn terminal_cell_measure_includes_cjk_fallback_metrics() {
         },
     );
 
-    assert_eq!(size, Vec2::new(7.0, 19.0));
+    assert_eq!(measure.cell_size, Vec2::new(7.0, 19.0));
+    assert!(!measure.ascii_text_runs);
 }
 
 /// 验证未处理 PTY 日志只记录事件类型。
