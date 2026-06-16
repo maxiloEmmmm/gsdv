@@ -745,17 +745,8 @@ impl GsdvGuiApp {
             task_path: task.path.clone(),
         };
         let selected = workflow_task_is_selected(task, selected);
-        let (response, _, _) = workflow_tree_row(
-            ui,
-            1,
-            None,
-            None,
-            None,
-            false,
-            &task.label,
-            selected,
-            Some("TASK"),
-        );
+        let (response, _, _) =
+            workflow_tree_row(ui, 1, None, None, None, false, &task.label, selected, None);
         response.context_menu(|ui| {
             if ui
                 .button(i18n::text(self.app_language, "Copy path"))

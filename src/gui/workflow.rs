@@ -314,10 +314,7 @@ fn load_project_tasks(
         let content = fs::read_to_string(&path)
             .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
         let steps = parse_task_steps(&content);
-        let label = path
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().to_string())
-            .unwrap_or_else(|| "task".to_string());
+        let label = workflow_task_label_for_path(&path);
         tasks.push(WorkflowTaskNode {
             label,
             path: relative_to_workspace(workspace_root, &path),
@@ -326,6 +323,17 @@ fn load_project_tasks(
         });
     }
     Ok(tasks)
+}
+
+/// 返回 task tree 的展示名，保留文件命名规范但隐藏 task- 前缀。
+fn workflow_task_label_for_path(path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .unwrap_or_else(|| "task".to_string());
+    stem.strip_prefix(TASK_PREFIX)
+        .map(str::to_string)
+        .unwrap_or(stem)
 }
 
 /// 返回按文件名排序的直接子目录。

@@ -5,20 +5,32 @@ use super::*;
 impl GsdvGuiApp {
     /// 切换左侧面板 tab，并在进入 workflow 时派发加载任务。
     pub(super) fn set_outline_panel_tab(&mut self, ctx: &egui::Context, tab: OutlinePanelTab) {
-        let Some(current_tab) = self.outline_panel_tabs.get_mut(self.active_workspace) else {
+        if !self.set_outline_panel_tab_only(ctx, tab) {
             return;
+        }
+        match tab {
+            OutlinePanelTab::Outline => self.route_outline_tab_to_agent(),
+            OutlinePanelTab::Workflow => self.route_workflow_tab_to_task_surface(ctx),
+        }
+    }
+
+    /// 只切换左侧面板 tab，不改变右侧 surface。
+    fn set_outline_panel_tab_only(&mut self, ctx: &egui::Context, tab: OutlinePanelTab) -> bool {
+        let Some(current_tab) = self.outline_panel_tabs.get_mut(self.active_workspace) else {
+            return false;
         };
         if *current_tab == tab {
-            return;
+            return false;
         }
         *current_tab = tab;
         if tab == OutlinePanelTab::Workflow {
             self.request_workflow_tree_refresh(ctx, self.active_workspace);
         }
         self.request_app_repaint();
+        true
     }
 
-    /// 在普通 outline 和 workflow outline 之间切换。
+    /// 在普通 outline 和 workflow outline 之间切换，并同步右侧工作台。
     pub(super) fn toggle_outline_workflow_tab(&mut self, ctx: &egui::Context) {
         let Some(current_tab) = self.outline_panel_tabs.get(self.active_workspace).copied() else {
             return;
@@ -28,6 +40,54 @@ impl GsdvGuiApp {
             OutlinePanelTab::Workflow => OutlinePanelTab::Outline,
         };
         self.set_outline_panel_tab(ctx, next_tab);
+    }
+
+    /// 切到普通 outline 时显示 Agent surface。
+    fn route_outline_tab_to_agent(&mut self) {
+        let Some(workspace) = self.current_workspace_mut() else {
+            return;
+        };
+        if workspace.route != Route::Workspace {
+            return;
+        }
+        workspace.center_mode = CenterMode::Agent;
+        workspace.previous_center_mode = CenterMode::Agent;
+        self.persist_workspaces();
+    }
+
+    /// 切到 workflow 时恢复最近 task 并显示 task 工作台。
+    fn route_workflow_tab_to_task_surface(&mut self, ctx: &egui::Context) {
+        let Some(workspace) = self.current_workspace_mut() else {
+            return;
+        };
+        if workspace.route != Route::Workspace {
+            return;
+        }
+        workspace.center_mode = CenterMode::Editor;
+        workspace.previous_center_mode = CenterMode::Editor;
+        self.persist_workspaces();
+        if let Some(target) = self.workflow_task_surface_target_to_restore() {
+            self.request_workflow_target(ctx, target);
+        } else if let Some(state) = self.workflow_states.get_mut(self.active_workspace) {
+            state.pending_task_restore_after_load = true;
+        }
+    }
+
+    /// 返回切回 workflow 时要恢复的 task 工作台目标。
+    fn workflow_task_surface_target_to_restore(&self) -> Option<WorkflowSelectionTarget> {
+        self.workflow_task_surface_target_to_restore_for(self.active_workspace)
+    }
+
+    /// 返回指定 workspace 切回 workflow 时要恢复的 task 工作台目标。
+    fn workflow_task_surface_target_to_restore_for(
+        &self,
+        index: usize,
+    ) -> Option<WorkflowSelectionTarget> {
+        let state = self.workflow_states.get(index)?;
+        state
+            .last_task_surface_target
+            .clone()
+            .or_else(|| first_workflow_task_target(state.tree.as_ref()?))
     }
 
     /// 当前 workspace 是否正在显示 workflow step 片段编辑器。
@@ -184,12 +244,17 @@ impl GsdvGuiApp {
                     .iter()
                     .map(|project| project.key.clone())
                     .collect();
+                let pending_task_restore = state.pending_task_restore_after_load;
+                state.pending_task_restore_after_load = false;
                 state
                     .collapsed_project_keys
                     .retain(|key| project_keys.contains(key));
                 state.tree = Some(tree);
                 state.load_error = None;
                 pending_target = state.pending_target_after_save.take();
+                if pending_target.is_none() && pending_task_restore {
+                    pending_target = self.workflow_task_surface_target_to_restore_for(index);
+                }
             }
             Err(error) => {
                 state.tree = None;
@@ -251,6 +316,9 @@ impl GsdvGuiApp {
                 let task_editor = self.reusable_or_fresh_workflow_task_editor(&task_path);
                 if let Some(state) = self.workflow_states.get_mut(self.active_workspace) {
                     state.selected = Some(target);
+                    state.last_task_surface_target = Some(WorkflowSelectionTarget::Task {
+                        task_path: task_path.clone(),
+                    });
                     state.task_editor = task_editor;
                     state.editor = None;
                     clear_workflow_step_selection(state);
@@ -274,6 +342,10 @@ impl GsdvGuiApp {
                 };
                 if let Some(state) = self.workflow_states.get_mut(self.active_workspace) {
                     state.selected = Some(target);
+                    state.last_task_surface_target = Some(WorkflowSelectionTarget::Step {
+                        task_path: task_path.clone(),
+                        step_path: step_path.clone(),
+                    });
                     state.task_editor = task_editor;
                     state.editor = Some(editor);
                     set_single_workflow_step_selection(state, &task_path, &step_path);
@@ -1172,4 +1244,15 @@ pub(super) fn set_single_workflow_step_selection(
     state.selected_step_paths.insert(step_path.to_vec());
     state.step_selection_anchor = Some(step_path.to_vec());
     state.step_selection_task_path = Some(task_path.to_path_buf());
+}
+
+/// 返回 tree 中第一条 task，适用于首次切入 workflow task 工作台。
+fn first_workflow_task_target(tree: &WorkflowTree) -> Option<WorkflowSelectionTarget> {
+    tree.projects
+        .iter()
+        .flat_map(|project| project.tasks.iter())
+        .next()
+        .map(|task| WorkflowSelectionTarget::Task {
+            task_path: task.path.clone(),
+        })
 }
