@@ -20,9 +20,12 @@ pub(crate) struct ExternalHookEvent {
 
 /// 返回 app 级 hook socket/pipe 地址。
 pub(crate) fn app_hook_endpoint() -> String {
-    if cfg!(windows) {
+    #[cfg(windows)]
+    {
         format!(r"\\.\pipe\gsdv-hook-{}", std::process::id())
-    } else {
+    }
+    #[cfg(not(windows))]
+    {
         app_hook_socket_path().display().to_string()
     }
 }
