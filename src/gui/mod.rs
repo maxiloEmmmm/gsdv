@@ -4,6 +4,7 @@ mod app;
 mod data;
 mod diff_viewer;
 mod glow_gravity_lens;
+pub(crate) mod hook;
 mod i18n;
 mod markdown_preview;
 mod outline;

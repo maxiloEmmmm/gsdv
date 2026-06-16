@@ -141,8 +141,13 @@ enum InputRuntimeKeyboardAction {
 fn input_runtime_keyboard_action(request: &InputRuntimeRequest) -> InputRuntimeKeyboardAction {
     let input = &request.input;
     let recent_markdown_shortcut = input.key_pressed(egui::Key::F1);
+    let recent_agent_helix_targets_shortcut =
+        command_or_alt_shortcut_modifier(input.modifiers) && input.key_pressed(egui::Key::D);
     if request.recent_markdown_dialog_open && recent_markdown_shortcut {
         return InputRuntimeKeyboardAction::Command(UiCommand::ToggleRecentMarkdownOutline);
+    }
+    if request.recent_agent_helix_targets_dialog_open && recent_agent_helix_targets_shortcut {
+        return InputRuntimeKeyboardAction::Command(UiCommand::ToggleRecentAgentHelixTargets);
     }
     if request.active_app_dialog_open || request.active_reviewer_dialog_open {
         if request.agent_translation_dialog_open
@@ -159,7 +164,9 @@ fn input_runtime_keyboard_action(request: &InputRuntimeRequest) -> InputRuntimeK
         if input.key_pressed(egui::Key::Escape) {
             return InputRuntimeKeyboardAction::Command(UiCommand::CloseTopLayer);
         }
-        if let Some(command) = read_terminal_drawer_command(input, false) {
+        if let Some(command) =
+            read_terminal_drawer_command(input, TerminalDrawerCommandScope::Workspace)
+        {
             return InputRuntimeKeyboardAction::Command(command);
         }
         return InputRuntimeKeyboardAction::SuppressTerminalInput;
@@ -179,12 +186,13 @@ fn input_runtime_keyboard_action(request: &InputRuntimeRequest) -> InputRuntimeK
             .unwrap_or(InputRuntimeKeyboardAction::SuppressTerminalInput);
     }
     if request.reviewer_helix_open {
-        return read_terminal_drawer_command(input, true)
+        return read_terminal_drawer_command(input, TerminalDrawerCommandScope::Helix)
             .map(InputRuntimeKeyboardAction::Command)
             .unwrap_or(InputRuntimeKeyboardAction::SuppressTerminalInput);
     }
     if request.workspace_terminal_open
-        && let Some(command) = read_terminal_drawer_command(input, false)
+        && let Some(command) =
+            read_terminal_drawer_command(input, TerminalDrawerCommandScope::Workspace)
     {
         return InputRuntimeKeyboardAction::Command(command);
     }
@@ -309,6 +317,9 @@ pub(super) fn read_base_route_command_for_input(
     if command_or_alt && input.key_pressed(egui::Key::N) {
         return Some(UiCommand::ApplyAgentInputTranslation);
     }
+    if command_or_alt && input.key_pressed(egui::Key::D) {
+        return Some(UiCommand::ToggleRecentAgentHelixTargets);
+    }
     if agent_slot_modifier && shortcut_key_pressed(input, egui::Key::Num4) {
         return Some(UiCommand::PasteRecentMarkdownDiffsToAgent);
     }
@@ -349,6 +360,9 @@ fn read_agent_translation_dialog_command(input: &egui::InputState) -> Option<UiC
     if command_or_alt && input.key_pressed(egui::Key::N) {
         return Some(UiCommand::ApplyAgentInputTranslation);
     }
+    if command_or_alt && input.key_pressed(egui::Key::D) {
+        return Some(UiCommand::ToggleRecentAgentHelixTargets);
+    }
     None
 }
 
@@ -382,7 +396,14 @@ pub(super) fn read_ui_command(
         // drawer embeds a child terminal while egui still sees key events.
         // Limit handling to drawer-owned shortcuts to prevent unrelated
         // reviewer/app actions and terminal text leaks from the same chord.
-        return read_terminal_drawer_command(input, helix_shortcut_allowed);
+        return read_terminal_drawer_command(
+            input,
+            if helix_shortcut_allowed {
+                TerminalDrawerCommandScope::Helix
+            } else {
+                TerminalDrawerCommandScope::Workspace
+            },
+        );
     }
     if help_shortcut_pressed(input) {
         return Some(UiCommand::OpenHelp);
@@ -454,7 +475,7 @@ pub(super) fn read_ui_command(
 /// Reads only shortcuts owned by terminal drawers.
 fn read_terminal_drawer_command(
     input: &egui::InputState,
-    helix_shortcut_allowed: bool,
+    scope: TerminalDrawerCommandScope,
 ) -> Option<UiCommand> {
     let command_or_alt = command_or_alt_shortcut_modifier(input.modifiers);
     if command_or_alt && input.key_pressed(egui::Key::T) {
@@ -463,10 +484,22 @@ fn read_terminal_drawer_command(
     if command_or_alt && input.key_pressed(egui::Key::W) {
         return Some(UiCommand::AgentMarkdownShortcut);
     }
-    if helix_shortcut_allowed && reviewer_helix_shortcut_pressed(input) {
+    if scope == TerminalDrawerCommandScope::Workspace
+        && command_or_alt
+        && input.key_pressed(egui::Key::D)
+    {
+        return Some(UiCommand::ToggleRecentAgentHelixTargets);
+    }
+    if scope == TerminalDrawerCommandScope::Helix && reviewer_helix_shortcut_pressed(input) {
         return Some(UiCommand::ToggleReviewerHelix);
     }
     None
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalDrawerCommandScope {
+    Workspace,
+    Helix,
 }
 
 /// Detects app-owned shortcuts that Agent tab must consume without dispatching.

@@ -4,6 +4,7 @@
 //! 它只做轻量状态切换或派发后台任务。
 
 use super::*;
+use crate::gui::hook;
 
 impl GsdvGuiApp {
     /// Returns whether the center workspace surface may consume keyboard text.
@@ -78,6 +79,9 @@ impl GsdvGuiApp {
             UiCommand::TranslateAgentInput => self.translate_active_agent_input(ctx),
             UiCommand::ApplyAgentInputTranslation => self.apply_last_agent_input_translation(ctx),
             UiCommand::ToggleExtraTools => self.toggle_extra_tools(ctx),
+            UiCommand::ToggleRecentAgentHelixTargets => {
+                self.toggle_recent_agent_helix_targets_dialog()
+            }
             UiCommand::AgentMarkdownShortcut => self.route_agent_markdown_shortcut(),
             UiCommand::ToggleMarkdownEditorPreview => {
                 self.suppress_editor_input = true;
@@ -194,6 +198,86 @@ impl GsdvGuiApp {
                 ),
                 theme::warning(),
             );
+        }
+    }
+
+    /// 处理外部 hook 事件。
+    pub(super) fn handle_external_hook(
+        &mut self,
+        ctx: &egui::Context,
+        event: hook::ExternalHookEvent,
+    ) {
+        hook::hook_info(format_args!(
+            "app handle key={} data={}",
+            event.key, event.data
+        ));
+        match event.key.as_str() {
+            hook::HELIX_CURRENT_KEY => {
+                let Some(text) = normalize_helix_current_hook_data(&event.data) else {
+                    hook::hook_info(format_args!(
+                        "helix.current ignored invalid data={}",
+                        event.data
+                    ));
+                    return;
+                };
+                hook::hook_info(format_args!("helix.current paste text={text}"));
+                self.copy_reviewer_text_to_agent(ctx, &text);
+            }
+            hook::AGENT_STATUS_KEY => {
+                if let Ok(status) = serde_json::from_str::<AgentStatusHookData>(&event.data) {
+                    self.apply_agent_status_hook_data(status);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// 应用 socket 直达的 Agent 状态变化。
+    pub(super) fn apply_agent_status_hook_data(&mut self, status: AgentStatusHookData) {
+        let activity = workspace_activity_from_hook_status(&status.status);
+        let workspace_path = PathBuf::from(&status.workspace);
+        let normalized_workspace = workspace_path.canonicalize().unwrap_or(workspace_path);
+        let mut changed = false;
+        for workspace in &mut self.workspaces {
+            if let Some(subagent) = workspace
+                .subagents
+                .iter_mut()
+                .find(|subagent| subagent.agent_id == status.agent_id)
+            {
+                if subagent.activity != activity {
+                    subagent.activity = activity;
+                    changed = true;
+                }
+                if !status.session_id.is_empty()
+                    && subagent.session_id.as_deref() != Some(status.session_id.as_str())
+                {
+                    subagent.session_id = Some(status.session_id.clone());
+                    changed = true;
+                }
+                continue;
+            }
+            let workspace_matches = workspace
+                .path
+                .canonicalize()
+                .unwrap_or_else(|_| workspace.path.clone())
+                == normalized_workspace;
+            if workspace.agent_id != status.agent_id && !workspace_matches {
+                continue;
+            }
+            if workspace.activity != activity {
+                workspace.activity = activity;
+                changed = true;
+            }
+            if !status.session_id.is_empty()
+                && workspace.session_id.as_deref() != Some(status.session_id.as_str())
+            {
+                workspace.session_id = Some(status.session_id.clone());
+                changed = true;
+            }
+        }
+        if changed {
+            self.mark_workspace_store_dirty();
+            self.request_app_repaint();
         }
     }
 
@@ -580,7 +664,7 @@ impl GsdvGuiApp {
             file: target.file,
             line: target.line,
         };
-        self.ensure_helix_host(ctx, spec);
+        self.ensure_helix_host(ctx, spec, HelixReusePolicy::ExactTarget);
         if self.active_workspace >= self.reviewer_helix_drawers.len() {
             self.reviewer_helix_drawers
                 .resize(self.workspaces.len(), false);
@@ -611,11 +695,12 @@ impl GsdvGuiApp {
         ctx: &egui::Context,
         spec: HelixLaunchSpec,
     ) {
+        self.record_recent_agent_helix_target(spec.clone());
         if !self.helix_binary_available {
             self.spawn_helix_binary_check_task(ctx, HelixOpenRequest::TerminalFile(spec));
             return;
         }
-        self.ensure_helix_host(ctx, spec);
+        self.ensure_helix_host(ctx, spec, HelixReusePolicy::ExactTarget);
         self.open_helix_drawer_for_active_workspace();
     }
 
@@ -630,6 +715,7 @@ impl GsdvGuiApp {
                 file: None,
                 line: None,
             },
+            HelixReusePolicy::SameWorkdir,
         );
         self.open_helix_drawer_for_active_workspace();
     }
@@ -643,7 +729,7 @@ impl GsdvGuiApp {
             HelixOpenRequest::ReviewerSelection => self.open_checked_reviewer_helix_drawer(ctx),
             HelixOpenRequest::WorkspaceRoot => self.open_checked_workspace_helix_drawer(ctx),
             HelixOpenRequest::TerminalFile(spec) => {
-                self.ensure_helix_host(ctx, spec);
+                self.ensure_helix_host(ctx, spec, HelixReusePolicy::ExactTarget);
                 self.open_helix_drawer_for_active_workspace();
             }
         }
@@ -691,6 +777,52 @@ impl GsdvGuiApp {
         }
     }
 
+    /// 切换最近 Agent Helix 目标弹窗。
+    pub(super) fn toggle_recent_agent_helix_targets_dialog(&mut self) {
+        if matches!(
+            self.active_app_dialog(),
+            Some(AppDialog::RecentAgentHelixTargets)
+        ) {
+            self.set_active_app_dialog(None);
+            return;
+        }
+        self.set_active_app_dialog(Some(AppDialog::RecentAgentHelixTargets));
+    }
+
+    /// 记录最近通过 Agent 文件行打开的 Helix 目标。
+    pub(super) fn record_recent_agent_helix_target(&mut self, spec: HelixLaunchSpec) {
+        let Some(targets) = self
+            .recent_agent_helix_targets
+            .get_mut(self.active_workspace)
+        else {
+            return;
+        };
+        let target = RecentHelixTarget {
+            workdir: spec.workdir,
+            file: spec.file,
+            line: spec.line,
+        };
+        if let Some(index) = targets.iter().position(|current| current == &target) {
+            targets.remove(index);
+        }
+        targets.insert(0, target);
+        targets.truncate(10);
+    }
+
+    /// 从最近列表重新打开 Agent Helix 目标。
+    pub(super) fn open_recent_agent_helix_target(
+        &mut self,
+        ctx: &egui::Context,
+        target: RecentHelixTarget,
+    ) {
+        let spec = HelixLaunchSpec {
+            workdir: target.workdir,
+            file: target.file,
+            line: target.line,
+        };
+        self.open_terminal_file_helix_drawer(ctx, spec);
+    }
+
     /// Returns the workdir used for opening the generic Helix drawer.
     pub(super) fn active_agent_or_workspace_work_dir(&self) -> Option<PathBuf> {
         let workspace_path = self
@@ -700,5 +832,23 @@ impl GsdvGuiApp {
         self.agent_slot_work_dir(self.active_workspace, &slot)
             .filter(|path| path.is_dir())
             .or(Some(workspace_path))
+    }
+}
+
+/// 规范化 Helix 当前光标 hook 数据。
+pub(super) fn normalize_helix_current_hook_data(data: &str) -> Option<String> {
+    let (file, line) = data.rsplit_once(':')?;
+    if file.trim().is_empty() || line.trim().is_empty() {
+        return None;
+    }
+    Some(format!("{file}:{line}"))
+}
+
+/// 将 hook status 字符串转为 workspace activity。
+fn workspace_activity_from_hook_status(status: &str) -> WorkspaceActivity {
+    match status.trim().to_ascii_lowercase().as_str() {
+        "busy" => WorkspaceActivity::Busy,
+        "idle" => WorkspaceActivity::Idle,
+        _ => WorkspaceActivity::Unknown,
     }
 }

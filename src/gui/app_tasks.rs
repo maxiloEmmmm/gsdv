@@ -4,6 +4,7 @@
 //! 后台，并在完成后投递 `AppEvent`；不能直接从后台修改 UI 状态。
 
 use super::*;
+use crate::gui::hook;
 use similar::TextDiff;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -14,6 +15,16 @@ const AGENT_INPUT_TRANSLATION_PROMPT: &str = "I’m a software developer. Please
 const AGENT_INPUT_TRANSLATION_MODEL: &str = "gpt-5.4-mini";
 
 impl GsdvGuiApp {
+    /// 启动 app 级 hook server，接收 Helix 等外部 hook 数据。
+    pub(super) fn spawn_external_hook_server(&self) {
+        let tx = self.app_event_tx.clone();
+        self.background_runtime.spawn(async move {
+            if let Err(error) = run_external_hook_server(tx).await {
+                eprintln!("gsdv hook server failed: {error}");
+            }
+        });
+    }
+
     /// 派发未提交文件变化触发的 reviewer 刷新任务。
     pub(super) fn spawn_reviewer_uncommitted_refresh_tasks(
         &mut self,
@@ -623,28 +634,6 @@ impl GsdvGuiApp {
                 Err(error) => Err(error.to_string()),
             };
             let _ = tx.send(AppEvent::ScreenshotRequestLoaded { result });
-            repaint_controller.request_repaint(&repaint_ctx);
-        });
-    }
-
-    /// Dispatches agent status loading away from the egui update path.
-    pub(super) fn spawn_agent_status_refresh_task(&mut self, ctx: &egui::Context) {
-        let mut workspaces = self.workspaces.clone();
-        let tx = self.app_event_tx.clone();
-        let repaint_ctx = ctx.clone();
-        let repaint_controller = self.repaint_controller.clone();
-        self.background_runtime.spawn(async move {
-            let result = tokio::task::spawn_blocking(move || {
-                let changed = data::refresh_workspace_agent_statuses(&mut workspaces);
-                (workspaces, changed)
-            })
-            .await;
-            if let Ok((workspaces, changed)) = result {
-                let _ = tx.send(AppEvent::AgentStatusesRefreshed {
-                    workspaces,
-                    changed,
-                });
-            }
             repaint_controller.request_repaint(&repaint_ctx);
         });
     }
@@ -1424,5 +1413,112 @@ async fn prune_markdown_diff_history(dir: &Path) -> Result<(), String> {
             .await
             .map_err(|error| format!("Failed to remove {}: {error}", path.display()))?;
     }
+    Ok(())
+}
+
+/// 运行平台相关 hook server。
+async fn run_external_hook_server(tx: Sender<AppEvent>) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::UnixListener;
+
+        let endpoint = hook::app_hook_endpoint();
+        let _ = std::fs::remove_file(&endpoint);
+        let listener = UnixListener::bind(&endpoint)?;
+        hook::hook_info(format_args!("server listen endpoint={endpoint}"));
+        loop {
+            let (mut stream, _) = listener.accept().await?;
+            hook::hook_info(format_args!(
+                "server accepted connection endpoint={endpoint}"
+            ));
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let mut len = [0_u8; 4];
+                if let Err(error) = stream.read_exact(&mut len).await {
+                    hook::hook_info(format_args!("server read length failed error={error}"));
+                    return;
+                }
+                let len = u32::from_be_bytes(len) as usize;
+                if len > hook::MAX_HOOK_PAYLOAD_LEN {
+                    hook::hook_info(format_args!("server rejected payload len={len}"));
+                    return;
+                }
+                let mut payload = vec![0_u8; len];
+                if let Err(error) = stream.read_exact(&mut payload).await {
+                    hook::hook_info(format_args!(
+                        "server read payload failed len={len} error={error}"
+                    ));
+                    return;
+                }
+                match hook::parse_hook_payload(&payload) {
+                    Ok(event) => {
+                        hook::hook_info(format_args!(
+                            "server parsed key={} data={}",
+                            event.key, event.data
+                        ));
+                        if let Err(error) = tx.send(AppEvent::ExternalHook(event)) {
+                            hook::hook_info(format_args!("server enqueue failed error={error}"));
+                        }
+                    }
+                    Err(error) => {
+                        hook::hook_info(format_args!("server parse failed error={error:#}"));
+                    }
+                }
+            });
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::windows::named_pipe::ServerOptions;
+
+        let endpoint = hook::app_hook_endpoint();
+        hook::hook_info(format_args!("server listen endpoint={endpoint}"));
+        loop {
+            let mut pipe = ServerOptions::new().create(&endpoint)?;
+            pipe.connect().await?;
+            hook::hook_info(format_args!(
+                "server accepted connection endpoint={endpoint}"
+            ));
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let mut len = [0_u8; 4];
+                if let Err(error) = pipe.read_exact(&mut len).await {
+                    hook::hook_info(format_args!("server read length failed error={error}"));
+                    return;
+                }
+                let len = u32::from_be_bytes(len) as usize;
+                if len > hook::MAX_HOOK_PAYLOAD_LEN {
+                    hook::hook_info(format_args!("server rejected payload len={len}"));
+                    return;
+                }
+                let mut payload = vec![0_u8; len];
+                if let Err(error) = pipe.read_exact(&mut payload).await {
+                    hook::hook_info(format_args!(
+                        "server read payload failed len={len} error={error}"
+                    ));
+                    return;
+                }
+                match hook::parse_hook_payload(&payload) {
+                    Ok(event) => {
+                        hook::hook_info(format_args!(
+                            "server parsed key={} data={}",
+                            event.key, event.data
+                        ));
+                        if let Err(error) = tx.send(AppEvent::ExternalHook(event)) {
+                            hook::hook_info(format_args!("server enqueue failed error={error}"));
+                        }
+                    }
+                    Err(error) => {
+                        hook::hook_info(format_args!("server parse failed error={error:#}"));
+                    }
+                }
+            });
+        }
+    }
+
+    #[allow(unreachable_code)]
     Ok(())
 }

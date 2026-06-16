@@ -28,10 +28,6 @@ impl GsdvGuiApp {
             next =
                 min_optional_duration(next, Some(duration_until_due(dirty_at, FS_WATCH_DEBOUNCE)));
         }
-        if let Some(dirty_at) = self.fs_watch_dirty.agent_status_dirty_at {
-            next =
-                min_optional_duration(next, Some(duration_until_due(dirty_at, FS_WATCH_DEBOUNCE)));
-        }
         next
     }
 
@@ -59,15 +55,6 @@ impl GsdvGuiApp {
     /// 派发文件系统 watcher 防抖后的后台工作。
     pub(super) fn process_fs_watch_dirty(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
-        if self
-            .fs_watch_dirty
-            .agent_status_dirty_at
-            .is_some_and(|dirty_at| now.duration_since(dirty_at) >= FS_WATCH_DEBOUNCE)
-        {
-            self.fs_watch_dirty.agent_status = false;
-            self.fs_watch_dirty.agent_status_dirty_at = None;
-            self.spawn_agent_status_refresh_task(ctx);
-        }
         if self
             .fs_watch_dirty
             .outline_dirty_at

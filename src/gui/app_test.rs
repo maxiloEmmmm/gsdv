@@ -1,5 +1,9 @@
 use super::*;
+use crate::gui::app::app_commands::normalize_helix_current_hook_data;
+use crate::gui::app::app_dialogs::recent_helix_target_label;
+use crate::gui::app::app_terminal_ui::helix_spec_needs_spawn;
 use crate::gui::data::{OutlineRootKind, SubagentViewData};
+use crate::gui::hook;
 use crate::reviewer::app::GuiReviewerRow;
 
 fn test_workspace() -> WorkspaceViewData {
@@ -1452,6 +1456,207 @@ fn reviewer_leaves_plain_d_to_diff_viewer() {
     }
 }
 
+/// 验证 Cmd/Alt+D 打开最近 Agent Helix 目标弹窗。
+#[test]
+fn command_or_alt_d_opens_recent_agent_helix_targets() {
+    for modifiers in [egui::Modifiers::COMMAND, egui::Modifiers::ALT] {
+        let input = key_input(egui::Key::D, modifiers);
+        assert_eq!(
+            read_base_route_command_for_input(&input, false),
+            Some(UiCommand::ToggleRecentAgentHelixTargets)
+        );
+    }
+}
+
+/// 验证 Cmd+D 在最近 Agent Helix modal 打开时执行关闭 toggle。
+#[test]
+fn command_d_toggles_recent_agent_helix_targets_dialog_closed() {
+    let mut app = GsdvGuiApp::from(InitialGuiData {
+        active_workspace: 0,
+        workspaces: vec![test_workspace()],
+        rail_collapsed: false,
+    });
+    app.set_active_app_dialog(Some(AppDialog::RecentAgentHelixTargets));
+    let ctx = egui::Context::default();
+    ctx.input_mut(|input| {
+        *input = key_input(egui::Key::D, egui::Modifiers::COMMAND);
+    });
+
+    let request = app
+        .input_runtime_request(&ctx, ctx.input(Clone::clone))
+        .unwrap();
+    let events = process_input_runtime_request(request);
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AppEvent::InputUiCommand(UiCommand::ToggleRecentAgentHelixTargets)
+        )
+    }));
+}
+
+/// 验证 hook 帧使用 4 字节 big-endian 长度。
+#[test]
+fn hook_frame_uses_big_endian_length_prefix() {
+    let frame = hook::encode_hook_frame("helix.current", "/tmp/demo/src/lib.rs:7").unwrap();
+    let payload = b"helix.current:/tmp/demo/src/lib.rs:7";
+
+    assert_eq!(&frame[..4], &(payload.len() as u32).to_be_bytes());
+    assert_eq!(&frame[4..], payload);
+}
+
+/// 验证 hook payload key 后面的冒号保留在 data 中。
+#[test]
+fn hook_payload_keeps_colons_after_key() {
+    let event = hook::parse_hook_payload(b"helix.current:/tmp/demo/src/lib.rs:7").unwrap();
+
+    assert_eq!(event.key, "helix.current");
+    assert_eq!(event.data, "/tmp/demo/src/lib.rs:7");
+}
+
+/// 验证 Helix hook 临时配置写入 Cmd/Alt+d keymap。
+#[test]
+fn helix_hook_config_uses_alt_d_keymap() {
+    let config = hook::helix_hook_config("/tmp/gsdv-hook.sock", Path::new("/tmp/gsdv binary/gsdv"));
+
+    assert!(config.contains("[keys.normal]"));
+    assert!(config.contains("[keys.insert]"));
+    assert!(config.contains("[keys.select]"));
+    assert!(config.contains("A-d = "));
+    assert!(config.contains("Cmd-d = "));
+    assert!(config.contains("hook-client"));
+    assert!(config.contains("'/tmp/gsdv binary/gsdv' hook-client"));
+    assert!(!config.contains(":sh gsdv hook-client"));
+    assert!(config.contains("--key helix.current"));
+    assert!(config.contains("%{buffer_name}:%{cursor_line}"));
+}
+
+/// 验证 Helix hook 配置复用已有 keymap 表。
+#[test]
+fn helix_hook_config_merges_existing_key_tables() {
+    let bindings = vec![
+        "A-d = \":sh '/tmp/current gsdv' hook-client\"".to_string(),
+        "Cmd-d = \":sh '/tmp/current gsdv' hook-client\"".to_string(),
+    ];
+    let config = hook::merge_helix_key_bindings(
+        "[theme]\nname = \"base16\"\n\n[keys.insert]\nA-d = \":noop\"\n\"Cmd-d\" = \"@*v\"\nj = \"normal_mode\"\n\n[keys.normal]\nA-d = \":noop\"\n\"Cmd-d\" = \"@*v\"\nC-s = \":write\"\n",
+        &bindings,
+    );
+
+    assert_eq!(config.matches("[keys.normal]").count(), 1);
+    assert_eq!(config.matches("[keys.insert]").count(), 1);
+    assert_eq!(config.matches("[keys.select]").count(), 1);
+    assert_eq!(
+        config
+            .matches("A-d = \":sh '/tmp/current gsdv' hook-client\"")
+            .count(),
+        3
+    );
+    assert!(config.contains("A-d = \":sh '/tmp/current gsdv' hook-client\""));
+    assert_eq!(
+        config
+            .matches("Cmd-d = \":sh '/tmp/current gsdv' hook-client\"")
+            .count(),
+        3
+    );
+    assert!(config.contains("Cmd-d = \":sh '/tmp/current gsdv' hook-client\""));
+    assert!(!config.contains(":sh gsdv hook-client"));
+    assert!(!config.contains("A-d = \":noop\""));
+    assert!(!config.contains("\"Cmd-d\" = \"@*v\""));
+    assert!(config.contains("C-s = \":write\""));
+    assert!(config.contains("j = \"normal_mode\""));
+}
+
+/// 验证 Helix current hook 数据可保留绝对路径和行号。
+#[test]
+fn helix_current_hook_data_preserves_absolute_file_line() {
+    assert_eq!(
+        normalize_helix_current_hook_data("/tmp/demo/src/lib.rs:7"),
+        Some("/tmp/demo/src/lib.rs:7".to_string())
+    );
+}
+
+/// 验证 hook client 会把 Helix 相对 file 转为绝对路径。
+#[test]
+fn hook_client_normalizes_helix_current_file_to_absolute() {
+    let current = std::env::current_dir().unwrap();
+
+    assert_eq!(
+        hook::normalize_client_data("helix.current", "src/lib.rs:7"),
+        format!("{}:7", current.join("src/lib.rs").display())
+    );
+}
+
+/// 验证 socket 直达的 Agent status 会更新主 Agent。
+#[test]
+fn agent_status_hook_data_updates_main_agent_without_file_refresh() {
+    let mut workspace = test_workspace();
+    workspace.path = app_test_root("agent_status_socket_main");
+    workspace.agent_id = "agent-main".to_string();
+    let mut app = GsdvGuiApp::from(InitialGuiData {
+        active_workspace: 0,
+        workspaces: vec![workspace],
+        rail_collapsed: false,
+    });
+
+    app.apply_agent_status_hook_data(AgentStatusHookData {
+        agent_id: "agent-main".to_string(),
+        agent: "codex".to_string(),
+        workspace: app.workspaces[0].path.display().to_string(),
+        status: "busy".to_string(),
+        session_id: "session-main".to_string(),
+        turn_id: String::new(),
+        transcript_path: String::new(),
+        hook_event_name: "UserPromptSubmit".to_string(),
+    });
+
+    assert_eq!(app.workspaces[0].activity, WorkspaceActivity::Busy);
+    assert_eq!(
+        app.workspaces[0].session_id.as_deref(),
+        Some("session-main")
+    );
+}
+
+/// 验证 socket 直达的 Agent status 会更新 subagent。
+#[test]
+fn agent_status_hook_data_updates_subagent_without_file_refresh() {
+    let mut workspace = test_workspace();
+    workspace.path = app_test_root("agent_status_socket_subagent");
+    workspace.subagents.push(SubagentViewData {
+        id: "subagent-one".to_string(),
+        name: "one".to_string(),
+        agent_kind: AgentKind::Codex,
+        agent_model: None,
+        agent_model_provider: None,
+        agent_effort: None,
+        agent_fast_mode: None,
+        agent_work_dir: None,
+        agent_id: "agent-sub".to_string(),
+        session_id: None,
+        activity: WorkspaceActivity::Unknown,
+    });
+    let mut app = GsdvGuiApp::from(InitialGuiData {
+        active_workspace: 0,
+        workspaces: vec![workspace],
+        rail_collapsed: false,
+    });
+
+    app.apply_agent_status_hook_data(AgentStatusHookData {
+        agent_id: "agent-sub".to_string(),
+        agent: "codex".to_string(),
+        workspace: app.workspaces[0].path.display().to_string(),
+        status: "idle".to_string(),
+        session_id: "session-sub".to_string(),
+        turn_id: String::new(),
+        transcript_path: String::new(),
+        hook_event_name: "Stop".to_string(),
+    });
+
+    let subagent = &app.workspaces[0].subagents[0];
+    assert_eq!(subagent.activity, WorkspaceActivity::Idle);
+    assert_eq!(subagent.session_id.as_deref(), Some("session-sub"));
+}
+
 /// 验证 reviewer 忙时重复 notify 刷新只排一个补刷任务。
 #[test]
 fn reviewer_refresh_uncommitted_queue_coalesces_duplicates() {
@@ -2005,6 +2210,169 @@ fn workspace_helix_workdir_uses_active_subagent_work_dir() {
     assert_eq!(app.active_agent_or_workspace_work_dir(), Some(subagent_dir));
 }
 
+/// 验证普通 Helix 打开在相同 workdir 下复用现有会话。
+#[test]
+fn workspace_helix_reuse_ignores_file_and_line_for_same_workdir() {
+    let workdir = PathBuf::from("/tmp/demo");
+    let current = HelixLaunchSpec {
+        workdir: workdir.clone(),
+        file: Some(PathBuf::from("src/lib.rs")),
+        line: Some(10),
+    };
+    let requested = HelixLaunchSpec {
+        workdir,
+        file: None,
+        line: None,
+    };
+
+    assert!(!helix_spec_needs_spawn(
+        Some(&current),
+        &requested,
+        HelixReusePolicy::SameWorkdir,
+    ));
+}
+
+/// 验证普通 Helix 打开在 workdir 不同时启动新会话。
+#[test]
+fn workspace_helix_reuse_respawns_for_different_workdir() {
+    let current = HelixLaunchSpec {
+        workdir: PathBuf::from("/tmp/demo"),
+        file: Some(PathBuf::from("src/lib.rs")),
+        line: Some(10),
+    };
+    let requested = HelixLaunchSpec {
+        workdir: PathBuf::from("/tmp/other"),
+        file: None,
+        line: None,
+    };
+
+    assert!(helix_spec_needs_spawn(
+        Some(&current),
+        &requested,
+        HelixReusePolicy::SameWorkdir,
+    ));
+}
+
+/// 验证 reviewer 和 Agent 文件行打开必须完整目标一致。
+#[test]
+fn exact_helix_reuse_requires_file_and_line_to_match() {
+    let workdir = PathBuf::from("/tmp/demo");
+    let current = HelixLaunchSpec {
+        workdir: workdir.clone(),
+        file: Some(PathBuf::from("src/lib.rs")),
+        line: Some(10),
+    };
+    let requested = HelixLaunchSpec {
+        workdir,
+        file: Some(PathBuf::from("src/lib.rs")),
+        line: Some(20),
+    };
+
+    assert!(helix_spec_needs_spawn(
+        Some(&current),
+        &requested,
+        HelixReusePolicy::ExactTarget,
+    ));
+}
+
+/// 验证最近 Agent Helix 目标按最近打开排序并去重。
+#[test]
+fn recent_agent_helix_targets_move_existing_entry_to_front() {
+    let mut app = GsdvGuiApp::from(InitialGuiData {
+        active_workspace: 0,
+        workspaces: vec![test_workspace()],
+        rail_collapsed: false,
+    });
+    let first = HelixLaunchSpec {
+        workdir: PathBuf::from("/tmp/demo"),
+        file: Some(PathBuf::from("src/a.rs")),
+        line: Some(1),
+    };
+    let second = HelixLaunchSpec {
+        workdir: PathBuf::from("/tmp/demo"),
+        file: None,
+        line: None,
+    };
+
+    app.record_recent_agent_helix_target(first.clone());
+    app.record_recent_agent_helix_target(second.clone());
+    app.record_recent_agent_helix_target(first);
+
+    let targets = &app.recent_agent_helix_targets[0];
+    assert_eq!(targets.len(), 2);
+    assert_eq!(targets[0].file, Some(PathBuf::from("src/a.rs")));
+    assert_eq!(targets[0].line, Some(1));
+    assert_eq!(targets[1].file, None);
+}
+
+/// 验证最近 Agent Helix 目标最多保留十条。
+#[test]
+fn recent_agent_helix_targets_keep_latest_ten() {
+    let mut app = GsdvGuiApp::from(InitialGuiData {
+        active_workspace: 0,
+        workspaces: vec![test_workspace()],
+        rail_collapsed: false,
+    });
+
+    for index in 0..12 {
+        app.record_recent_agent_helix_target(HelixLaunchSpec {
+            workdir: PathBuf::from("/tmp/demo"),
+            file: Some(PathBuf::from(format!("src/{index}.rs"))),
+            line: Some(index + 1),
+        });
+    }
+
+    let targets = &app.recent_agent_helix_targets[0];
+    assert_eq!(targets.len(), 10);
+    assert_eq!(targets[0].file, Some(PathBuf::from("src/11.rs")));
+    assert_eq!(targets[9].file, Some(PathBuf::from("src/2.rs")));
+}
+
+/// 验证最近 Helix 目标展示 workdir 时使用相对 workspace 路径。
+#[test]
+fn recent_helix_target_label_shows_workspace_relative_workdir() {
+    let target = RecentHelixTarget {
+        workdir: PathBuf::from("/tmp/demo/crate-a"),
+        file: Some(PathBuf::from("src/lib.rs")),
+        line: Some(9),
+    };
+
+    assert_eq!(
+        recent_helix_target_label(Path::new("/tmp/demo"), &target),
+        "[crate-a] src/lib.rs:9"
+    );
+}
+
+/// 验证最近 Helix 目标展示 file 时相对该项 workdir。
+#[test]
+fn recent_helix_target_label_shows_workdir_relative_file() {
+    let target = RecentHelixTarget {
+        workdir: PathBuf::from("/tmp/demo/crate-a"),
+        file: Some(PathBuf::from("/tmp/demo/crate-a/src/lib.rs")),
+        line: Some(9),
+    };
+
+    assert_eq!(
+        recent_helix_target_label(Path::new("/tmp/demo"), &target),
+        "[crate-a] src/lib.rs:9"
+    );
+}
+
+/// 验证 workdir 是 workspace 时绝对 file 仍显示为短相对路径。
+#[test]
+fn recent_helix_target_label_shortens_file_when_workdir_is_workspace() {
+    let target = RecentHelixTarget {
+        workdir: PathBuf::from("/tmp/demo"),
+        file: Some(PathBuf::from("/tmp/demo/src/gui/app_test.rs")),
+        line: Some(1),
+    };
+
+    assert_eq!(
+        recent_helix_target_label(Path::new("/tmp/demo"), &target),
+        "[.] src/gui/app_test.rs:1"
+    );
+}
+
 /// Verifies covered center surfaces cannot keep consuming keyboard text.
 #[test]
 fn center_surface_input_is_blocked_by_top_keyboard_routes() {
@@ -2057,7 +2425,7 @@ fn default_terminal_input_routes_to_workspace_terminal_when_drawer_is_open() {
     );
 }
 
-/// 验证 workspace terminal 抽屉只把 T/W 留给 app 快捷键。
+/// 验证 workspace terminal 抽屉只把抽屉级快捷键留给 app。
 #[test]
 fn workspace_terminal_drawer_forwards_non_terminal_shortcuts() {
     let mut app = GsdvGuiApp::from(InitialGuiData {
@@ -2097,6 +2465,60 @@ fn workspace_terminal_drawer_forwards_non_terminal_shortcuts() {
                 bytes,
                 ..
             } if bytes == b"\x1bx"
+        )
+    }));
+}
+
+/// 验证 workspace terminal 抽屉仍能打开最近 Helix 目标。
+#[test]
+fn workspace_terminal_drawer_keeps_recent_helix_modal_shortcut() {
+    let mut app = GsdvGuiApp::from(InitialGuiData {
+        active_workspace: 0,
+        workspaces: vec![test_workspace()],
+        rail_collapsed: false,
+    });
+    app.workspace_terminal_drawers[0] = true;
+    let ctx = egui::Context::default();
+    ctx.input_mut(|input| {
+        *input = key_input(egui::Key::D, egui::Modifiers::ALT);
+    });
+
+    let request = app
+        .input_runtime_request(&ctx, ctx.input(Clone::clone))
+        .unwrap();
+    let events = process_input_runtime_request(request);
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AppEvent::InputUiCommand(UiCommand::ToggleRecentAgentHelixTargets)
+        )
+    }));
+}
+
+/// 验证 Helix 抽屉不抢 Alt+D，留给 Helix keymap。
+#[test]
+fn helix_drawer_leaves_alt_d_to_helix() {
+    let mut app = GsdvGuiApp::from(InitialGuiData {
+        active_workspace: 0,
+        workspaces: vec![test_workspace()],
+        rail_collapsed: false,
+    });
+    app.reviewer_helix_drawers[0] = true;
+    let ctx = egui::Context::default();
+    ctx.input_mut(|input| {
+        *input = key_input(egui::Key::D, egui::Modifiers::ALT);
+    });
+
+    let request = app
+        .input_runtime_request(&ctx, ctx.input(Clone::clone))
+        .unwrap();
+    let events = process_input_runtime_request(request);
+
+    assert!(!events.iter().any(|event| {
+        matches!(
+            event,
+            AppEvent::InputUiCommand(UiCommand::ToggleRecentAgentHelixTargets)
         )
     }));
 }

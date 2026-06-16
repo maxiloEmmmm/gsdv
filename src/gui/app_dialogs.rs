@@ -96,6 +96,7 @@ impl GsdvGuiApp {
         let mut restart_agent_without_resume = false;
         let mut start_codex_auth = false;
         let mut outline_action = None;
+        let mut open_recent_helix_target = None;
 
         egui::Window::new(app_dialog_title(&dialog, self.app_language))
             .order(modal_dialog_order())
@@ -104,6 +105,7 @@ impl GsdvGuiApp {
             .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
             .fixed_size(match dialog {
                 AppDialog::RecentMarkdownOutline { .. } => Vec2::new(620.0, 520.0),
+                AppDialog::RecentAgentHelixTargets => Vec2::new(620.0, 420.0),
                 AppDialog::CreateMarkdown { .. }
                 | AppDialog::CreateFolder { .. }
                 | AppDialog::RenamePath { .. } => Vec2::new(460.0, 300.0),
@@ -167,6 +169,55 @@ impl GsdvGuiApp {
                             keep_open.then_some(AppDialog::RecentMarkdownOutline { nodes });
                     } else {
                         next_dialog = Some(AppDialog::RecentMarkdownOutline { nodes });
+                    }
+                }
+                AppDialog::RecentAgentHelixTargets => {
+                    let workspace_path = self
+                        .current_workspace()
+                        .map(|workspace| workspace.path.clone())
+                        .unwrap_or_default();
+                    let targets = self
+                        .recent_agent_helix_targets
+                        .get(self.active_workspace)
+                        .cloned()
+                        .unwrap_or_default();
+                    if targets.is_empty() {
+                        ui.centered_and_justified(|ui| {
+                            ui.label(muted(i18n::text(self.app_language, "No recent Helix targets")));
+                        });
+                    } else {
+                        ScrollArea::vertical()
+                            .max_height((ui.available_height() - 12.0).max(120.0))
+                            .show(ui, |ui| {
+                                ui.spacing_mut().item_spacing.y = 6.0;
+                                for target in targets {
+                                    let label =
+                                        recent_helix_target_label(&workspace_path, &target);
+                                    let response = Frame::new()
+                                        .fill(theme::surface_elevated())
+                                        .stroke(Stroke::new(1.0, theme::border()))
+                                        .corner_radius(CornerRadius::same(theme::RADIUS_MD))
+                                        .inner_margin(Margin::symmetric(12, 8))
+                                        .show(ui, |ui| {
+                                            ui.set_width(ui.available_width());
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(label)
+                                                        .monospace()
+                                                        .size(13.0)
+                                                        .color(theme::text()),
+                                                )
+                                                .truncate()
+                                                .sense(Sense::click()),
+                                            )
+                                        })
+                                        .inner;
+                                    if response.clicked() {
+                                        open_recent_helix_target = Some(target);
+                                        next_dialog = None;
+                                    }
+                                }
+                            });
                     }
                 }
                 AppDialog::UnsavedSwitch { target } => {
@@ -1712,6 +1763,9 @@ impl GsdvGuiApp {
         if let Some(action) = outline_action {
             self.handle_outline_action(ctx, action);
         }
+        if let Some(target) = open_recent_helix_target {
+            self.open_recent_agent_helix_target(ctx, target);
+        }
         if let Some(target) = save_then_open {
             self.save_active_document();
             if self
@@ -2114,6 +2168,7 @@ fn reviewer_dialog_title(dialog: &ReviewerDialog, language: AppLanguage) -> &'st
 fn app_dialog_title(dialog: &AppDialog, language: AppLanguage) -> &str {
     let title = match dialog {
         AppDialog::RecentMarkdownOutline { .. } => "Recent Markdown",
+        AppDialog::RecentAgentHelixTargets => "Recent Helix Targets",
         AppDialog::UnsavedSwitch { .. } => "Unsaved Changes",
         AppDialog::WorkflowUnsavedSwitch { .. } => "Unsaved Workflow",
         AppDialog::WorkflowAddProject { .. } => "New Workflow Project",
@@ -2144,6 +2199,37 @@ fn app_dialog_title(dialog: &AppDialog, language: AppLanguage) -> &str {
         AppDialog::Message { title, .. } => return title,
     };
     i18n::text(language, title)
+}
+
+/// 生成最近 Helix 目标行文案，仅用于 modal 展示。
+pub(super) fn recent_helix_target_label(
+    workspace_path: &Path,
+    target: &RecentHelixTarget,
+) -> String {
+    let workdir_label = target
+        .workdir
+        .strip_prefix(workspace_path)
+        .ok()
+        .map(|path| {
+            if path.as_os_str().is_empty() {
+                ".".to_string()
+            } else {
+                path.display().to_string()
+            }
+        })
+        .unwrap_or_else(|| target.workdir.display().to_string());
+    let Some(file) = target.file.as_ref() else {
+        return format!("[{workdir_label}]");
+    };
+    let file = file
+        .strip_prefix(&target.workdir)
+        .or_else(|_| file.strip_prefix(workspace_path))
+        .unwrap_or(file.as_path());
+    let file_label = match target.line {
+        Some(line) => format!("{}:{line}", file.display()),
+        None => file.display().to_string(),
+    };
+    format!("[{workdir_label}] {file_label}")
 }
 
 /// 生成 workflow 删除确认弹窗里的目标说明。

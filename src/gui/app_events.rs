@@ -122,6 +122,10 @@ impl GsdvGuiApp {
             self.active_app_dialog(),
             Some(AppDialog::RecentMarkdownOutline { .. })
         );
+        let recent_agent_helix_targets_dialog_open = matches!(
+            self.active_app_dialog(),
+            Some(AppDialog::RecentAgentHelixTargets)
+        );
         let center_mode = workspace.center_mode;
         let keyboard_layer_can_close_with_escape = self.keyboard_layer_can_close_with_escape();
         let in_reviewer_route = route == Route::Reviewer;
@@ -164,6 +168,7 @@ impl GsdvGuiApp {
             reviewer_helix_open,
             outline_visible,
             recent_markdown_dialog_open,
+            recent_agent_helix_targets_dialog_open,
             keyboard_layer_can_close_with_escape,
             outline_tree_rect: self
                 .outline_tree_rects
@@ -570,14 +575,6 @@ impl GsdvGuiApp {
             }
             AppEvent::WorkspaceAddPrepared { result } => {
                 self.apply_workspace_add_result(ctx, result);
-            }
-            AppEvent::AgentStatusesRefreshed {
-                workspaces,
-                changed: statuses_changed,
-            } => {
-                if statuses_changed {
-                    self.merge_agent_status_refresh(workspaces);
-                }
             }
             AppEvent::ReviewerScriptsLoaded { result } => match result {
                 Ok(scripts) => {
@@ -1088,6 +1085,9 @@ impl GsdvGuiApp {
             AppEvent::ProcessExtraTools => {
                 self.process_extra_tools(ctx);
             }
+            AppEvent::ExternalHook(event) => {
+                self.handle_external_hook(ctx, event);
+            }
         }
     }
 
@@ -1121,9 +1121,6 @@ impl GsdvGuiApp {
                 }
                 FsWatchAppEvent::ReviewerScriptsChanged => {
                     self.fs_watch_dirty.mark_reviewer_scripts_dirty();
-                }
-                FsWatchAppEvent::AgentStatusChanged => {
-                    self.fs_watch_dirty.mark_agent_status_dirty();
                 }
                 FsWatchAppEvent::WatcherError(error) => {
                     self.reviewer_scripts.last_error = Some(error);

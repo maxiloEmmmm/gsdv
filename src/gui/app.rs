@@ -4,6 +4,7 @@ use crate::gui::data::{
     self, AppLanguage, CenterMode, FontSettings, InitialGuiData, NetworkSettings, OutlineNode,
     ReviewerMode, Route, RuntimeSettings, WorkspaceActivity, WorkspaceViewData,
 };
+use crate::gui::hook;
 use crate::gui::i18n;
 use crate::gui::markdown_preview;
 #[cfg(test)]
@@ -401,6 +402,8 @@ struct GsdvGuiApp {
     /// Reviewer diff 行的本地视觉选中覆盖。
     reviewer_diff_selected_rows: Vec<Option<usize>>,
     terminal_hosts: Vec<WorkspaceTerminalHosts>,
+    /// 每个 workspace 最近通过 Agent 文件行打开过的 Helix 目标。
+    recent_agent_helix_targets: Vec<Vec<RecentHelixTarget>>,
     /// Active agent terminal slot for each workspace.
     active_agent_slots: Vec<AgentSlotId>,
     /// 每个 workspace 的 Agent Busy 无输出守护状态。
@@ -843,6 +846,7 @@ impl GsdvGuiApp {
         let terminal_hosts = (0..value.workspaces.len())
             .map(|_| WorkspaceTerminalHosts::default())
             .collect();
+        let recent_agent_helix_targets = (0..value.workspaces.len()).map(|_| Vec::new()).collect();
         let active_agent_slots = (0..value.workspaces.len())
             .map(|_| AgentSlotId::Main)
             .collect();
@@ -884,6 +888,7 @@ impl GsdvGuiApp {
             reviewer_diff_scroll_targets,
             reviewer_diff_selected_rows,
             terminal_hosts,
+            recent_agent_helix_targets,
             active_agent_slots,
             agent_busy_watchdogs,
             workspace_terminal_drawers,
@@ -978,6 +983,7 @@ impl GsdvGuiApp {
             suppress_default_agent_input: false,
         };
         app.sync_fs_watches();
+        app.spawn_external_hook_server();
         app
     }
 }
@@ -1047,6 +1053,44 @@ struct WorkspaceTerminalHosts {
     workspace_error: Option<String>,
     /// Last Reviewer Helix spawn error.
     helix_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecentHelixTarget {
+    /// Helix 启动时使用的绝对工作目录。
+    workdir: PathBuf,
+    /// 可选文件目标，允许只记录工作目录。
+    file: Option<PathBuf>,
+    /// 可选一基索引行号。
+    line: Option<usize>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct AgentStatusHookData {
+    /// Agent 运行实例 id。
+    agent_id: String,
+    /// Agent 类型名称。
+    agent: String,
+    /// Agent 所属 workspace 绝对路径。
+    workspace: String,
+    /// Agent 当前状态字符串。
+    status: String,
+    /// 可选 session id。
+    session_id: String,
+    /// 可选 turn id。
+    turn_id: String,
+    /// 可选 transcript path。
+    transcript_path: String,
+    /// 原始 hook event name。
+    hook_event_name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HelixReusePolicy {
+    /// 文件/行号明确的打开场景，必须完整目标一致才复用。
+    ExactTarget,
+    /// 普通 workspace 打开场景，只要求工作目录一致。
+    SameWorkdir,
 }
 
 /// Terminal host/error pair for one agent slot.
@@ -1165,10 +1209,6 @@ struct FsWatchDirtyState {
     reviewer_scripts: bool,
     /// First reviewer script event timestamp used for debounce.
     reviewer_scripts_dirty_at: Option<Instant>,
-    /// Whether agent status should be refreshed after debounce.
-    agent_status: bool,
-    /// First agent status event timestamp used for debounce.
-    agent_status_dirty_at: Option<Instant>,
 }
 
 impl FsWatchDirtyState {
@@ -1182,8 +1222,6 @@ impl FsWatchDirtyState {
             reviewer_dirty_at: None,
             reviewer_scripts: true,
             reviewer_scripts_dirty_at: Some(Instant::now() - FS_WATCH_DEBOUNCE),
-            agent_status: false,
-            agent_status_dirty_at: None,
         }
     }
 
@@ -1210,12 +1248,6 @@ impl FsWatchDirtyState {
         self.reviewer_scripts = true;
         self.reviewer_scripts_dirty_at
             .get_or_insert_with(Instant::now);
-    }
-
-    /// Marks agent status dirty from a filesystem event.
-    fn mark_agent_status_dirty(&mut self) {
-        self.agent_status = true;
-        self.agent_status_dirty_at.get_or_insert_with(Instant::now);
     }
 
     /// Keeps workspace dirty indexes valid after workspace list changes.
@@ -1247,10 +1279,6 @@ struct FsWatcherService {
     reviewer_script_dir: Option<PathBuf>,
     /// reviewer script 实际被 watch 的路径。
     reviewer_script_watch_path: Option<PathBuf>,
-    /// 变化后需要触发刷新的 Agent status 文件。
-    agent_status_path: Option<PathBuf>,
-    /// Agent status 实际被 watch 的路径。
-    agent_status_watch_path: Option<PathBuf>,
     /// 最近一次 watcher 配置错误。
     last_error: Option<String>,
 }
@@ -1270,8 +1298,6 @@ impl FsWatcherService {
             workspace_roots: Vec::new(),
             reviewer_script_dir: None,
             reviewer_script_watch_path: None,
-            agent_status_path: None,
-            agent_status_watch_path: None,
             last_error: None,
         };
         service.ensure_watcher();
@@ -1331,27 +1357,18 @@ impl FsWatcherService {
         }
     }
 
-    /// 注册 reviewer script 和 Agent status 路径。
+    /// 注册 reviewer script 路径。
     fn sync_global_paths(&mut self) {
         self.sync_reviewer_script_path(reviewer_script_dir());
-        self.sync_agent_status_path(data::agent_status_path());
     }
 
     /// 将单个 notify 事件映射到受影响的 app 资源。
     fn map_notify_event(&self, event: notify::Event, events: &mut Vec<FsWatchAppEvent>) {
-        let mut status_changed = false;
         let mut scripts_changed = false;
         let mut workspace_indexes = BTreeSet::new();
         let mut workflow_indexes = BTreeSet::new();
         for path in event.paths {
             let path = comparable_watch_path(&path);
-            if self
-                .agent_status_path
-                .as_ref()
-                .is_some_and(|status_path| path == *status_path)
-            {
-                status_changed = true;
-            }
             if self
                 .reviewer_script_dir
                 .as_ref()
@@ -1370,9 +1387,6 @@ impl FsWatcherService {
                     }
                 }
             }
-        }
-        if status_changed {
-            events.push(FsWatchAppEvent::AgentStatusChanged);
         }
         if scripts_changed {
             events.push(FsWatchAppEvent::ReviewerScriptsChanged);
@@ -1399,27 +1413,6 @@ impl FsWatcherService {
             let watch_path = nearest_existing_watch_path(dir);
             if self.watch_path(&watch_path, RecursiveMode::NonRecursive) {
                 self.reviewer_script_watch_path = Some(watch_path);
-            }
-        }
-    }
-
-    /// Updates the watched agent status anchor path.
-    fn sync_agent_status_path(&mut self, next_path: Option<PathBuf>) {
-        let next_path = next_path.map(|path| comparable_watch_path(&path));
-        if self.agent_status_path == next_path {
-            return;
-        }
-        if let Some(path) = self.agent_status_watch_path.take() {
-            self.unwatch_path(&path);
-        }
-        self.agent_status_path = next_path;
-        if let Some(status_path) = self.agent_status_path.as_ref() {
-            let watch_path = status_path
-                .parent()
-                .map(nearest_existing_watch_path)
-                .unwrap_or_else(|| nearest_existing_watch_path(status_path));
-            if self.watch_path(&watch_path, RecursiveMode::NonRecursive) {
-                self.agent_status_watch_path = Some(watch_path);
             }
         }
     }
@@ -1461,8 +1454,6 @@ enum FsWatchAppEvent {
     },
     /// Reviewer script directory changed.
     ReviewerScriptsChanged,
-    /// Shared agent status file changed.
-    AgentStatusChanged,
     /// Watcher setup or runtime error.
     WatcherError(String),
 }
@@ -1541,11 +1532,6 @@ enum AppEvent {
     /// 添加 workspace 的后台准备完成。
     WorkspaceAddPrepared {
         result: Result<WorkspaceAddTaskResult, String>,
-    },
-    /// 当前 workspace 列表的 Agent 状态刷新完成。
-    AgentStatusesRefreshed {
-        workspaces: Vec<WorkspaceViewData>,
-        changed: bool,
     },
     /// Reviewer script 目录扫描完成。
     ReviewerScriptsLoaded {
@@ -1731,6 +1717,8 @@ enum AppEvent {
     ProcessPomodoroState,
     /// 派发外置工具扫描、刷新和 action 后续工作。
     ProcessExtraTools,
+    /// 外部 hook 通过 socket/pipe 投递的数据。
+    ExternalHook(hook::ExternalHookEvent),
 }
 
 /// input runtime 消费的 egui 原生输入快照。
@@ -1767,6 +1755,8 @@ struct InputRuntimeRequest {
     outline_visible: bool,
     /// 最近访问 Markdown modal 当前是否打开。
     recent_markdown_dialog_open: bool,
+    /// 最近 Agent Helix 目标 modal 当前是否打开。
+    recent_agent_helix_targets_dialog_open: bool,
     /// Escape 是否允许关闭当前键盘层。
     keyboard_layer_can_close_with_escape: bool,
     /// active outline tree 最近绘制区域。
@@ -1967,6 +1957,7 @@ enum AppDialog {
     RecentMarkdownOutline {
         nodes: Vec<OutlineNode>,
     },
+    RecentAgentHelixTargets,
     UnsavedSwitch {
         target: PathBuf,
     },
@@ -2194,6 +2185,7 @@ enum UiCommand {
     TranslateAgentInput,
     ApplyAgentInputTranslation,
     ToggleExtraTools,
+    ToggleRecentAgentHelixTargets,
     AgentMarkdownShortcut,
     ToggleMarkdownEditorPreview,
     SetCenterMode(CenterMode),

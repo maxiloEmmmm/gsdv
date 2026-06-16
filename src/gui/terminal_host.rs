@@ -1,5 +1,6 @@
 use crate::gui::agent::AgentLaunchConfig;
 use crate::gui::data::{self, NetworkSettings, WorkspaceActivity, WorkspaceViewData};
+use crate::gui::hook;
 use crate::gui::repaint_gate::RepaintController;
 use crate::gui::theme as gui_theme;
 use alacritty_terminal::event::{Event as PtyEvent, EventListener, Notify, OnResize, WindowSize};
@@ -59,6 +60,59 @@ fn terminal_host_ui_label(kind: TerminalSurfaceKind) -> &'static str {
         TerminalSurfaceKind::Workspace => "terminal.host_ui.workspace",
         TerminalSurfaceKind::Helix => "terminal.host_ui.helix",
     }
+}
+
+/// 输出 Helix/terminal 输入诊断，定位快捷键是否进入 PTY。
+fn terminal_input_info_events(
+    kind: TerminalSurfaceKind,
+    events: &[Event],
+    modifiers: Modifiers,
+    kitty_keyboard_protocol: bool,
+    shortcut_scope: TerminalInputShortcutScope,
+) {
+    if !terminal_input_info_enabled() {
+        return;
+    }
+    let key_events = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Key {
+                key,
+                physical_key,
+                pressed,
+                repeat,
+                modifiers,
+                ..
+            } => Some(format!(
+                "key={key:?} physical={physical_key:?} pressed={pressed} repeat={repeat} modifiers={modifiers:?}"
+            )),
+            Event::Text(text) => Some(format!("text={text:?}")),
+            Event::Paste(text) => Some(format!("paste-len={}", text.len())),
+            Event::Copy => Some("copy".to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if key_events.is_empty() {
+        return;
+    }
+    eprintln!(
+        "[gsdv][terminal-input] kind={kind:?} kitty={kitty_keyboard_protocol} scope={shortcut_scope:?} active_modifiers={modifiers:?} events={}",
+        key_events.join(" | ")
+    );
+}
+
+/// 输出写给 PTY 的字节诊断。
+fn terminal_input_info_bytes(kind: TerminalSurfaceKind, bytes: &[u8]) {
+    if !terminal_input_info_enabled() || bytes.is_empty() {
+        return;
+    }
+    eprintln!("[gsdv][terminal-input] kind={kind:?} bytes={bytes:?}");
+}
+
+/// 判断 terminal 输入诊断是否开启。
+fn terminal_input_info_enabled() -> bool {
+    std::env::var_os("GSDV_TERMINAL_INPUT_INFO").is_some()
+        || std::env::var_os("GSDV_HOOK_DEBUG").is_some()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -936,6 +990,13 @@ impl GuiTerminalHost {
                 .terminal_mode()
                 .intersects(TermMode::KITTY_KEYBOARD_PROTOCOL);
             let bytes = ui.ctx().input(|input| {
+                terminal_input_info_events(
+                    self.kind,
+                    &input.events,
+                    input.modifiers,
+                    kitty_keyboard_protocol,
+                    shortcut_scope,
+                );
                 agent_input_bytes_from_events_with_kitty_protocol(
                     &input.events,
                     input.modifiers,
@@ -959,6 +1020,7 @@ impl GuiTerminalHost {
                     bytes
                 );
             }
+            terminal_input_info_bytes(self.kind, &bytes);
             input_submitted = self.kind == TerminalSurfaceKind::Agent
                 && terminal_agent_input_submit_bytes(&bytes);
             if input_submitted {
@@ -1568,24 +1630,20 @@ fn kitty_modifier_parameter(modifiers: Modifiers) -> Option<u8> {
     (parameter > 1).then_some(parameter)
 }
 
-/// Encodes supported Super/Cmd key chords with kitty's CSI-u keyboard protocol.
+/// 编码 kitty 协议下的 Super/Cmd 可打印键。
 fn kitty_super_key_event_sequence(
     key: Key,
     modifiers: Modifiers,
     kitty_keyboard_protocol: bool,
-) -> Option<&'static str> {
+) -> Option<String> {
     if !kitty_keyboard_protocol || !modifiers.mac_cmd || modifiers.ctrl || modifiers.alt {
         return None;
     }
-    // 触发条件：终端子进程已启用 kitty keyboard protocol，并收到
-    // macOS Command + bracket 这类传统 PTY 无法表达的修饰键组合。
-    // 不能走普通文本或 Alt 映射：Helix 等程序按协议读取 Super/Cmd。
-    // 防止回归：老协议继续吞掉 Cmd 组合，不把快捷键文本漏给子进程。
-    match key {
-        Key::OpenBracket => Some("\x1b[91;9u"),
-        Key::CloseBracket => Some("\x1b[93;9u"),
-        _ => None,
-    }
+    // 触发条件：Helix/Codex 等 TUI 已启用 kitty keyboard protocol。
+    // 不能只白名单少量 Cmd 组合：Helix drawer 是完整 TUI surface。
+    // 防止回归：Cmd+D 等普通可打印组合被 app suppress 后丢失。
+    let byte = printable_key_byte(key, modifiers.shift)?;
+    Some(format!("\x1b[{};9u", byte))
 }
 
 /// 编码 kitty keyboard protocol 下的基础控制键。
@@ -1655,8 +1713,7 @@ fn app_reserved_terminal_key_event(
             workspace_terminal_drawer_reserved_key(key, physical_key, modifiers)
         }
         TerminalInputShortcutScope::HelixDrawerSurface => {
-            workspace_terminal_drawer_reserved_key(key, physical_key, modifiers)
-                || reviewer_helix_drawer_reserved_key(key, physical_key, modifiers)
+            reviewer_helix_drawer_reserved_key(key, physical_key, modifiers)
         }
         TerminalInputShortcutScope::AgentSurface => {
             workspace_terminal_drawer_reserved_key(key, physical_key, modifiers)
@@ -3759,6 +3816,7 @@ fn terminal_env(
         "GSDV_WORKSPACE_DIR".to_string(),
         workspace.path.display().to_string(),
     );
+    env.insert("GSDV_HOOK_ENDPOINT".to_string(), hook::app_hook_endpoint());
     if kind == TerminalSurfaceKind::Agent {
         env.insert("GSDV_AGENT_ID".to_string(), workspace.agent_id.clone());
         env.insert(
@@ -3804,10 +3862,17 @@ fn spawn_backend_with_env(
 }
 
 fn helix_args(spec: &HelixLaunchSpec) -> Vec<String> {
+    let config_path = std::env::current_exe()
+        .ok()
+        .and_then(|exe| hook::write_helix_hook_config(&hook::app_hook_endpoint(), &exe).ok());
     let mut args = vec![
         "--working-dir".to_string(),
         spec.workdir.display().to_string(),
     ];
+    if let Some(config_path) = config_path {
+        args.push("--config".to_string());
+        args.push(config_path.display().to_string());
+    }
     let target = match (&spec.file, spec.line) {
         (Some(file), Some(line)) => format!("{}:{line}:1", file.display()),
         (Some(file), None) => file.display().to_string(),

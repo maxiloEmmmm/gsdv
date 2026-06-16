@@ -31,6 +31,26 @@ fn terminal_pending_panel(ui: &mut Ui, message: &str) {
     });
 }
 
+/// 判断 Helix 打开请求是否需要启动新进程。
+pub(super) fn helix_spec_needs_spawn(
+    current: Option<&HelixLaunchSpec>,
+    requested: &HelixLaunchSpec,
+    reuse_policy: HelixReusePolicy,
+) -> bool {
+    let Some(current) = current else {
+        return true;
+    };
+    match reuse_policy {
+        HelixReusePolicy::ExactTarget => current != requested,
+        HelixReusePolicy::SameWorkdir => {
+            // 触发条件：非 reviewer 的普通 Helix 打开。
+            // 不能直接完整比较：该入口没有明确文件跳转语义。
+            // 防止回归：重复打开同一 workdir 杀掉已有 Helix 编辑会话。
+            current.workdir != requested.workdir
+        }
+    }
+}
+
 impl GsdvGuiApp {
     pub(super) fn terminal_host_surface(&mut self, ui: &mut Ui, kind: TerminalSurfaceKind) {
         self.ensure_terminal_host(ui.ctx(), kind);
@@ -779,7 +799,7 @@ impl GsdvGuiApp {
             .and_then(|host| host.helix_spec().cloned());
         if let Some(spec) = restart_spec {
             hosts.helix = None;
-            self.ensure_helix_host(ui.ctx(), spec);
+            self.ensure_helix_host(ui.ctx(), spec, HelixReusePolicy::ExactTarget);
         }
         let spawn_pending = self.pending_terminal_spawns.contains(&TerminalSpawnKey {
             index: self.active_workspace,
@@ -838,7 +858,13 @@ impl GsdvGuiApp {
         });
     }
 
-    pub(super) fn ensure_helix_host(&mut self, ctx: &egui::Context, spec: HelixLaunchSpec) {
+    /// 确保 Helix host 符合当前打开策略。
+    pub(super) fn ensure_helix_host(
+        &mut self,
+        ctx: &egui::Context,
+        spec: HelixLaunchSpec,
+        reuse_policy: HelixReusePolicy,
+    ) {
         if self.active_workspace >= self.terminal_hosts.len() {
             return;
         }
@@ -849,7 +875,11 @@ impl GsdvGuiApp {
         let Some(hosts) = self.terminal_hosts.get_mut(workspace_index) else {
             return;
         };
-        let needs_spawn = hosts.helix.as_ref().and_then(GuiTerminalHost::helix_spec) != Some(&spec);
+        let needs_spawn = helix_spec_needs_spawn(
+            hosts.helix.as_ref().and_then(GuiTerminalHost::helix_spec),
+            &spec,
+            reuse_policy,
+        );
         if !needs_spawn {
             hosts.helix_error = None;
             return;
@@ -868,6 +898,12 @@ impl GsdvGuiApp {
         ctx: &egui::Context,
         text: &str,
     ) -> bool {
+        crate::gui::hook::hook_info(format_args!(
+            "copy-to-agent start workspace={} slot={:?} text={}",
+            self.active_workspace,
+            self.active_agent_slot(),
+            text
+        ));
         ctx.copy_text(text.to_string());
         self.ensure_terminal_host(ctx, TerminalSurfaceKind::Agent);
         let slot_id = self.active_agent_slot();
@@ -877,9 +913,21 @@ impl GsdvGuiApp {
             .and_then(|hosts| hosts.agents.get_mut(&slot_id))
             .and_then(|slot| slot.host.as_mut())
         else {
+            crate::gui::hook::hook_info(format_args!(
+                "copy-to-agent missing host workspace={} slot={slot_id:?}",
+                self.active_workspace
+            ));
             return false;
         };
-        host.paste_text(text);
+        // 触发条件：Reviewer 多个位置连续复制并输入到 Agent。
+        // 不能改剪贴板内容：用户复制到外部时需要保持原文。
+        // 防止回归：连续粘贴的片段粘在一起，Agent 难以分割引用。
+        let agent_text = format!("{text} ");
+        host.paste_text(&agent_text);
+        crate::gui::hook::hook_info(format_args!(
+            "copy-to-agent pasted workspace={} slot={slot_id:?}",
+            self.active_workspace
+        ));
         true
     }
 
