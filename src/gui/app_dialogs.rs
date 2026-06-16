@@ -2447,6 +2447,21 @@ fn help_dialog_content(ui: &mut Ui, active_area: &'static str, language: AppLang
                         area: "Workspace center",
                     },
                     HelpShortcut {
+                        keys: &["Cmd/Alt+D"],
+                        action: "Toggle recent Helix targets",
+                        area: "Workspace and terminal drawer",
+                    },
+                    HelpShortcut {
+                        keys: &["Cmd/Alt+Z"],
+                        action: "Toggle outline and Work-flow",
+                        area: "Workspace center",
+                    },
+                    HelpShortcut {
+                        keys: &["Cmd/Alt+B"],
+                        action: "Toggle extra tools",
+                        area: "Agent center",
+                    },
+                    HelpShortcut {
                         keys: &["Cmd/Alt+M"],
                         action: "Translate current Agent input",
                         area: "Workspace center",
@@ -2505,6 +2520,11 @@ fn help_dialog_content(ui: &mut Ui, active_area: &'static str, language: AppLang
                         action: "Return to the last Markdown mode",
                         area: "Center tabs",
                     },
+                    HelpShortcut {
+                        keys: &["F1"],
+                        action: "Open recent Markdown outline",
+                        area: "Outline panel",
+                    },
                 ],
                 language,
             );
@@ -2523,6 +2543,16 @@ fn help_dialog_content(ui: &mut Ui, active_area: &'static str, language: AppLang
                         keys: &["Cmd/Ctrl+X", "Alt+X"],
                         action: "Toggle Reviewer Helix drawer",
                         area: "Workspace",
+                    },
+                    HelpShortcut {
+                        keys: &["Alt+D", "Cmd+D"],
+                        action: "Send current Helix file line to Agent",
+                        area: "Helix drawer",
+                    },
+                    HelpShortcut {
+                        keys: &["Click file:line"],
+                        action: "Open terminal file line in Helix",
+                        area: "Agent terminal output",
                     },
                     HelpShortcut {
                         keys: &["Type / paste"],
@@ -2571,6 +2601,11 @@ fn help_dialog_content(ui: &mut Ui, active_area: &'static str, language: AppLang
                     HelpShortcut {
                         keys: &["C"],
                         action: "Copy selected reviewer prompt into Agent",
+                        area: "Reviewer route",
+                    },
+                    HelpShortcut {
+                        keys: &["Cmd/Ctrl+X", "Alt+X"],
+                        action: "Open selected reviewer target in Helix",
                         area: "Reviewer route",
                     },
                     HelpShortcut {
