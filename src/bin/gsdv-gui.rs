@@ -50,6 +50,13 @@ fn main() -> eframe::Result<()> {
         }
         return Ok(());
     }
+    if first_arg.as_deref() == Some("hook-client") {
+        if let Err(error) = gui::hook::run_hook_client_from_args(std::env::args().skip(2)) {
+            eprintln!("{error:#}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     if let Err(error) = install_self() {
         eprintln!("failed to install gsdv integration: {error:#}");
         std::process::exit(1);

@@ -150,6 +150,7 @@ impl GsdvGuiApp {
         self.reviewer_diff_scroll_targets.push(None);
         self.reviewer_diff_selected_rows.push(None);
         self.terminal_hosts.push(WorkspaceTerminalHosts::default());
+        self.recent_agent_helix_targets.push(Vec::new());
         self.active_agent_slots.push(AgentSlotId::Main);
         self.agent_busy_watchdogs.push(BTreeMap::from([(
             AgentSlotId::Main,
@@ -233,6 +234,7 @@ impl GsdvGuiApp {
         self.reviewer_diff_scroll_targets.remove(index);
         self.reviewer_diff_selected_rows.remove(index);
         self.terminal_hosts.remove(index);
+        self.recent_agent_helix_targets.remove(index);
         self.active_agent_slots.remove(index);
         self.agent_busy_watchdogs.remove(index);
         self.workspace_terminal_drawers.remove(index);

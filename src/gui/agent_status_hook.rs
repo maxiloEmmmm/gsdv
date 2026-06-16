@@ -43,7 +43,39 @@ fn run_with_input(input: &str) -> Result<()> {
         _ => return Ok(()),
     };
     write_agent_status(agent_id, &agent_kind, &workspace_dir, status, &payload)?;
+    notify_agent_status(agent_id, &agent_kind, &workspace_dir, status, &payload);
     sync_store_session_from_start(agent_id, &agent_kind, &workspace_dir, &payload)
+}
+
+/// 通过 app hook socket/pipe 直接通知 GUI 状态变化。
+fn notify_agent_status(
+    agent_id: &str,
+    agent_kind: &str,
+    workspace_dir: &str,
+    status: HookStatus,
+    payload: &Value,
+) {
+    let status = match status {
+        HookStatus::Idle => "idle",
+        HookStatus::Busy => "busy",
+    };
+    let data = json!({
+        "agent_id": agent_id,
+        "agent": agent_kind,
+        "workspace": workspace_dir,
+        "status": status,
+        "session_id": payload.get("session_id").and_then(Value::as_str).unwrap_or(""),
+        "turn_id": payload.get("turn_id").and_then(Value::as_str).unwrap_or(""),
+        "transcript_path": payload.get("transcript_path").and_then(Value::as_str).unwrap_or(""),
+        "hook_event_name": payload.get("hook_event_name").and_then(Value::as_str).unwrap_or(""),
+    });
+    let endpoint =
+        env::var("GSDV_HOOK_ENDPOINT").unwrap_or_else(|_| crate::gui::hook::app_hook_endpoint());
+    let _ = crate::gui::hook::send_hook_event(
+        &endpoint,
+        crate::gui::hook::AGENT_STATUS_KEY,
+        &data.to_string(),
+    );
 }
 
 fn write_agent_status(

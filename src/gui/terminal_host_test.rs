@@ -101,6 +101,62 @@ fn kitty_command_close_bracket_is_forwarded_as_super_csi_u() {
     );
 }
 
+/// 验证 kitty 协议下 Cmd+D 会转发给 Helix keymap。
+#[test]
+fn kitty_command_d_is_forwarded_as_super_csi_u() {
+    let modifiers = Modifiers {
+        mac_cmd: true,
+        command: true,
+        ..Modifiers::default()
+    };
+    let events = vec![Event::Key {
+        key: Key::D,
+        physical_key: Some(Key::D),
+        pressed: true,
+        repeat: false,
+        modifiers,
+    }];
+
+    assert_eq!(
+        agent_input_bytes_from_events_with_kitty_protocol(
+            &events,
+            modifiers,
+            true,
+            true,
+            Some(TerminalInputShortcutScope::HelixDrawerSurface),
+        ),
+        b"\x1b[100;9u"
+    );
+}
+
+/// 验证 kitty 协议下 Cmd+可打印键不是白名单策略。
+#[test]
+fn kitty_command_printable_key_is_forwarded_as_super_csi_u() {
+    let modifiers = Modifiers {
+        mac_cmd: true,
+        command: true,
+        ..Modifiers::default()
+    };
+    let events = vec![Event::Key {
+        key: Key::W,
+        physical_key: Some(Key::W),
+        pressed: true,
+        repeat: false,
+        modifiers,
+    }];
+
+    assert_eq!(
+        agent_input_bytes_from_events_with_kitty_protocol(
+            &events,
+            modifiers,
+            true,
+            true,
+            Some(TerminalInputShortcutScope::HelixDrawerSurface),
+        ),
+        b"\x1b[119;9u"
+    );
+}
+
 /// Verifies that Cmd+[ stays suppressed before kitty protocol negotiation.
 #[test]
 fn command_open_bracket_without_kitty_protocol_is_suppressed() {
@@ -517,6 +573,34 @@ fn workspace_terminal_drawer_forwards_alt_x_to_terminal() {
             Some(TerminalInputShortcutScope::WorkspaceDrawerSurface),
         ),
         b"\x1bx"
+    );
+}
+
+/// 验证 Helix 抽屉不会抢 workspace drawer 的 Cmd+T。
+#[test]
+fn helix_drawer_forwards_command_t_to_terminal() {
+    let modifiers = Modifiers {
+        mac_cmd: true,
+        command: true,
+        ..Modifiers::default()
+    };
+    let events = vec![Event::Key {
+        key: Key::T,
+        physical_key: Some(Key::T),
+        pressed: true,
+        repeat: false,
+        modifiers,
+    }];
+
+    assert_eq!(
+        agent_input_bytes_from_events_with_kitty_protocol(
+            &events,
+            modifiers,
+            true,
+            true,
+            Some(TerminalInputShortcutScope::HelixDrawerSurface),
+        ),
+        b"\x1b[116;9u"
     );
 }
 
