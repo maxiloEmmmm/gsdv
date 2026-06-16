@@ -45,9 +45,9 @@ Step description...
 <r.next>
   1. find the first unchecked step across all project tasks, ordered by project name and task name.
   2. if step desc is description, first `plan` with use, and fill to step description.
-  2. check the current implementation progress of this step, then continue implementing it based on the step title and step description.
-  3. mark the step as complete only when the implementation is actually finished and no known blocker remains. If the work is partial, blocked, or needs user confirmation, do not mark it complete.
-  4. if entry args include loop:true
+  3. check the current implementation progress of this step, then continue implementing it based on the step title and step description.
+  4. mark the step as complete only when the implementation is actually finished and no known blocker remains. If the work is partial, blocked, or needs user confirmation, do not mark it complete.
+  5. if entry args include loop:true
      repeat r.next after each completed step
      stop when no unchecked step remains, work is blocked, or user confirmation is needed
 </r.next>
