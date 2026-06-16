@@ -14,6 +14,7 @@ fn workflow_task_parses_heading_steps() {
     let tree = load_workflow_tree(&root).unwrap();
 
     let task = &tree.projects[0].tasks[0];
+    assert_eq!(task.label, "a");
     assert_eq!(task.desc, "Task intro\n");
     assert_eq!(task.steps.len(), 2);
     assert_eq!(task.steps[0].path, vec![0]);

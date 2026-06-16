@@ -1219,19 +1219,69 @@ fn base_route_consumes_route_switching_shortcuts_before_agent_tab() {
 
 /// 验证 Cmd/Alt+Z 可以切换 Outline 和 Work-flow tab。
 #[test]
-fn outline_workflow_shortcut_toggles_outline_panel_tab() {
+fn outline_workflow_shortcut_toggles_tab_and_center_surface() {
+    let mut workspace = test_workspace();
+    workspace.center_mode = CenterMode::Agent;
     let mut app = GsdvGuiApp::from(InitialGuiData {
         active_workspace: 0,
-        workspaces: vec![test_workspace()],
+        workspaces: vec![workspace],
         rail_collapsed: false,
+    });
+    let task_path = PathBuf::from("gsdv-spec/ps/project1/task-a.md");
+    app.workflow_states[0].tree = Some(WorkflowTree {
+        spec_path: PathBuf::from("gsdv-spec"),
+        root_path: PathBuf::from("gsdv-spec/root.md"),
+        projects: vec![WorkflowProjectNode {
+            key: "project1".to_string(),
+            label: "project1".to_string(),
+            root_path: PathBuf::from("gsdv-spec/ps/project1/root.md"),
+            tasks: vec![WorkflowTaskNode {
+                label: "a".to_string(),
+                path: task_path.clone(),
+                desc: "Task intro\n".to_string(),
+                steps: vec![WorkflowStepNode {
+                    path: vec![0],
+                    title: "step one".to_string(),
+                    checked: false,
+                    checkable: true,
+                    desc: "step desc".to_string(),
+                    children: Vec::new(),
+                }],
+            }],
+        }],
+    });
+    app.workflow_states[0].last_task_surface_target = Some(WorkflowSelectionTarget::Step {
+        task_path: task_path.clone(),
+        step_path: vec![0],
     });
     let ctx = egui::Context::default();
 
     assert_eq!(app.outline_panel_tabs[0], OutlinePanelTab::Outline);
     app.dispatch_ui_command(&ctx, UiCommand::ToggleOutlineWorkflowTab);
     assert_eq!(app.outline_panel_tabs[0], OutlinePanelTab::Workflow);
+    assert_eq!(app.workspaces[0].center_mode, CenterMode::Editor);
+    assert_eq!(
+        app.workflow_states[0].selected,
+        Some(WorkflowSelectionTarget::Step {
+            task_path: task_path.clone(),
+            step_path: vec![0],
+        })
+    );
+    assert!(app.workflow_states[0].editor.is_some());
+    assert!(app.workflow_task_surface_visible());
+
     app.dispatch_ui_command(&ctx, UiCommand::ToggleOutlineWorkflowTab);
     assert_eq!(app.outline_panel_tabs[0], OutlinePanelTab::Outline);
+    assert_eq!(app.workspaces[0].center_mode, CenterMode::Agent);
+
+    app.dispatch_ui_command(&ctx, UiCommand::ToggleOutlineWorkflowTab);
+    assert_eq!(
+        app.workflow_states[0].selected,
+        Some(WorkflowSelectionTarget::Step {
+            task_path,
+            step_path: vec![0],
+        })
+    );
 }
 
 /// 验证编辑器焦点下 Cmd+Z 仍归文本编辑器撤销处理。

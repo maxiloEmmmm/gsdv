@@ -1105,6 +1105,10 @@ struct WorkflowUiState {
     load_error: Option<String>,
     /// 当前选中的 workflow 目标。
     selected: Option<WorkflowSelectionTarget>,
+    /// 最近一次选中的 task 工作台目标，用于切回 workflow 时恢复上下文。
+    last_task_surface_target: Option<WorkflowSelectionTarget>,
+    /// workflow tree 加载完成后是否需要恢复 task 工作台。
+    pending_task_restore_after_load: bool,
     /// 当前 task 说明编辑器。
     task_editor: Option<WorkflowTaskEditor>,
     /// 当前叶子 step 片段编辑器。
