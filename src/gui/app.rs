@@ -443,6 +443,8 @@ struct GsdvGuiApp {
     last_screenshot_path: Option<PathBuf>,
     theme_mode: theme::ThemeMode,
     rail_collapsed: bool,
+    /// Whether F11 hides navigation chrome and keeps only center content plus bottom bar.
+    app_fullscreen: bool,
     /// 用户设置的新 workspace 默认 agent。
     default_agent_kind: AgentKind,
     agent_launch: AgentLaunchConfig,
@@ -914,6 +916,7 @@ impl GsdvGuiApp {
             last_screenshot_path: None,
             theme_mode: theme::current_mode(),
             rail_collapsed: value.rail_collapsed,
+            app_fullscreen: false,
             default_agent_kind: agent_launch.kind,
             agent_launch,
             fs_watcher: Arc::new(Mutex::new(FsWatcherService::new(
@@ -1802,6 +1805,21 @@ struct TerminalSpawnKey {
     agent_slot: AgentSlotId,
 }
 
+/// Agent grid location used by the terminal context menu.
+#[derive(Clone, Copy)]
+struct AgentGridMenuContext<'a> {
+    /// Row containing the right-clicked Agent terminal.
+    row_index: usize,
+    /// Column containing the right-clicked Agent terminal.
+    column_index: usize,
+    /// Stable column id used by tab move actions.
+    column_id: &'a str,
+    /// Current workspace snapshot used by menu state.
+    workspace: &'a WorkspaceViewData,
+    /// Other workspaces available as subagent move targets.
+    workspace_targets: &'a [(usize, String)],
+}
+
 /// Identifies the main agent or one named subagent.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum AgentSlotId {
@@ -1815,6 +1833,22 @@ impl AgentSlotId {
     /// Returns whether this slot is the workspace main agent.
     fn is_main(&self) -> bool {
         matches!(self, Self::Main)
+    }
+
+    /// Converts a persisted column tab slot into the runtime slot id.
+    fn from_column_slot(slot: &data::AgentColumnSlot) -> Self {
+        match slot {
+            data::AgentColumnSlot::Main => Self::Main,
+            data::AgentColumnSlot::Subagent(id) => Self::Subagent(id.clone()),
+        }
+    }
+
+    /// Converts this runtime slot id into the persisted column tab slot.
+    fn to_column_slot(&self) -> data::AgentColumnSlot {
+        match self {
+            Self::Main => data::AgentColumnSlot::Main,
+            Self::Subagent(id) => data::AgentColumnSlot::Subagent(id.clone()),
+        }
     }
 }
 
@@ -2015,8 +2049,17 @@ enum AppDialog {
     CloseWorkspace {
         index: usize,
     },
+    CloseAgentColumn {
+        index: usize,
+        column_id: String,
+    },
+    CloseAgentRow {
+        index: usize,
+        row_index: usize,
+    },
     AddSubagent {
         index: usize,
+        column_id: String,
         name: String,
         agent_kind: AgentKind,
         agent_model: String,
@@ -2105,6 +2148,36 @@ enum WorkspaceRailAction {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum AgentTabAction {
+    AddSubagentToColumn {
+        column_id: String,
+    },
+    AddRow {
+        row_index: usize,
+    },
+    AddColumn {
+        row_index: usize,
+    },
+    CloseRow {
+        row_index: usize,
+    },
+    CloseColumn {
+        row_index: usize,
+        column_index: usize,
+    },
+    CollapseRow {
+        row_index: usize,
+    },
+    CollapseOtherRows {
+        row_index: usize,
+    },
+    CollapseColumn {
+        row_index: usize,
+        column_index: usize,
+    },
+    CollapseOtherColumns {
+        row_index: usize,
+        column_index: usize,
+    },
     Restart(AgentSlotId),
     Switch {
         slot: AgentSlotId,
@@ -2132,10 +2205,26 @@ enum AgentTabAction {
     },
     CopySessionId(String),
     SetMarkdownOutlineCollapsed(bool),
-    MoveSubagentLeft(String),
-    MoveSubagentRight(String),
-    MoveSubagentToHead(String),
-    MoveSubagentToTail(String),
+    MoveSubagentLeft {
+        row_index: usize,
+        column_id: String,
+        id: String,
+    },
+    MoveSubagentRight {
+        row_index: usize,
+        column_id: String,
+        id: String,
+    },
+    MoveSubagentToHead {
+        row_index: usize,
+        column_id: String,
+        id: String,
+    },
+    MoveSubagentToTail {
+        row_index: usize,
+        column_id: String,
+        id: String,
+    },
     MoveSubagentToWorkspace {
         id: String,
         target_index: usize,
@@ -2173,6 +2262,8 @@ enum ReviewerDialog {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UiCommand {
     CloseTopLayer,
+    ToggleAppFullscreen,
+    MoveAgentFocus(AgentFocusMove),
     OpenHelp,
     SaveDocument,
     CopyWorkflowPath,
@@ -2198,6 +2289,19 @@ enum UiCommand {
     SwitchInactiveWorkspace,
     SelectAgentSlot(usize),
     Reviewer(ReviewerCommand),
+}
+
+/// Direction for keyboard-driven Agent grid focus movement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentFocusMove {
+    /// Move to the previous visible column in the focused row.
+    Left,
+    /// Move to the next visible column in the focused row.
+    Right,
+    /// Move to the previous visible row, keeping the column when possible.
+    Up,
+    /// Move to the next visible row, keeping the column when possible.
+    Down,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2227,6 +2331,7 @@ impl eframe::App for GsdvGuiApp {
         self.app_repaint_ctx = Some(ctx.clone());
         self.repaint_controller
             .frame_started(self.max_repaint_interval());
+        self.enqueue_consumed_frame_shortcuts(ctx);
         self.process_update_events(ctx);
         self.process_workspace_store_writer(ctx);
         self.wait_for_full_frame_slot();
@@ -2237,6 +2342,13 @@ impl eframe::App for GsdvGuiApp {
 }
 
 impl GsdvGuiApp {
+    /// Converts frame-level shortcuts into AppEvents after consuming raw egui input.
+    fn enqueue_consumed_frame_shortcuts(&self, ctx: &egui::Context) {
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F11)) {
+            self.queue_app_event(AppEvent::InputUiCommand(UiCommand::ToggleAppFullscreen));
+        }
+    }
+
     /// Runs egui layout and paint for the current immutable app state.
     fn paint_update_frame(&mut self, ctx: &egui::Context) {
         crate::gui::perf_log::count("app.paint_frame");
@@ -2249,21 +2361,23 @@ impl GsdvGuiApp {
             .frame(bottom_bar_frame())
             .show(ctx, |ui| self.bottom_bar(ui));
 
-        let workspace_rail_width = if self.rail_collapsed {
-            COMPACT_WORKSPACE_RAIL_WIDTH
-        } else {
-            WORKSPACE_RAIL_WIDTH
-        };
-        SidePanel::left("workspace_rail")
-            .exact_width(workspace_rail_width)
-            .frame(panel_frame())
-            .show(ctx, |ui| self.workspace_rail(ui));
-
-        if should_show_outline_panel(self.current_workspace()) {
-            SidePanel::left("outline_panel")
-                .exact_width(272.0)
+        if !self.app_fullscreen {
+            let workspace_rail_width = if self.rail_collapsed {
+                COMPACT_WORKSPACE_RAIL_WIDTH
+            } else {
+                WORKSPACE_RAIL_WIDTH
+            };
+            SidePanel::left("workspace_rail")
+                .exact_width(workspace_rail_width)
                 .frame(panel_frame())
-                .show(ctx, |ui| self.outline_panel(ui));
+                .show(ctx, |ui| self.workspace_rail(ui));
+
+            if should_show_outline_panel(self.current_workspace()) {
+                SidePanel::left("outline_panel")
+                    .exact_width(272.0)
+                    .frame(panel_frame())
+                    .show(ctx, |ui| self.outline_panel(ui));
+            }
         }
 
         CentralPanel::default()

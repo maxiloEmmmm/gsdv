@@ -35,6 +35,9 @@ impl GsdvGuiApp {
 
     /// Returns the selected agent slot for the active workspace.
     pub(super) fn active_agent_slot(&self) -> AgentSlotId {
+        if let Some(slot) = self.focused_agent_slot(self.active_workspace) {
+            return slot;
+        }
         let slot = self
             .active_agent_slots
             .get(self.active_workspace)
@@ -45,6 +48,25 @@ impl GsdvGuiApp {
         } else {
             AgentSlotId::Main
         }
+    }
+
+    /// Returns the focused Agent slot, or none when every Agent cell is folded.
+    pub(super) fn focused_agent_slot(&self, index: usize) -> Option<AgentSlotId> {
+        let workspace = self.workspaces.get(index)?;
+        let focus = workspace.agent_focus?;
+        if workspace.agent_rows.get(focus.row_index)?.collapsed {
+            return None;
+        }
+        let column = workspace
+            .agent_rows
+            .get(focus.row_index)?
+            .columns
+            .get(focus.column_index)?;
+        if column.collapsed {
+            return None;
+        }
+        let slot = AgentSlotId::from_column_slot(&column.active_slot);
+        self.agent_slot_exists(index, &slot).then_some(slot)
     }
 
     /// 设置指定 workspace 的 Agent 槽位，适用于槽位右键菜单动作。

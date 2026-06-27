@@ -501,8 +501,11 @@ impl GsdvGuiApp {
             // 不能复用 Codex 默认模型：默认模型服务长任务和复杂编码判断。
             // 防止回归：一次短翻译占用过高延迟/额度，影响输入流畅度。
             remote.model = AGENT_INPUT_TRANSLATION_MODEL.to_string();
-            remote.proxy = self.network_settings.proxy.clone();
-            remote.no_proxy = self.network_settings.effective_no_proxy();
+            if self.network_settings.proxy_enabled && !self.network_settings.proxy.trim().is_empty()
+            {
+                remote.proxy = self.network_settings.proxy.clone();
+                remote.no_proxy = self.network_settings.effective_no_proxy();
+            }
             remote.allow_http_fallback = allow_http_fallback;
             self.agent_input_translation_client = Some(AgentInputTranslationClientCache {
                 network_settings: self.network_settings.clone(),

@@ -2406,13 +2406,19 @@ fn handle_terminal_pointer(
     // so drag selection never runs and the terminal appears inert.
     // Prevents: semantic and line selection regressions for copied agent text.
     if response.triple_clicked_by(PointerButton::Primary) {
-        if let Some(pos) = response.interact_pointer_pos() {
+        if let Some(pos) = response
+            .interact_pointer_pos()
+            .filter(|pos| rect.contains(*pos))
+        {
             backend.start_selection_with_type(rect, pos, SelectionType::Lines);
         }
         return;
     }
     if response.double_clicked_by(PointerButton::Primary) {
-        if let Some(pos) = response.interact_pointer_pos() {
+        if let Some(pos) = response
+            .interact_pointer_pos()
+            .filter(|pos| rect.contains(*pos))
+        {
             backend.start_selection_with_type(rect, pos, SelectionType::Semantic);
         }
         return;
@@ -2435,16 +2441,26 @@ fn handle_terminal_pointer(
     }
 
     if response.drag_started() {
-        if let Some(pos) = response.interact_pointer_pos() {
+        if let Some(pos) = response
+            .interact_pointer_pos()
+            .filter(|pos| rect.contains(*pos))
+        {
             backend.start_selection(rect, pos);
         }
     }
     if response.dragged() {
-        if let Some(pos) = response.interact_pointer_pos() {
+        if let Some(pos) = response
+            .interact_pointer_pos()
+            .filter(|pos| rect.contains(*pos))
+        {
             backend.update_selection(rect, pos);
         }
     }
-    if response.hovered() {
+    if response.hovered()
+        && ui
+            .input(|input| input.pointer.hover_pos())
+            .is_some_and(|pos| rect.contains(pos))
+    {
         let scroll_y = ui.input(|input| input.smooth_scroll_delta.y);
         let lines = (scroll_y / backend.size.cell_height).round() as i32;
         backend.scroll(lines);

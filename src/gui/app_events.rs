@@ -117,7 +117,7 @@ impl GsdvGuiApp {
         let active_reviewer_dialog_open = self.active_reviewer_dialog().is_some();
         let notifications_open = self.notifications.open;
         let route = workspace.route;
-        let outline_visible = should_show_outline_panel(Some(workspace));
+        let outline_visible = !self.app_fullscreen && should_show_outline_panel(Some(workspace));
         let recent_markdown_dialog_open = matches!(
             self.active_app_dialog(),
             Some(AppDialog::RecentMarkdownOutline { .. })
@@ -131,17 +131,22 @@ impl GsdvGuiApp {
         let in_reviewer_route = route == Route::Reviewer;
         let helix_shortcut_allowed =
             self.helix_shortcut_allowed(in_reviewer_route, wants_keyboard_input);
-        let terminal_input_target = if reviewer_helix_open {
+        let mut terminal_input_target = if reviewer_helix_open {
             None
         } else {
             default_terminal_input_target(workspace, workspace_terminal_open, reviewer_helix_open)
         };
+        let focused_agent_slot = self.focused_agent_slot(active_workspace);
+        if terminal_input_target == Some(TerminalSurfaceKind::Agent) && focused_agent_slot.is_none()
+        {
+            terminal_input_target = None;
+        }
         let terminal_surface_owns_input = terminal_input_target.is_some()
             && !active_app_dialog_open
             && !active_reviewer_dialog_open
             && !self.extra_tools.open
             && !notifications_open;
-        let active_agent_slot = self.active_agent_slot();
+        let active_agent_slot = focused_agent_slot.unwrap_or_else(|| self.active_agent_slot());
         let terminal_kitty_keyboard_protocol = terminal_input_target.is_some_and(|target| {
             self.terminal_input_kitty_keyboard_protocol(
                 active_workspace,
@@ -291,11 +296,22 @@ impl GsdvGuiApp {
             return false;
         };
         if workspace.route == Route::Workspace
-            && workspace.center_mode == CenterMode::Agent
+            && matches!(
+                workspace.center_mode,
+                CenterMode::Agent | CenterMode::Terminal
+            )
             && self
                 .agent_terminal_slot_by_id(terminal_id)
                 .is_some_and(|(index, slot)| {
-                    index == self.active_workspace && slot == self.active_agent_slot()
+                    index == self.active_workspace
+                        && workspace.agent_rows.iter().any(|row| {
+                            !row.collapsed
+                                && row.columns.iter().any(|column| {
+                                    !column.collapsed
+                                        && AgentSlotId::from_column_slot(&column.active_slot)
+                                            == slot
+                                })
+                        })
                 })
         {
             return true;
@@ -1142,6 +1158,13 @@ impl GsdvGuiApp {
             workspace.activity = refreshed_workspace.activity;
             workspace.session_id = refreshed_workspace.session_id;
             workspace.subagents = refreshed_workspace.subagents;
+            let (rows, focus) = data::normalize_agent_rows(
+                workspace.agent_rows.clone(),
+                workspace.agent_focus,
+                &workspace.subagents,
+            );
+            workspace.agent_rows = rows;
+            workspace.agent_focus = focus;
         }
         for (index, workspace) in self.workspaces.iter().enumerate() {
             let slots = agent_slots_for_workspace(workspace);

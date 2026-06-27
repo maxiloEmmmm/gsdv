@@ -887,6 +887,15 @@ impl GsdvGuiApp {
             return;
         }
 
+        let content_rect = ui.max_rect().shrink(2.0);
+        let mut content_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(content_rect)
+                .layout(Layout::top_down(Align::Min)),
+        );
+        content_ui.set_clip_rect(content_rect);
+        let ui = &mut content_ui;
+
         let (current_mode, route, reviewer_mode) = self
             .current_workspace()
             .map(|workspace| {
@@ -903,88 +912,89 @@ impl GsdvGuiApp {
 
         if route == Route::Workspace {
             let mut agent_tab_action = None;
-            StripBuilder::new(ui)
-                .clip(true)
-                .size(Size::exact(30.0))
-                .size(Size::remainder())
-                .vertical(|mut strip| {
-                    strip.strip(|builder| {
-                        builder
-                            .size(Size::remainder())
-                            .size(Size::exact(334.0))
-                            .horizontal(|mut strip| {
-                                strip.cell(|ui| {
-                                    agent_tab_action = workspace_mode_tabs(
-                                        ui,
-                                        current_mode,
-                                        markdown_outline_collapsed,
-                                        self.app_language,
-                                        |mode| {
-                                            if let Some(workspace) = self.current_workspace_mut() {
-                                                workspace.center_mode = mode;
-                                                self.persist_workspaces();
+            if self.app_fullscreen {
+                self.workspace_center_surface(ui, current_mode);
+            } else {
+                StripBuilder::new(ui)
+                    .clip(true)
+                    .size(Size::exact(30.0))
+                    .size(Size::remainder())
+                    .vertical(|mut strip| {
+                        strip.strip(|builder| {
+                            builder
+                                .size(Size::remainder())
+                                .size(Size::exact(334.0))
+                                .horizontal(|mut strip| {
+                                    strip.cell(|ui| {
+                                        agent_tab_action = workspace_mode_tabs(
+                                            ui,
+                                            current_mode,
+                                            markdown_outline_collapsed,
+                                            self.app_language,
+                                            |mode| {
+                                                if let Some(workspace) =
+                                                    self.current_workspace_mut()
+                                                {
+                                                    workspace.center_mode = mode;
+                                                    self.persist_workspaces();
+                                                }
+                                            },
+                                        );
+                                    });
+                                    strip.cell(|ui| {
+                                        ui.horizontal(|ui| {
+                                            if rest_entry_button(
+                                                ui,
+                                                self.runtime_settings.pomodoro_enabled,
+                                                self.app_language,
+                                            )
+                                            .clicked()
+                                            {
+                                                self.pomodoro.start_resting(Instant::now());
+                                                self.push_pomodoro_notification(
+                                                    i18n::text_with_arg(
+                                                        self.app_language,
+                                                        "Manual rest started for {minutes} minutes",
+                                                        "{minutes}",
+                                                        self.runtime_settings
+                                                            .pomodoro_rest_minutes
+                                                            .to_string(),
+                                                    ),
+                                                );
+                                                self.request_app_repaint();
                                             }
-                                        },
-                                    );
-                                });
-                                strip.cell(|ui| {
-                                    ui.horizontal(|ui| {
-                                        if rest_entry_button(
-                                            ui,
-                                            self.runtime_settings.pomodoro_enabled,
-                                            self.app_language,
-                                        )
-                                        .clicked()
-                                        {
-                                            self.pomodoro.start_resting(Instant::now());
-                                            self.push_pomodoro_notification(i18n::text_with_arg(
+                                            if work_entry_button(
+                                                ui,
+                                                self.runtime_settings.pomodoro_enabled
+                                                    && self.pomodoro.phase
+                                                        != PomodoroPhase::Working,
                                                 self.app_language,
-                                                "Manual rest started for {minutes} minutes",
-                                                "{minutes}",
-                                                self.runtime_settings
-                                                    .pomodoro_rest_minutes
-                                                    .to_string(),
-                                            ));
-                                            self.request_app_repaint();
-                                        }
-                                        if work_entry_button(
-                                            ui,
-                                            self.runtime_settings.pomodoro_enabled
-                                                && self.pomodoro.phase != PomodoroPhase::Working,
-                                            self.app_language,
-                                        )
-                                        .clicked()
-                                        {
-                                            self.pomodoro.start_working(Instant::now());
-                                            self.push_pomodoro_notification(i18n::text_with_arg(
-                                                self.app_language,
-                                                "Starting work for {minutes} minutes",
-                                                "{minutes}",
-                                                self.runtime_settings
-                                                    .pomodoro_work_minutes
-                                                    .to_string(),
-                                            ));
-                                            self.request_app_repaint();
-                                        }
-                                        if help_entry_button(ui, self.app_language).clicked() {
-                                            self.set_active_app_dialog(Some(AppDialog::Help));
-                                        }
+                                            )
+                                            .clicked()
+                                            {
+                                                self.pomodoro.start_working(Instant::now());
+                                                self.push_pomodoro_notification(
+                                                    i18n::text_with_arg(
+                                                        self.app_language,
+                                                        "Starting work for {minutes} minutes",
+                                                        "{minutes}",
+                                                        self.runtime_settings
+                                                            .pomodoro_work_minutes
+                                                            .to_string(),
+                                                    ),
+                                                );
+                                                self.request_app_repaint();
+                                            }
+                                            if help_entry_button(ui, self.app_language).clicked() {
+                                                self.set_active_app_dialog(Some(AppDialog::Help));
+                                            }
+                                        });
                                     });
                                 });
-                            });
+                        });
+                        strip.cell(|ui| self.workspace_center_surface(ui, current_mode));
                     });
-                    strip.cell(|ui| match current_mode {
-                        CenterMode::Agent => self.agent_surface(ui, current_mode),
-                        CenterMode::Terminal => self.agent_surface(ui, current_mode),
-                        CenterMode::Editor | CenterMode::Preview => {
-                            if self.workflow_task_surface_visible() {
-                                self.workflow_task_surface(ui)
-                            } else {
-                                self.markdown_surface(ui, current_mode)
-                            }
-                        }
-                    });
-                });
+            }
             if let Some(action) = agent_tab_action {
                 self.handle_agent_tab_action(ui.ctx(), action);
             }
@@ -993,35 +1003,51 @@ impl GsdvGuiApp {
         }
     }
 
-    pub(super) fn agent_surface(&mut self, ui: &mut Ui, mode: CenterMode) {
-        ui.vertical(|ui| {
-            self.agent_slot_tabs(ui);
-            ui.add_space(4.0);
-            StripBuilder::new(ui)
-                .clip(true)
-                .cell_layout(Layout::top_down(Align::Min))
-                .size(Size::remainder().at_least(360.0))
-                .horizontal(|mut strip| {
-                    strip.cell(|ui| match mode {
-                        CenterMode::Agent | CenterMode::Terminal => {
-                            self.terminal_host_surface(ui, TerminalSurfaceKind::Agent)
-                        }
-                        CenterMode::Editor | CenterMode::Preview => {}
-                    });
-                });
-        });
+    /// Renders the route content that remains visible in F11 app fullscreen.
+    fn workspace_center_surface(&mut self, ui: &mut Ui, current_mode: CenterMode) {
+        match current_mode {
+            CenterMode::Agent => self.agent_surface(ui, current_mode),
+            CenterMode::Terminal => self.agent_surface(ui, current_mode),
+            CenterMode::Editor | CenterMode::Preview => {
+                if self.workflow_task_surface_visible() {
+                    self.workflow_task_surface(ui)
+                } else {
+                    self.markdown_surface(ui, current_mode)
+                }
+            }
+        }
     }
 
-    /// Renders per-workspace main/subagent tabs.
-    pub(super) fn agent_slot_tabs(&mut self, ui: &mut Ui) {
+    pub(super) fn agent_surface(&mut self, ui: &mut Ui, mode: CenterMode) {
+        match mode {
+            CenterMode::Agent | CenterMode::Terminal => self.agent_columns_surface(ui),
+            CenterMode::Editor | CenterMode::Preview => {}
+        }
+    }
+
+    /// Renders all visible Agent rows and columns for the active workspace.
+    pub(super) fn agent_columns_surface(&mut self, ui: &mut Ui) {
         let Some(workspace) = self.current_workspace().cloned() else {
             return;
         };
-        let active = self.active_agent_slot();
-        let mut next_slot = None;
-        let mut add_clicked = false;
-        let mut remove_subagent = None;
-        let mut agent_tab_action = None;
+        let rows = workspace.agent_rows.clone();
+        if rows.is_empty() {
+            return;
+        }
+        let width = ui.available_width();
+        let total_height = ui.available_height().max(1.0);
+        let row_splitter_height = 6.0;
+        let collapsed_row_height = 28.0;
+        let collapsed_height =
+            rows.iter().filter(|row| row.collapsed).count() as f32 * collapsed_row_height;
+        let row_splitters = row_splitter_height * rows.len().saturating_sub(1) as f32;
+        let expanded_height = (total_height - collapsed_height - row_splitters).max(1.0);
+        let expanded_weight = rows
+            .iter()
+            .filter(|row| !row.collapsed)
+            .map(|row| row.height_weight.max(0.01))
+            .sum::<f32>()
+            .max(0.01);
         let workspace_targets = self
             .workspaces
             .iter()
@@ -1029,170 +1055,664 @@ impl GsdvGuiApp {
             .filter(|(index, _)| *index != self.active_workspace)
             .map(|(index, workspace)| (index, workspace.name.clone()))
             .collect::<Vec<_>>();
-        ScrollArea::horizontal()
-            .id_salt(("agent-slot-tabs", self.active_workspace))
-            .max_height(32.0)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let main_response = agent_slot_tab_button(
-                        ui,
-                        "main",
-                        workspace.activity,
-                        active == AgentSlotId::Main,
-                        &self.repaint_controller,
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for (row_index, row) in rows.iter().enumerate() {
+                let row_height = if row.collapsed {
+                    collapsed_row_height
+                } else {
+                    expanded_height * row.height_weight.max(0.01) / expanded_weight
+                };
+                let (row_rect, _) =
+                    ui.allocate_exact_size(Vec2::new(width, row_height), Sense::hover());
+                let mut row_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .id_salt(("agent-row-cell", row_index))
+                        .max_rect(row_rect)
+                        .layout(Layout::top_down(Align::Min)),
+                );
+                row_ui.set_clip_rect(row_rect);
+                if row.collapsed {
+                    self.collapsed_agent_row(&mut row_ui, row_index);
+                } else {
+                    self.agent_row_surface(
+                        &mut row_ui,
+                        &workspace,
+                        row,
+                        row_index,
+                        &workspace_targets,
                     );
-                    main_response.context_menu(|ui| {
-                        agent_slot_context_menu(
-                            ui,
-                            AgentSlotId::Main,
-                            workspace.agent_kind,
-                            workspace.agent_model.as_deref(),
-                            workspace.agent_model_provider.as_deref(),
-                            workspace.agent_effort.as_deref(),
-                            workspace.agent_fast_mode,
-                            workspace.agent_work_dir.as_deref(),
-                            workspace.session_id.as_deref(),
-                            &mut agent_tab_action,
-                            self.app_language,
-                        );
-                    });
-                    if main_response.clicked() {
-                        next_slot = Some(AgentSlotId::Main);
+                }
+                if row_index + 1 < rows.len() {
+                    let response = ui
+                        .allocate_response(
+                            Vec2::new(width, row_splitter_height),
+                            Sense::click_and_drag(),
+                        )
+                        .on_hover_cursor(egui::CursorIcon::ResizeVertical);
+                    if response.dragged() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
                     }
-                    for (subagent_index, subagent) in workspace.subagents.iter().enumerate() {
-                        let subagent_id = subagent.id.clone();
-                        let slot = AgentSlotId::Subagent(subagent.id.clone());
-                        let response = agent_slot_tab_button(
-                            ui,
-                            &subagent.name,
-                            subagent.activity,
-                            active == slot,
-                            &self.repaint_controller,
-                        );
-                        response.context_menu(|ui| {
-                            agent_slot_context_menu(
-                                ui,
-                                slot.clone(),
-                                subagent.agent_kind,
-                                subagent.agent_model.as_deref(),
-                                subagent.agent_model_provider.as_deref(),
-                                subagent.agent_effort.as_deref(),
-                                subagent.agent_fast_mode,
-                                subagent.agent_work_dir.as_deref(),
-                                subagent.session_id.as_deref(),
-                                &mut agent_tab_action,
-                                self.app_language,
-                            );
-                            ui.separator();
-                            ui.menu_button(
-                                i18n::text(self.app_language, "Move to workspace"),
-                                |ui| {
-                                    if workspace_targets.is_empty() {
-                                        ui.add_enabled(
-                                            false,
-                                            Button::new(i18n::text(
-                                                self.app_language,
-                                                "No other workspace",
-                                            )),
-                                        );
-                                    }
-                                    for (target_index, target_name) in &workspace_targets {
-                                        if ui.button(target_name).clicked() {
-                                            agent_tab_action =
-                                                Some(AgentTabAction::MoveSubagentToWorkspace {
-                                                    id: subagent_id.clone(),
-                                                    target_index: *target_index,
-                                                });
-                                            ui.close_menu();
-                                        }
-                                    }
-                                },
-                            );
-                            if ui
-                                .add_enabled(
-                                    subagent_index > 0,
-                                    Button::new(i18n::text(self.app_language, "Move left")),
-                                )
-                                .clicked()
-                            {
-                                agent_tab_action =
-                                    Some(AgentTabAction::MoveSubagentLeft(subagent_id.clone()));
-                                ui.close_menu();
-                            }
-                            if ui
-                                .add_enabled(
-                                    subagent_index + 1 < workspace.subagents.len(),
-                                    Button::new(i18n::text(self.app_language, "Move right")),
-                                )
-                                .clicked()
-                            {
-                                agent_tab_action =
-                                    Some(AgentTabAction::MoveSubagentRight(subagent_id.clone()));
-                                ui.close_menu();
-                            }
-                            if ui
-                                .add_enabled(
-                                    subagent_index > 0,
-                                    Button::new(i18n::text(self.app_language, "Move to head")),
-                                )
-                                .clicked()
-                            {
-                                agent_tab_action =
-                                    Some(AgentTabAction::MoveSubagentToHead(subagent_id.clone()));
-                                ui.close_menu();
-                            }
-                            if ui
-                                .add_enabled(
-                                    subagent_index + 1 < workspace.subagents.len(),
-                                    Button::new(i18n::text(self.app_language, "Move to tail")),
-                                )
-                                .clicked()
-                            {
-                                agent_tab_action =
-                                    Some(AgentTabAction::MoveSubagentToTail(subagent_id.clone()));
-                                ui.close_menu();
-                            }
-                            ui.separator();
-                            if ui.button(i18n::text(self.app_language, "Remove")).clicked() {
-                                remove_subagent = Some(subagent.id.clone());
-                                ui.close_menu();
-                            }
-                        });
-                        if response.clicked() {
-                            next_slot = Some(slot);
-                        }
+                    let stroke = if response.hovered() || response.dragged() {
+                        Stroke::new(2.0, theme::primary())
+                    } else {
+                        Stroke::new(1.0, theme::border())
+                    };
+                    let center_y = response.rect.center().y;
+                    ui.painter().line_segment(
+                        [
+                            egui::pos2(response.rect.left() + 8.0, center_y),
+                            egui::pos2(response.rect.right() - 8.0, center_y),
+                        ],
+                        stroke,
+                    );
+                    if response.dragged() {
+                        let delta_y = ui.input(|input| input.pointer.delta().y);
+                        self.resize_agent_rows(row_index, delta_y, expanded_height);
                     }
-                    if ui.add_sized([30.0, 24.0], Button::new("+")).clicked() {
-                        add_clicked = true;
-                    }
-                });
-            });
-        if let Some(slot) = next_slot {
-            if let Some(active) = self.active_agent_slots.get_mut(self.active_workspace) {
-                *active = slot;
+                }
             }
-            self.request_app_repaint();
+        });
+    }
+
+    /// Renders a collapsed Agent row restore strip.
+    fn collapsed_agent_row(&mut self, ui: &mut Ui, row_index: usize) {
+        let response = ui
+            .add_sized(
+                [ui.available_width(), 24.0],
+                Button::new(RichText::new("v").size(13.0).color(theme::muted()))
+                    .fill(theme::bg())
+                    .stroke(Stroke::new(1.0, theme::border())),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if response.clicked() {
+            self.set_agent_row_collapsed(self.active_workspace, row_index, false);
         }
-        if add_clicked {
-            self.set_active_app_dialog(Some(AppDialog::AddSubagent {
-                index: self.active_workspace,
-                name: String::new(),
-                agent_kind: workspace.agent_kind,
-                agent_model: String::new(),
-                agent_model_provider: String::new(),
-                model_providers: data::load_codex_model_provider_names(),
-                agent_effort: String::new(),
-                agent_fast_mode: None,
-                agent_work_dir: String::new(),
-                session_id: String::new(),
-            }));
+    }
+
+    /// Renders one Agent row with horizontal columns.
+    fn agent_row_surface(
+        &mut self,
+        ui: &mut Ui,
+        workspace: &WorkspaceViewData,
+        row: &data::AgentRowViewData,
+        row_index: usize,
+        workspace_targets: &[(usize, String)],
+    ) {
+        let width = ui.available_width();
+        let height = ui.available_height().max(1.0);
+        let splitter_width = 6.0;
+        let collapsed_col_width = 28.0;
+        let collapsed_width = row.columns.iter().filter(|column| column.collapsed).count() as f32
+            * collapsed_col_width;
+        let col_splitters = splitter_width * row.columns.len().saturating_sub(1) as f32;
+        let expanded_width = (width - collapsed_width - col_splitters).max(1.0);
+        let expanded_weight = row
+            .columns
+            .iter()
+            .filter(|column| !column.collapsed)
+            .map(|column| column.width_weight.max(0.01))
+            .sum::<f32>()
+            .max(0.01);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            for (column_index, column) in row.columns.iter().enumerate() {
+                let col_width = if column.collapsed {
+                    collapsed_col_width
+                } else {
+                    expanded_width * column.width_weight.max(0.01) / expanded_weight
+                };
+                let (column_rect, _) =
+                    ui.allocate_exact_size(Vec2::new(col_width, height), Sense::hover());
+                let mut column_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .id_salt((
+                            "agent-column-cell",
+                            row_index,
+                            column_index,
+                            column.id.clone(),
+                        ))
+                        .max_rect(column_rect)
+                        .layout(Layout::top_down(Align::Min)),
+                );
+                column_ui.set_clip_rect(column_rect);
+                if column.collapsed {
+                    self.collapsed_agent_column(&mut column_ui, row_index, column_index);
+                } else {
+                    self.agent_column_surface(
+                        &mut column_ui,
+                        workspace,
+                        column,
+                        row_index,
+                        column_index,
+                        column_rect,
+                        workspace_targets,
+                    );
+                }
+                if column_index + 1 < row.columns.len() {
+                    let response = ui
+                        .allocate_response(
+                            Vec2::new(splitter_width, height),
+                            Sense::click_and_drag(),
+                        )
+                        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+                    if response.dragged() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    }
+                    let stroke = if response.hovered() || response.dragged() {
+                        Stroke::new(2.0, theme::primary())
+                    } else {
+                        Stroke::new(1.0, theme::border())
+                    };
+                    let center_x = response.rect.center().x;
+                    ui.painter().line_segment(
+                        [
+                            egui::pos2(center_x, response.rect.top() + 8.0),
+                            egui::pos2(center_x, response.rect.bottom() - 8.0),
+                        ],
+                        stroke,
+                    );
+                    if response.dragged() {
+                        let delta_x = ui.input(|input| input.pointer.delta().x);
+                        self.resize_agent_columns(row_index, column_index, delta_x, expanded_width);
+                    }
+                }
+            }
+        });
+    }
+
+    /// Renders a collapsed Agent column restore strip.
+    fn collapsed_agent_column(&mut self, ui: &mut Ui, row_index: usize, column_index: usize) {
+        let response = ui
+            .add_sized(
+                [24.0, ui.available_height().max(24.0)],
+                Button::new(RichText::new(">").size(13.0).color(theme::muted()))
+                    .fill(theme::bg())
+                    .stroke(Stroke::new(1.0, theme::border())),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if response.clicked() {
+            self.set_agent_column_collapsed(self.active_workspace, row_index, column_index, false);
         }
-        if let Some(id) = remove_subagent {
-            self.remove_subagent(ui.ctx(), self.active_workspace, &id);
+    }
+
+    /// Renders one Agent column, including its local tabs and active terminal.
+    fn agent_column_surface(
+        &mut self,
+        ui: &mut Ui,
+        workspace: &WorkspaceViewData,
+        column: &data::AgentColumnViewData,
+        row_index: usize,
+        column_index: usize,
+        column_rect: Rect,
+        workspace_targets: &[(usize, String)],
+    ) {
+        let active_slot = AgentSlotId::from_column_slot(&column.active_slot);
+        let mut next_slot = None;
+        let mut agent_tab_action = None;
+        let column_id = column.id.clone();
+        let focused = workspace.agent_focus.is_some_and(|focus| {
+            focus.row_index == row_index && focus.column_index == column_index
+        });
+        let content_rect = column_rect.shrink(2.0);
+        let single_cell = workspace.agent_rows.len() == 1
+            && workspace
+                .agent_rows
+                .first()
+                .is_some_and(|row| row.columns.len() == 1);
+        let clicked_inside = ui.input(|input| {
+            input
+                .pointer
+                .interact_pos()
+                .is_some_and(|pos| input.pointer.any_pressed() && column_rect.contains(pos))
+        });
+        if clicked_inside {
+            self.set_agent_focus(self.active_workspace, row_index, column_index);
         }
-        if let Some(action) = agent_tab_action {
+        let tab_top_gap = 0.0;
+        let tab_height = 34.0;
+        let tab_bottom_gap = 2.0;
+        let tab_rect = Rect::from_min_size(
+            egui::pos2(content_rect.left(), content_rect.top() + tab_top_gap),
+            Vec2::new(content_rect.width(), tab_height),
+        );
+        let body_top = (tab_rect.bottom() + tab_bottom_gap).min(content_rect.bottom());
+        let body_rect = Rect::from_min_max(
+            egui::pos2(content_rect.left(), body_top),
+            content_rect.right_bottom(),
+        );
+        let mut tab_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt((
+                    "agent-column-tabs",
+                    row_index,
+                    column_index,
+                    column_id.clone(),
+                ))
+                .max_rect(tab_rect)
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        tab_ui.set_clip_rect(Rect::from_min_max(
+            egui::pos2(tab_rect.left(), tab_rect.top() - 2.0),
+            egui::pos2(tab_rect.right(), tab_rect.bottom() + 2.0),
+        ));
+        tab_ui.spacing_mut().item_spacing.x = 4.0;
+        for (tab_index, tab) in column.tabs.iter().enumerate() {
+            self.agent_column_tab(
+                &mut tab_ui,
+                workspace,
+                &column_id,
+                row_index,
+                column_index,
+                tab_index,
+                tab,
+                &active_slot,
+                workspace_targets,
+                &mut next_slot,
+                &mut agent_tab_action,
+            );
+        }
+        let add_response = tab_ui
+            .add_sized(
+                [30.0, 30.0],
+                Button::new(RichText::new("+").size(15.0).color(theme::text()))
+                    .fill(theme::bg())
+                    .stroke(Stroke::new(1.0, theme::border())),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if add_response.clicked() {
+            agent_tab_action = Some(AgentTabAction::AddSubagentToColumn {
+                column_id: column_id.clone(),
+            });
+        }
+        if let Some(slot) = next_slot.take() {
+            self.select_agent_column_slot(row_index, column_index, slot);
+        }
+        if let Some(action) = agent_tab_action.take() {
             self.handle_agent_tab_action(ui.ctx(), action);
         }
+        if body_rect.height() > 1.0 {
+            let mut body_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .id_salt((
+                        "agent-column-body",
+                        row_index,
+                        column_index,
+                        column_id.clone(),
+                    ))
+                    .max_rect(body_rect)
+                    .layout(Layout::top_down(Align::Min)),
+            );
+            body_ui.set_clip_rect(body_rect);
+            if column.tabs.is_empty() {
+                empty_document_panel(
+                    &mut body_ui,
+                    i18n::text(self.app_language, "No agent tab."),
+                    self.app_language,
+                );
+            } else {
+                self.agent_terminal_host_surface(
+                    &mut body_ui,
+                    active_slot,
+                    Some(AgentGridMenuContext {
+                        row_index,
+                        column_index,
+                        column_id: &column_id,
+                        workspace,
+                        workspace_targets,
+                    }),
+                );
+            }
+        }
+        if focused && !single_cell {
+            ui.painter().rect_stroke(
+                column_rect.shrink(1.0),
+                CornerRadius::same(theme::RADIUS_SM),
+                Stroke::new(1.0, Color32::from_rgb(34, 197, 94)),
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
+
+    /// Renders one tab inside an Agent column.
+    fn agent_column_tab(
+        &mut self,
+        ui: &mut Ui,
+        workspace: &WorkspaceViewData,
+        column_id: &str,
+        row_index: usize,
+        column_index: usize,
+        tab_index: usize,
+        tab: &data::AgentColumnSlot,
+        active_slot: &AgentSlotId,
+        workspace_targets: &[(usize, String)],
+        next_slot: &mut Option<AgentSlotId>,
+        agent_tab_action: &mut Option<AgentTabAction>,
+    ) {
+        match tab {
+            data::AgentColumnSlot::Main => {
+                let slot = AgentSlotId::Main;
+                let response = agent_slot_tab_button(
+                    ui,
+                    "main",
+                    workspace.activity,
+                    active_slot == &slot,
+                    &self.repaint_controller,
+                );
+                response.context_menu(|ui| {
+                    agent_slot_context_menu(
+                        ui,
+                        slot.clone(),
+                        workspace.agent_kind,
+                        workspace.agent_model.as_deref(),
+                        workspace.agent_model_provider.as_deref(),
+                        workspace.agent_effort.as_deref(),
+                        workspace.agent_fast_mode,
+                        workspace.agent_work_dir.as_deref(),
+                        workspace.session_id.as_deref(),
+                        agent_tab_action,
+                        self.app_language,
+                    );
+                });
+                if response.clicked() {
+                    *next_slot = Some(slot);
+                }
+            }
+            data::AgentColumnSlot::Subagent(id) => {
+                let Some(subagent) = workspace
+                    .subagents
+                    .iter()
+                    .find(|subagent| &subagent.id == id)
+                else {
+                    return;
+                };
+                let slot = AgentSlotId::Subagent(id.clone());
+                let response = agent_slot_tab_button(
+                    ui,
+                    &subagent.name,
+                    subagent.activity,
+                    active_slot == &slot,
+                    &self.repaint_controller,
+                );
+                response.context_menu(|ui| {
+                    agent_slot_context_menu(
+                        ui,
+                        slot.clone(),
+                        subagent.agent_kind,
+                        subagent.agent_model.as_deref(),
+                        subagent.agent_model_provider.as_deref(),
+                        subagent.agent_effort.as_deref(),
+                        subagent.agent_fast_mode,
+                        subagent.agent_work_dir.as_deref(),
+                        subagent.session_id.as_deref(),
+                        agent_tab_action,
+                        self.app_language,
+                    );
+                    ui.separator();
+                    self.agent_grid_menu_items(
+                        ui,
+                        row_index,
+                        column_index,
+                        column_id,
+                        false,
+                        Some((id.clone(), tab_index)),
+                        agent_tab_action,
+                        workspace,
+                        workspace_targets,
+                    );
+                });
+                if response.clicked() {
+                    *next_slot = Some(slot);
+                }
+            }
+        }
+    }
+
+    /// Renders structural Agent grid menu actions.
+    pub(super) fn agent_grid_menu_items(
+        &self,
+        ui: &mut Ui,
+        row_index: usize,
+        column_index: usize,
+        column_id: &str,
+        include_structure: bool,
+        subagent: Option<(String, usize)>,
+        agent_tab_action: &mut Option<AgentTabAction>,
+        workspace: &WorkspaceViewData,
+        workspace_targets: &[(usize, String)],
+    ) {
+        if include_structure {
+            if ui
+                .button(i18n::text(self.app_language, "Add row"))
+                .clicked()
+            {
+                *agent_tab_action = Some(AgentTabAction::AddRow { row_index });
+                ui.close_menu();
+            }
+            if ui
+                .button(i18n::text(self.app_language, "Add col"))
+                .clicked()
+            {
+                *agent_tab_action = Some(AgentTabAction::AddColumn { row_index });
+                ui.close_menu();
+            }
+            if row_index > 0
+                && ui
+                    .button(i18n::text(self.app_language, "Close row"))
+                    .clicked()
+            {
+                *agent_tab_action = Some(AgentTabAction::CloseRow { row_index });
+                ui.close_menu();
+            }
+            if (row_index != 0 || column_index != 0)
+                && ui
+                    .button(i18n::text(self.app_language, "Close col"))
+                    .clicked()
+            {
+                *agent_tab_action = Some(AgentTabAction::CloseColumn {
+                    row_index,
+                    column_index,
+                });
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui
+                .button(i18n::text(self.app_language, "Collapse col"))
+                .clicked()
+            {
+                *agent_tab_action = Some(AgentTabAction::CollapseColumn {
+                    row_index,
+                    column_index,
+                });
+                ui.close_menu();
+            }
+            if ui
+                .button(i18n::text(self.app_language, "Collapse other cols"))
+                .clicked()
+            {
+                *agent_tab_action = Some(AgentTabAction::CollapseOtherColumns {
+                    row_index,
+                    column_index,
+                });
+                ui.close_menu();
+            }
+            if ui
+                .button(i18n::text(self.app_language, "Collapse row"))
+                .clicked()
+            {
+                *agent_tab_action = Some(AgentTabAction::CollapseRow { row_index });
+                ui.close_menu();
+            }
+            if ui
+                .button(i18n::text(self.app_language, "Collapse other rows"))
+                .clicked()
+            {
+                *agent_tab_action = Some(AgentTabAction::CollapseOtherRows { row_index });
+                ui.close_menu();
+            }
+        }
+        if let Some((id, tab_index)) = subagent {
+            if include_structure {
+                ui.separator();
+            }
+            ui.menu_button(i18n::text(self.app_language, "Move to workspace"), |ui| {
+                if workspace_targets.is_empty() {
+                    ui.add_enabled(
+                        false,
+                        Button::new(i18n::text(self.app_language, "No other workspace")),
+                    );
+                }
+                for (target_index, target_name) in workspace_targets {
+                    if ui.button(target_name).clicked() {
+                        *agent_tab_action = Some(AgentTabAction::MoveSubagentToWorkspace {
+                            id: id.clone(),
+                            target_index: *target_index,
+                        });
+                        ui.close_menu();
+                    }
+                }
+            });
+            let first_movable = usize::from(row_index == 0 && column_index == 0);
+            let tab_count = workspace
+                .agent_rows
+                .get(row_index)
+                .and_then(|row| row.columns.get(column_index))
+                .map(|column| column.tabs.len())
+                .unwrap_or_default();
+            if ui
+                .add_enabled(
+                    tab_index > first_movable,
+                    Button::new(i18n::text(self.app_language, "Move left")),
+                )
+                .clicked()
+            {
+                *agent_tab_action = Some(AgentTabAction::MoveSubagentLeft {
+                    row_index,
+                    column_id: column_id.to_string(),
+                    id: id.clone(),
+                });
+                ui.close_menu();
+            }
+            if ui
+                .add_enabled(
+                    tab_index + 1 < tab_count,
+                    Button::new(i18n::text(self.app_language, "Move right")),
+                )
+                .clicked()
+            {
+                *agent_tab_action = Some(AgentTabAction::MoveSubagentRight {
+                    row_index,
+                    column_id: column_id.to_string(),
+                    id: id.clone(),
+                });
+                ui.close_menu();
+            }
+            if ui
+                .add_enabled(
+                    tab_index > first_movable,
+                    Button::new(i18n::text(self.app_language, "Move to head")),
+                )
+                .clicked()
+            {
+                *agent_tab_action = Some(AgentTabAction::MoveSubagentToHead {
+                    row_index,
+                    column_id: column_id.to_string(),
+                    id: id.clone(),
+                });
+                ui.close_menu();
+            }
+            if ui
+                .add_enabled(
+                    tab_index + 1 < tab_count,
+                    Button::new(i18n::text(self.app_language, "Move to tail")),
+                )
+                .clicked()
+            {
+                *agent_tab_action = Some(AgentTabAction::MoveSubagentToTail {
+                    row_index,
+                    column_id: column_id.to_string(),
+                    id: id.clone(),
+                });
+                ui.close_menu();
+            }
+        }
+    }
+
+    /// Selects the active tab for one Agent column and global keyboard focus.
+    fn select_agent_column_slot(
+        &mut self,
+        row_index: usize,
+        column_index: usize,
+        slot: AgentSlotId,
+    ) {
+        let Some(workspace) = self.workspaces.get_mut(self.active_workspace) else {
+            return;
+        };
+        if let Some(column) = workspace
+            .agent_rows
+            .get_mut(row_index)
+            .and_then(|row| row.columns.get_mut(column_index))
+        {
+            column.active_slot = slot.to_column_slot();
+        }
+        self.set_agent_focus(self.active_workspace, row_index, column_index);
+        self.persist_workspaces();
+        self.request_app_repaint();
+    }
+
+    /// Adjusts adjacent Agent column width weights from a splitter drag.
+    fn resize_agent_columns(
+        &mut self,
+        row_index: usize,
+        left_index: usize,
+        delta_x: f32,
+        content_width: f32,
+    ) {
+        let Some(workspace) = self.workspaces.get_mut(self.active_workspace) else {
+            return;
+        };
+        let Some(row) = workspace.agent_rows.get_mut(row_index) else {
+            return;
+        };
+        if left_index + 1 >= row.columns.len() || content_width <= 1.0 {
+            return;
+        }
+        let delta_weight = delta_x / content_width;
+        let min_weight = (80.0 / content_width).min(0.2);
+        let left = row.columns[left_index].width_weight;
+        let right = row.columns[left_index + 1].width_weight;
+        let applied = delta_weight.clamp(min_weight - left, right - min_weight);
+        if applied.abs() <= f32::EPSILON {
+            return;
+        }
+        row.columns[left_index].width_weight += applied;
+        row.columns[left_index + 1].width_weight -= applied;
+        data::normalize_agent_column_widths(&mut row.columns);
+        self.persist_workspaces();
+        self.request_app_repaint();
+    }
+
+    /// Adjusts adjacent Agent row height weights from a splitter drag.
+    fn resize_agent_rows(&mut self, top_index: usize, delta_y: f32, content_height: f32) {
+        let Some(workspace) = self.workspaces.get_mut(self.active_workspace) else {
+            return;
+        };
+        if top_index + 1 >= workspace.agent_rows.len() || content_height <= 1.0 {
+            return;
+        }
+        let delta_weight = delta_y / content_height;
+        let min_weight = (90.0 / content_height).min(0.2);
+        let top = workspace.agent_rows[top_index].height_weight;
+        let bottom = workspace.agent_rows[top_index + 1].height_weight;
+        let applied = delta_weight.clamp(min_weight - top, bottom - min_weight);
+        if applied.abs() <= f32::EPSILON {
+            return;
+        }
+        workspace.agent_rows[top_index].height_weight += applied;
+        workspace.agent_rows[top_index + 1].height_weight -= applied;
+        data::normalize_agent_row_heights(&mut workspace.agent_rows);
+        self.persist_workspaces();
+        self.request_app_repaint();
     }
 
     /// 绘制 workflow task 专属工作台。

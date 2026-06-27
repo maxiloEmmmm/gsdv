@@ -231,8 +231,14 @@ fn chinese_text(source: &'static str) -> &'static str {
         "Primary font" => "主字体",
         "Fallback font" => "备用字体",
         "Network proxy" => "网络代理",
+        "Enable proxy" => "启用代理",
+        "Disable this switch to keep proxy values saved without injecting them." => {
+            "关闭这个开关可以保留代理配置，但不注入到进程。"
+        }
         "HTTP / HTTPS / SOCKS proxy" => "HTTP / HTTPS / SOCKS 代理",
-        "Leave empty to disable proxy." => "留空则禁用代理。",
+        "Proxy is disabled; proxy and no_proxy values are saved but not injected." => {
+            "代理已停用；proxy 和 no_proxy 会保存，但不会注入。"
+        }
         "Generate paired HTTP/SOCKS env vars" => "生成配对的 HTTP/SOCKS 环境变量",
         "When enabled, http:// also sets all_proxy=socks5://..., and socks5:// also sets http_proxy/https_proxy=http://...." => {
             "启用后，http:// 会同时设置 all_proxy=socks5://...，socks5:// 会同时设置 http_proxy/https_proxy=http://...。"
@@ -740,8 +746,14 @@ fn japanese_text(source: &'static str) -> &'static str {
         "Primary font" => "メインフォント",
         "Fallback font" => "代替フォント",
         "Network proxy" => "ネットワークプロキシ",
+        "Enable proxy" => "プロキシを有効化",
+        "Disable this switch to keep proxy values saved without injecting them." => {
+            "このスイッチをオフにすると、プロキシ設定を保存したままプロセスへ注入しません。"
+        }
         "HTTP / HTTPS / SOCKS proxy" => "HTTP / HTTPS / SOCKS プロキシ",
-        "Leave empty to disable proxy." => "空のままにするとプロキシを無効化します。",
+        "Proxy is disabled; proxy and no_proxy values are saved but not injected." => {
+            "プロキシは無効です。proxy と no_proxy は保存されますが注入されません。"
+        }
         "Generate paired HTTP/SOCKS env vars" => "対応する HTTP/SOCKS 環境変数を生成",
         "When enabled, http:// also sets all_proxy=socks5://..., and socks5:// also sets http_proxy/https_proxy=http://...." => {
             "有効時は http:// が all_proxy=socks5://... も設定し、socks5:// が http_proxy/https_proxy=http://... も設定します。"

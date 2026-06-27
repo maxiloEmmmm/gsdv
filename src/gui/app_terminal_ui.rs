@@ -53,6 +53,11 @@ pub(super) fn helix_spec_needs_spawn(
 
 impl GsdvGuiApp {
     pub(super) fn terminal_host_surface(&mut self, ui: &mut Ui, kind: TerminalSurfaceKind) {
+        if kind == TerminalSurfaceKind::Agent {
+            let slot = self.active_agent_slot();
+            self.agent_terminal_host_surface(ui, slot, None);
+            return;
+        }
         self.ensure_terminal_host(ui.ctx(), kind);
         let surface_route_active = match kind {
             TerminalSurfaceKind::Agent => {
@@ -207,6 +212,155 @@ impl GsdvGuiApp {
         }
     }
 
+    /// Draws one Agent terminal slot, allowing multiple visible columns.
+    pub(super) fn agent_terminal_host_surface(
+        &mut self,
+        ui: &mut Ui,
+        agent_slot: AgentSlotId,
+        grid_menu: Option<AgentGridMenuContext<'_>>,
+    ) {
+        self.ensure_agent_terminal_host(ui.ctx(), self.active_workspace, &agent_slot);
+        let focused_slot = self.focused_agent_slot(self.active_workspace);
+        let slot_accepts_input = focused_slot.as_ref() == Some(&agent_slot);
+        let surface_route_active =
+            !self.workspace_terminal_drawer_is_open() && !self.reviewer_helix_drawer_is_open();
+        let accept_input = slot_accepts_input
+            && surface_route_active
+            && self.active_app_dialog().is_none()
+            && self.active_reviewer_dialog().is_none()
+            && !self.extra_tools.open
+            && !self.notifications.open
+            && !self.suppress_default_agent_input;
+        let request_focus = accept_input;
+        self.respawn_exited_agent_terminal_host(ui.ctx(), &agent_slot);
+        let spawn_key = TerminalSpawnKey {
+            index: self.active_workspace,
+            kind: TerminalSurfaceKind::Agent,
+            agent_slot: agent_slot.clone(),
+        };
+        let spawn_pending = self.pending_terminal_spawns.contains(&spawn_key);
+        let Some(hosts) = self.terminal_hosts.get_mut(self.active_workspace) else {
+            return;
+        };
+        let slot = hosts.agents.entry(agent_slot.clone()).or_default();
+        let error = slot.error.clone();
+        let Some(host) = slot.host.as_mut() else {
+            if spawn_pending {
+                terminal_pending_panel(
+                    ui,
+                    i18n::text(
+                        self.app_language,
+                        terminal_pending_message_for_kind(TerminalSurfaceKind::Agent),
+                    ),
+                );
+                return;
+            }
+            let retry = terminal_error_panel(
+                ui,
+                "Agent terminal failed to start",
+                error.as_deref().unwrap_or("No backend error was reported."),
+                terminal_error_hint_for_kind(TerminalSurfaceKind::Agent),
+                self.app_language,
+            );
+            if retry && let Some(hosts) = self.terminal_hosts.get_mut(self.active_workspace) {
+                hosts.agents.entry(agent_slot).or_default().error = None;
+            }
+            return;
+        };
+        let terminal_size = Vec2::new(ui.available_width(), ui.available_height().max(1.0));
+        let theme_mode = self.theme_mode;
+        let terminal_font_size =
+            terminal_font_size_for_kind(&self.font_settings, TerminalSurfaceKind::Agent);
+        let include_agent_input_rect =
+            slot_accepts_input && self.agent_input_translation_popup.is_some();
+        let custom_quick_replies = self.runtime_settings.agent_custom_quick_replies.clone();
+        let terminal_output = ui.allocate_ui(terminal_size, |ui| {
+            let host_output = host.ui(
+                ui,
+                theme_mode,
+                terminal_font_size,
+                include_agent_input_rect,
+                request_focus,
+                accept_input,
+                TerminalInputShortcutScope::AgentSurface,
+            );
+            let agent_exit = if host.launched_with_resume() {
+                host.take_abnormal_agent_exit()
+            } else {
+                None
+            };
+            (agent_exit, host_output)
+        });
+        let (agent_exit, host_output) = terminal_output.inner;
+        if slot_accepts_input {
+            self.active_agent_terminal_rect = include_agent_input_rect
+                .then(|| host_output.as_ref().and_then(|output| output.input_rect))
+                .flatten();
+            if host_output
+                .as_ref()
+                .is_some_and(|output| output.input_submitted)
+            {
+                self.clear_agent_input_translation_state();
+            }
+        }
+        let mut quick_reply = None;
+        let mut agent_tab_action = None;
+        if slot_accepts_input && let Some(host_output) = host_output.as_ref() {
+            host_output.response.context_menu(|ui| {
+                ui.horizontal(|ui| {
+                    for reply in AGENT_QUICK_REPLIES {
+                        if ui.button(reply).clicked() {
+                            quick_reply = Some(reply);
+                            ui.close_menu();
+                        }
+                    }
+                });
+                let custom_replies = agent_custom_quick_reply_lines(&custom_quick_replies);
+                if !custom_replies.is_empty() {
+                    ui.separator();
+                    ui.horizontal_wrapped(|ui| {
+                        for reply in custom_replies {
+                            if ui.button(reply).clicked() {
+                                quick_reply = Some(reply);
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                }
+                if let Some(grid_menu) = grid_menu {
+                    ui.separator();
+                    self.agent_grid_menu_items(
+                        ui,
+                        grid_menu.row_index,
+                        grid_menu.column_index,
+                        grid_menu.column_id,
+                        true,
+                        None,
+                        &mut agent_tab_action,
+                        grid_menu.workspace,
+                        grid_menu.workspace_targets,
+                    );
+                }
+            });
+        }
+        if let Some(reply) = quick_reply {
+            self.submit_active_agent_quick_reply(ui.ctx(), reply);
+        }
+        if let Some(action) = agent_tab_action {
+            self.handle_agent_tab_action(ui.ctx(), action);
+        }
+        if let Some(output) = host_output
+            && let Some(click) = output.output_click
+        {
+            self.handle_terminal_output_click(ui.ctx(), click, output.output_click_copy_only);
+        }
+        if let Some(exit) = agent_exit
+            && self.active_app_dialog().is_none()
+        {
+            self.set_active_app_dialog(Some(AppDialog::AgentExitedAbnormally { exit }));
+        }
+    }
+
     /// Handles a clicked Agent terminal output token.
     pub(super) fn handle_terminal_output_click(
         &mut self,
@@ -272,7 +426,9 @@ impl GsdvGuiApp {
     /// Translates the visible active Agent input draft in a helper popup.
     pub(super) fn translate_active_agent_input(&mut self, ctx: &egui::Context) {
         let workspace_index = self.active_workspace;
-        let agent_slot = self.active_agent_slot();
+        let Some(agent_slot) = self.focused_agent_slot(workspace_index) else {
+            return;
+        };
         let Some(text) = self.active_agent_input_text_snapshot() else {
             self.push_toast(
                 i18n::text(self.app_language, "No Agent input draft to translate"),
@@ -352,7 +508,11 @@ impl GsdvGuiApp {
             return;
         }
         let workspace_index = self.active_workspace;
-        let agent_slot = self.active_agent_slot();
+        let Some(agent_slot) = self.focused_agent_slot(workspace_index) else {
+            self.agent_input_translation_watch = None;
+            self.agent_input_translation_popup = None;
+            return;
+        };
         if self.agent_slot_activity(workspace_index, &agent_slot) == WorkspaceActivity::Busy {
             self.agent_input_translation_watch = None;
             self.agent_input_translation_popup = None;
@@ -417,7 +577,9 @@ impl GsdvGuiApp {
             );
             return;
         };
-        let active_slot = self.active_agent_slot();
+        let Some(active_slot) = self.focused_agent_slot(self.active_workspace) else {
+            return;
+        };
         if translation.workspace_index != self.active_workspace
             || translation.agent_slot != active_slot
         {
@@ -445,7 +607,7 @@ impl GsdvGuiApp {
             );
             return;
         }
-        self.ensure_terminal_host(ctx, TerminalSurfaceKind::Agent);
+        self.ensure_agent_terminal_host(ctx, self.active_workspace, &active_slot);
         let current_text_present = self.active_agent_input_text_snapshot().is_some();
         let Some(host) = self
             .terminal_hosts
@@ -487,7 +649,7 @@ impl GsdvGuiApp {
         source_text: &str,
     ) -> bool {
         workspace_index == self.active_workspace
-            && agent_slot == &self.active_agent_slot()
+            && self.focused_agent_slot(self.active_workspace).as_ref() == Some(agent_slot)
             && self.agent_slot_activity(workspace_index, agent_slot) != WorkspaceActivity::Busy
             && self
                 .active_agent_input_text_snapshot()
@@ -497,7 +659,7 @@ impl GsdvGuiApp {
 
     /// Returns the current active Agent terminal draft without mutating the child process.
     fn active_agent_input_text_snapshot(&self) -> Option<String> {
-        let slot = self.active_agent_slot();
+        let slot = self.focused_agent_slot(self.active_workspace)?;
         self.terminal_hosts
             .get(self.active_workspace)?
             .agents
@@ -631,6 +793,48 @@ impl GsdvGuiApp {
         self.spawn_terminal_host_for_workspace(ctx, self.active_workspace, kind);
     }
 
+    /// Ensures a specific Agent terminal slot exists without changing selection.
+    pub(super) fn ensure_agent_terminal_host(
+        &mut self,
+        ctx: &egui::Context,
+        workspace_index: usize,
+        slot_id: &AgentSlotId,
+    ) {
+        if workspace_index >= self.terminal_hosts.len() {
+            return;
+        }
+        let Some(workspace) = self.agent_workspace_for_slot(workspace_index, slot_id) else {
+            return;
+        };
+        let exited = self
+            .terminal_hosts
+            .get(workspace_index)
+            .and_then(|hosts| hosts.agents.get(slot_id))
+            .and_then(|slot| slot.host.as_ref())
+            .is_some_and(GuiTerminalHost::has_exited);
+        if exited {
+            self.mark_agent_slot_idle_after_terminal_exit(workspace_index, slot_id);
+        }
+        let Some(hosts) = self.terminal_hosts.get_mut(workspace_index) else {
+            return;
+        };
+        let slot = hosts.agents.entry(slot_id.clone()).or_default();
+        if exited {
+            slot.host = None;
+        }
+        match slot.host.as_mut() {
+            Some(host) => host.sync_workspace_metadata(&workspace),
+            None => {
+                let key = TerminalSpawnKey {
+                    index: workspace_index,
+                    kind: TerminalSurfaceKind::Agent,
+                    agent_slot: slot_id.clone(),
+                };
+                self.spawn_terminal_host_task(ctx, key, workspace);
+            }
+        }
+    }
+
     /// Builds terminal launch metadata for an agent slot.
     pub(super) fn agent_workspace_for_slot(
         &self,
@@ -677,20 +881,62 @@ impl GsdvGuiApp {
         }
     }
 
+    /// Marks an Agent slot idle when its child process exits before hooks settle.
+    ///
+    /// Example: `Busy + child exit` -> `Idle`; `Unknown + child exit` -> `Unknown`.
+    pub(super) fn mark_agent_slot_idle_after_terminal_exit(
+        &mut self,
+        workspace_index: usize,
+        slot: &AgentSlotId,
+    ) {
+        let Some(workspace) = self.workspaces.get_mut(workspace_index) else {
+            return;
+        };
+        let changed = match slot {
+            AgentSlotId::Main => {
+                if workspace.activity != WorkspaceActivity::Busy {
+                    false
+                } else {
+                    workspace.activity = WorkspaceActivity::Idle;
+                    true
+                }
+            }
+            AgentSlotId::Subagent(id) => {
+                let Some(subagent) = workspace
+                    .subagents
+                    .iter_mut()
+                    .find(|subagent| &subagent.id == id)
+                else {
+                    return;
+                };
+                if subagent.activity != WorkspaceActivity::Busy {
+                    false
+                } else {
+                    subagent.activity = WorkspaceActivity::Idle;
+                    true
+                }
+            }
+        };
+        if changed {
+            self.mark_workspace_store_dirty();
+            self.request_app_repaint();
+        }
+    }
+
     /// Recreates a terminal host after its child process exits.
     pub(super) fn respawn_exited_terminal_host(
         &mut self,
         ctx: &egui::Context,
         kind: TerminalSurfaceKind,
     ) {
-        let Some(hosts) = self.terminal_hosts.get_mut(self.active_workspace) else {
-            return;
-        };
         let agent_slot = self
             .active_agent_slots
             .get(self.active_workspace)
             .cloned()
             .unwrap_or(AgentSlotId::Main);
+        let Some(hosts) = self.terminal_hosts.get(self.active_workspace) else {
+            return;
+        };
         let exited = match kind {
             TerminalSurfaceKind::Agent => hosts
                 .agents
@@ -704,6 +950,12 @@ impl GsdvGuiApp {
             TerminalSurfaceKind::Helix => false,
         };
         if exited {
+            if kind == TerminalSurfaceKind::Agent {
+                self.mark_agent_slot_idle_after_terminal_exit(self.active_workspace, &agent_slot);
+            }
+            let Some(hosts) = self.terminal_hosts.get_mut(self.active_workspace) else {
+                return;
+            };
             match kind {
                 TerminalSurfaceKind::Agent => {
                     hosts.agents.entry(agent_slot).or_default().host = None;
@@ -713,6 +965,31 @@ impl GsdvGuiApp {
             }
             self.spawn_terminal_host_for_workspace(ctx, self.active_workspace, kind);
         }
+    }
+
+    /// Recreates one Agent terminal host after its child process exits.
+    pub(super) fn respawn_exited_agent_terminal_host(
+        &mut self,
+        ctx: &egui::Context,
+        agent_slot: &AgentSlotId,
+    ) {
+        let Some(hosts) = self.terminal_hosts.get(self.active_workspace) else {
+            return;
+        };
+        let exited = hosts
+            .agents
+            .get(agent_slot)
+            .and_then(|slot| slot.host.as_ref())
+            .is_some_and(GuiTerminalHost::has_exited);
+        if !exited {
+            return;
+        }
+        self.mark_agent_slot_idle_after_terminal_exit(self.active_workspace, agent_slot);
+        let Some(hosts) = self.terminal_hosts.get_mut(self.active_workspace) else {
+            return;
+        };
+        hosts.agents.entry(agent_slot.clone()).or_default().host = None;
+        self.ensure_agent_terminal_host(ctx, self.active_workspace, agent_slot);
     }
 
     pub(super) fn spawn_terminal_host_for_workspace(
@@ -739,11 +1016,20 @@ impl GsdvGuiApp {
                 else {
                     return;
                 };
+                let exited = self
+                    .terminal_hosts
+                    .get(workspace_index)
+                    .and_then(|hosts| hosts.agents.get(&slot_id))
+                    .and_then(|slot| slot.host.as_ref())
+                    .is_some_and(GuiTerminalHost::has_exited);
+                if exited {
+                    self.mark_agent_slot_idle_after_terminal_exit(workspace_index, &slot_id);
+                }
                 let Some(hosts) = self.terminal_hosts.get_mut(workspace_index) else {
                     return;
                 };
                 let slot = hosts.agents.entry(slot_id.clone()).or_default();
-                if slot.host.as_ref().is_some_and(GuiTerminalHost::has_exited) {
+                if exited {
                     slot.host = None;
                 }
                 match slot.host.as_mut() {
@@ -901,12 +1187,14 @@ impl GsdvGuiApp {
         crate::gui::hook::hook_info(format_args!(
             "copy-to-agent start workspace={} slot={:?} text={}",
             self.active_workspace,
-            self.active_agent_slot(),
+            self.focused_agent_slot(self.active_workspace),
             text
         ));
+        let Some(slot_id) = self.focused_agent_slot(self.active_workspace) else {
+            return false;
+        };
         ctx.copy_text(text.to_string());
-        self.ensure_terminal_host(ctx, TerminalSurfaceKind::Agent);
-        let slot_id = self.active_agent_slot();
+        self.ensure_agent_terminal_host(ctx, self.active_workspace, &slot_id);
         let Some(host) = self
             .terminal_hosts
             .get_mut(self.active_workspace)
@@ -937,8 +1225,10 @@ impl GsdvGuiApp {
         ctx: &egui::Context,
         text: &str,
     ) -> bool {
-        self.ensure_terminal_host(ctx, TerminalSurfaceKind::Agent);
-        let slot_id = self.active_agent_slot();
+        let Some(slot_id) = self.focused_agent_slot(self.active_workspace) else {
+            return false;
+        };
+        self.ensure_agent_terminal_host(ctx, self.active_workspace, &slot_id);
         let Some(host) = self
             .terminal_hosts
             .get_mut(self.active_workspace)

@@ -294,7 +294,17 @@ impl GsdvGuiApp {
             return;
         }
         if let Some(active) = self.active_agent_slots.get_mut(self.active_workspace) {
-            *active = slot;
+            *active = slot.clone();
+        }
+        let column_slot = slot.to_column_slot();
+        if let Some(workspace) = self.workspaces.get_mut(self.active_workspace)
+            && let Some(column) = workspace
+                .agent_rows
+                .iter_mut()
+                .flat_map(|row| row.columns.iter_mut())
+                .find(|column| column.tabs.contains(&column_slot))
+        {
+            column.active_slot = column_slot;
         }
     }
 
@@ -303,6 +313,7 @@ impl GsdvGuiApp {
         &mut self,
         ctx: &egui::Context,
         index: usize,
+        column_id: String,
         name: String,
         agent_kind: AgentKind,
         agent_model: Option<String>,
@@ -327,7 +338,40 @@ impl GsdvGuiApp {
             session_id,
         );
         let slot = AgentSlotId::Subagent(subagent.id.clone());
+        let column_slot = slot.to_column_slot();
         workspace.subagents.push(subagent);
+        let mut next_focus = None;
+        if let Some((row_index, column_index, column)) = workspace
+            .agent_rows
+            .iter_mut()
+            .enumerate()
+            .find_map(|(row_index, row)| {
+                row.columns
+                    .iter_mut()
+                    .enumerate()
+                    .find(|(_, column)| column.id == column_id)
+                    .map(|(column_index, column)| (row_index, column_index, column))
+            })
+        {
+            column.tabs.push(column_slot.clone());
+            column.active_slot = column_slot;
+            next_focus = Some(data::AgentFocusViewData {
+                row_index,
+                column_index,
+            });
+        } else if let Some(column) = workspace
+            .agent_rows
+            .first_mut()
+            .and_then(|row| row.columns.first_mut())
+        {
+            column.tabs.push(column_slot.clone());
+            column.active_slot = column_slot;
+            next_focus = Some(data::AgentFocusViewData {
+                row_index: 0,
+                column_index: 0,
+            });
+        }
+        workspace.agent_focus = next_focus;
         if let Some(active) = self.active_agent_slots.get_mut(index) {
             *active = slot.clone();
         }
@@ -336,6 +380,129 @@ impl GsdvGuiApp {
         }
         self.persist_workspaces();
         self.spawn_terminal_host_for_workspace(ctx, index, TerminalSurfaceKind::Agent);
+    }
+
+    /// Adds a visible Agent column to one row and returns its stable id.
+    pub(super) fn add_agent_column(&mut self, index: usize, row_index: usize) -> Option<String> {
+        let workspace = self.workspaces.get_mut(index)?;
+        let row = workspace.agent_rows.get_mut(row_index)?;
+        let id = new_agent_column_id(row.columns.len());
+        row.columns.push(data::AgentColumnViewData {
+            id: id.clone(),
+            tabs: Vec::new(),
+            active_slot: data::AgentColumnSlot::Main,
+            width_weight: 1.0,
+            collapsed: false,
+        });
+        data::normalize_agent_column_widths(&mut row.columns);
+        self.persist_workspaces();
+        Some(id)
+    }
+
+    /// Adds a visible Agent row below the given row and returns its first column id.
+    pub(super) fn add_agent_row(&mut self, index: usize, after_row: usize) -> Option<String> {
+        let workspace = self.workspaces.get_mut(index)?;
+        let id = new_agent_column_id(0);
+        let insert_at = (after_row + 1).min(workspace.agent_rows.len());
+        workspace.agent_rows.insert(
+            insert_at,
+            data::AgentRowViewData {
+                columns: vec![data::AgentColumnViewData {
+                    id: id.clone(),
+                    tabs: Vec::new(),
+                    active_slot: data::AgentColumnSlot::Main,
+                    width_weight: 1.0,
+                    collapsed: false,
+                }],
+                height_weight: 1.0,
+                collapsed: false,
+            },
+        );
+        data::normalize_agent_row_heights(&mut workspace.agent_rows);
+        self.persist_workspaces();
+        Some(id)
+    }
+
+    /// Removes a non-primary Agent column and deletes all subagents inside it.
+    pub(super) fn remove_agent_column(
+        &mut self,
+        ctx: &egui::Context,
+        index: usize,
+        column_id: &str,
+    ) {
+        let Some((row_index, column_index, slots)) =
+            self.workspaces.get(index).and_then(|workspace| {
+                workspace
+                    .agent_rows
+                    .iter()
+                    .enumerate()
+                    .find_map(|(row_index, row)| {
+                        row.columns
+                            .iter()
+                            .enumerate()
+                            .find(|(_, column)| column.id == column_id)
+                            .map(|(column_index, column)| {
+                                (row_index, column_index, column.tabs.clone())
+                            })
+                    })
+            })
+        else {
+            return;
+        };
+        if row_index == 0 && column_index == 0 {
+            return;
+        }
+        for slot in slots {
+            if let data::AgentColumnSlot::Subagent(id) = slot {
+                self.remove_subagent(ctx, index, &id);
+            }
+        }
+        if let Some(workspace) = self.workspaces.get_mut(index) {
+            if let Some(row) = workspace.agent_rows.get_mut(row_index) {
+                row.columns.retain(|column| column.id != column_id);
+                data::normalize_agent_column_widths(&mut row.columns);
+            }
+            workspace.agent_rows.retain(|row| !row.columns.is_empty());
+            workspace.agent_focus =
+                data::normalize_agent_focus_for_rows(workspace.agent_focus, &workspace.agent_rows);
+        }
+        self.persist_workspaces();
+        self.request_app_repaint();
+    }
+
+    /// Removes a non-primary Agent row and deletes all subagents inside it.
+    pub(super) fn remove_agent_row(&mut self, ctx: &egui::Context, index: usize, row_index: usize) {
+        if row_index == 0 {
+            return;
+        }
+        let Some(slots) = self
+            .workspaces
+            .get(index)
+            .and_then(|workspace| workspace.agent_rows.get(row_index))
+            .map(|row| {
+                row.columns
+                    .iter()
+                    .flat_map(|column| column.tabs.iter().cloned())
+                    .collect::<Vec<_>>()
+            })
+        else {
+            return;
+        };
+        for slot in slots {
+            if let data::AgentColumnSlot::Subagent(id) = slot {
+                self.remove_subagent(ctx, index, &id);
+            }
+        }
+        if let Some(workspace) = self.workspaces.get_mut(index)
+            && row_index < workspace.agent_rows.len()
+        {
+            workspace.agent_rows.remove(row_index);
+            data::normalize_agent_row_heights(&mut workspace.agent_rows);
+            workspace.agent_focus =
+                data::normalize_agent_focus_for_rows(workspace.agent_focus, &workspace.agent_rows);
+        }
+        self.persist_workspaces();
+        self.request_app_repaint();
     }
 
     /// Removes one subagent and shuts down its terminal host.
@@ -348,6 +515,19 @@ impl GsdvGuiApp {
         workspace.subagents.retain(|subagent| subagent.id != id);
         if workspace.subagents.len() == before {
             return;
+        }
+        let column_slot = slot.to_column_slot();
+        for row in &mut workspace.agent_rows {
+            for column in &mut row.columns {
+                column.tabs.retain(|tab| tab != &column_slot);
+                if column.active_slot == column_slot {
+                    column.active_slot = column
+                        .tabs
+                        .first()
+                        .cloned()
+                        .unwrap_or(data::AgentColumnSlot::Main);
+                }
+            }
         }
         if self.active_agent_slots.get(index) == Some(&slot) {
             if let Some(active) = self.active_agent_slots.get_mut(index) {
@@ -368,39 +548,72 @@ impl GsdvGuiApp {
         self.request_app_repaint();
     }
 
-    /// Moves one subagent one tab to the left inside its workspace.
-    pub(super) fn move_subagent_left(&mut self, ctx: &egui::Context, index: usize, id: &str) {
-        let Some(current) = self.subagent_index(index, id) else {
+    /// Moves one subagent one tab to the left inside its Agent column.
+    pub(super) fn move_subagent_left(
+        &mut self,
+        ctx: &egui::Context,
+        index: usize,
+        column_id: &str,
+        id: &str,
+    ) {
+        let Some(current) = self.column_subagent_index(index, column_id, id) else {
             return;
         };
-        if current == 0 {
+        if current
+            <= self
+                .column_first_movable_index(index, column_id)
+                .unwrap_or(0)
+        {
             return;
         }
-        self.move_subagent_to_position(ctx, index, id, current - 1);
+        self.move_subagent_to_position(ctx, index, column_id, id, current - 1);
     }
 
-    /// Moves one subagent one tab to the right inside its workspace.
-    pub(super) fn move_subagent_right(&mut self, ctx: &egui::Context, index: usize, id: &str) {
-        let Some(current) = self.subagent_index(index, id) else {
+    /// Moves one subagent one tab to the right inside its Agent column.
+    pub(super) fn move_subagent_right(
+        &mut self,
+        ctx: &egui::Context,
+        index: usize,
+        column_id: &str,
+        id: &str,
+    ) {
+        let Some(current) = self.column_subagent_index(index, column_id, id) else {
             return;
         };
-        self.move_subagent_to_position(ctx, index, id, current + 1);
+        self.move_subagent_to_position(ctx, index, column_id, id, current + 1);
     }
 
-    /// Moves one subagent to the first subagent tab inside its workspace.
-    pub(super) fn move_subagent_to_head(&mut self, ctx: &egui::Context, index: usize, id: &str) {
-        self.move_subagent_to_position(ctx, index, id, 0);
+    /// Moves one subagent to the first subagent tab inside its Agent column.
+    pub(super) fn move_subagent_to_head(
+        &mut self,
+        ctx: &egui::Context,
+        index: usize,
+        column_id: &str,
+        id: &str,
+    ) {
+        self.move_subagent_to_position(ctx, index, column_id, id, 0);
     }
 
-    /// Moves one subagent to the last subagent tab inside its workspace.
-    pub(super) fn move_subagent_to_tail(&mut self, ctx: &egui::Context, index: usize, id: &str) {
-        let Some(workspace) = self.workspaces.get(index) else {
+    /// Moves one subagent to the last subagent tab inside its Agent column.
+    pub(super) fn move_subagent_to_tail(
+        &mut self,
+        ctx: &egui::Context,
+        index: usize,
+        column_id: &str,
+        id: &str,
+    ) {
+        let Some(column) = self.workspaces.get(index).and_then(|workspace| {
+            workspace
+                .agent_rows
+                .iter()
+                .find_map(|row| row.columns.iter().find(|column| column.id == column_id))
+        }) else {
             return;
         };
-        let Some(target) = workspace.subagents.len().checked_sub(1) else {
+        let Some(target) = column.tabs.len().checked_sub(1) else {
             return;
         };
-        self.move_subagent_to_position(ctx, index, id, target);
+        self.move_subagent_to_position(ctx, index, column_id, id, target);
     }
 
     /// Moves one subagent from the source workspace to another workspace.
@@ -436,10 +649,31 @@ impl GsdvGuiApp {
             return;
         };
         let slot = AgentSlotId::Subagent(id.to_string());
+        let column_slot = slot.to_column_slot();
         let subagent = self.workspaces[source_index]
             .subagents
             .remove(source_position);
         self.workspaces[target_index].subagents.push(subagent);
+        for row in &mut self.workspaces[source_index].agent_rows {
+            for column in &mut row.columns {
+                column.tabs.retain(|tab| tab != &column_slot);
+                if column.active_slot == column_slot {
+                    column.active_slot = column
+                        .tabs
+                        .first()
+                        .cloned()
+                        .unwrap_or(data::AgentColumnSlot::Main);
+                }
+            }
+        }
+        if let Some(column) = self.workspaces[target_index]
+            .agent_rows
+            .first_mut()
+            .and_then(|row| row.columns.first_mut())
+        {
+            column.tabs.push(column_slot.clone());
+            column.active_slot = column_slot;
+        }
 
         if self.active_agent_slots.get(source_index) == Some(&slot)
             && let Some(active) = self.active_agent_slots.get_mut(source_index)
@@ -485,33 +719,214 @@ impl GsdvGuiApp {
             .position(|subagent| subagent.id == id)
     }
 
-    /// Reorders one subagent inside a workspace and persists the sidecar.
+    /// Returns the current subagent tab index inside one Agent column.
+    fn column_subagent_index(&self, index: usize, column_id: &str, id: &str) -> Option<usize> {
+        let slot = data::AgentColumnSlot::Subagent(id.to_string());
+        self.workspaces
+            .get(index)?
+            .agent_rows
+            .iter()
+            .find_map(|row| row.columns.iter().find(|column| column.id == column_id))?
+            .tabs
+            .iter()
+            .position(|tab| tab == &slot)
+    }
+
+    /// Reorders one subagent inside an Agent column and persists the sidecar.
     fn move_subagent_to_position(
         &mut self,
         ctx: &egui::Context,
         index: usize,
+        column_id: &str,
         id: &str,
         target: usize,
     ) {
+        let first_movable = self
+            .column_first_movable_index(index, column_id)
+            .unwrap_or(0);
         let Some(workspace) = self.workspaces.get_mut(index) else {
             return;
         };
-        let Some(current) = workspace
-            .subagents
-            .iter()
-            .position(|subagent| subagent.id == id)
+        let slot = data::AgentColumnSlot::Subagent(id.to_string());
+        let Some(column) = workspace
+            .agent_rows
+            .iter_mut()
+            .find_map(|row| row.columns.iter_mut().find(|column| column.id == column_id))
         else {
             return;
         };
-        let Some(last) = workspace.subagents.len().checked_sub(1) else {
+        let Some(current) = column.tabs.iter().position(|tab| tab == &slot) else {
             return;
         };
-        let target = target.min(last);
+        let Some(last) = column.tabs.len().checked_sub(1) else {
+            return;
+        };
+        let target = target.max(first_movable).min(last);
         if current == target {
             return;
         }
-        let subagent = workspace.subagents.remove(current);
-        workspace.subagents.insert(target, subagent);
+        let tab = column.tabs.remove(current);
+        column.tabs.insert(target, tab);
+        self.persist_workspaces();
+        self.request_app_repaint();
+    }
+
+    /// Returns the first movable tab index for one Agent column.
+    fn column_first_movable_index(&self, index: usize, column_id: &str) -> Option<usize> {
+        self.workspaces
+            .get(index)?
+            .agent_rows
+            .iter()
+            .enumerate()
+            .find_map(|(row_index, row)| {
+                row.columns
+                    .iter()
+                    .position(|column| column.id == column_id)
+                    .map(|column_index| usize::from(row_index == 0 && column_index == 0))
+            })
+    }
+
+    /// Sets focus to a visible Agent grid cell and routes keyboard input there.
+    pub(super) fn set_agent_focus(&mut self, index: usize, row_index: usize, column_index: usize) {
+        let Some(workspace) = self.workspaces.get_mut(index) else {
+            return;
+        };
+        if workspace
+            .agent_rows
+            .get(row_index)
+            .is_none_or(|row| row.collapsed)
+            || workspace
+                .agent_rows
+                .get(row_index)
+                .and_then(|row| row.columns.get(column_index))
+                .is_none_or(|column| column.collapsed)
+        {
+            return;
+        }
+        workspace.agent_focus = Some(data::AgentFocusViewData {
+            row_index,
+            column_index,
+        });
+        let slot = workspace.agent_rows[row_index].columns[column_index]
+            .active_slot
+            .clone();
+        if let Some(active) = self.active_agent_slots.get_mut(index) {
+            *active = AgentSlotId::from_column_slot(&slot);
+        }
+        self.persist_workspaces();
+        self.request_app_repaint();
+    }
+
+    /// Moves Agent focus with keyboard navigation inside visible grid cells.
+    ///
+    /// Example: `Right` at row 0 col 0 -> focus row 0 col 1 when that column is visible.
+    pub(super) fn move_agent_focus(&mut self, index: usize, direction: AgentFocusMove) {
+        let Some(workspace) = self.workspaces.get(index) else {
+            return;
+        };
+        let Some(focus) =
+            data::normalize_agent_focus_for_rows(workspace.agent_focus, &workspace.agent_rows)
+        else {
+            return;
+        };
+        let Some(next_focus) = next_agent_focus(&workspace.agent_rows, focus, direction) else {
+            return;
+        };
+        self.set_agent_focus(index, next_focus.row_index, next_focus.column_index);
+    }
+
+    /// Normalizes focus after a row or column becomes folded or removed.
+    pub(super) fn normalize_agent_focus(&mut self, index: usize) {
+        let Some(workspace) = self.workspaces.get_mut(index) else {
+            return;
+        };
+        workspace.agent_focus =
+            data::normalize_agent_focus_for_rows(workspace.agent_focus, &workspace.agent_rows);
+        if let Some(focus) = workspace.agent_focus
+            && let Some(slot) = workspace
+                .agent_rows
+                .get(focus.row_index)
+                .and_then(|row| row.columns.get(focus.column_index))
+                .map(|column| AgentSlotId::from_column_slot(&column.active_slot))
+            && let Some(active) = self.active_agent_slots.get_mut(index)
+        {
+            *active = slot;
+        }
+    }
+
+    /// Updates one Agent column folded state and repairs focus.
+    pub(super) fn set_agent_column_collapsed(
+        &mut self,
+        index: usize,
+        row_index: usize,
+        column_index: usize,
+        collapsed: bool,
+    ) {
+        if let Some(column) = self
+            .workspaces
+            .get_mut(index)
+            .and_then(|workspace| workspace.agent_rows.get_mut(row_index))
+            .and_then(|row| row.columns.get_mut(column_index))
+        {
+            column.collapsed = collapsed;
+        }
+        self.normalize_agent_focus(index);
+        self.persist_workspaces();
+        self.request_app_repaint();
+    }
+
+    /// Folds every column except one inside the selected row.
+    pub(super) fn collapse_other_agent_columns(
+        &mut self,
+        index: usize,
+        row_index: usize,
+        column_index: usize,
+    ) {
+        if let Some(row) = self
+            .workspaces
+            .get_mut(index)
+            .and_then(|workspace| workspace.agent_rows.get_mut(row_index))
+        {
+            for (index, column) in row.columns.iter_mut().enumerate() {
+                if index != column_index {
+                    column.collapsed = true;
+                }
+            }
+        }
+        self.normalize_agent_focus(index);
+        self.persist_workspaces();
+        self.request_app_repaint();
+    }
+
+    /// Updates one Agent row folded state and repairs focus.
+    pub(super) fn set_agent_row_collapsed(
+        &mut self,
+        index: usize,
+        row_index: usize,
+        collapsed: bool,
+    ) {
+        if let Some(row) = self
+            .workspaces
+            .get_mut(index)
+            .and_then(|workspace| workspace.agent_rows.get_mut(row_index))
+        {
+            row.collapsed = collapsed;
+        }
+        self.normalize_agent_focus(index);
+        self.persist_workspaces();
+        self.request_app_repaint();
+    }
+
+    /// Folds every Agent row except the selected one.
+    pub(super) fn collapse_other_agent_rows(&mut self, index: usize, row_index: usize) {
+        if let Some(workspace) = self.workspaces.get_mut(index) {
+            for (index, row) in workspace.agent_rows.iter_mut().enumerate() {
+                if index != row_index {
+                    row.collapsed = true;
+                }
+            }
+        }
+        self.normalize_agent_focus(index);
         self.persist_workspaces();
         self.request_app_repaint();
     }
@@ -520,4 +935,126 @@ impl GsdvGuiApp {
     pub(super) fn persist_workspaces(&mut self) {
         self.mark_workspace_store_dirty();
     }
+}
+
+/// Finds the next visible Agent focus cell for arrow-key movement.
+///
+/// Example: `Right` at `{ row: 0, col: 0 }` -> first visible column after col 0.
+fn next_agent_focus(
+    rows: &[data::AgentRowViewData],
+    focus: data::AgentFocusViewData,
+    direction: AgentFocusMove,
+) -> Option<data::AgentFocusViewData> {
+    match direction {
+        AgentFocusMove::Left => previous_visible_agent_column(rows, focus),
+        AgentFocusMove::Right => next_visible_agent_column(rows, focus),
+        AgentFocusMove::Up => visible_agent_row_focus(rows, focus, false),
+        AgentFocusMove::Down => visible_agent_row_focus(rows, focus, true),
+    }
+}
+
+/// Finds the previous visible column in the focused row.
+///
+/// Example: focus col 2 with col 1 visible -> focus col 1.
+fn previous_visible_agent_column(
+    rows: &[data::AgentRowViewData],
+    focus: data::AgentFocusViewData,
+) -> Option<data::AgentFocusViewData> {
+    let row = rows.get(focus.row_index)?;
+    (0..focus.column_index)
+        .rev()
+        .find(|column_index| {
+            row.columns
+                .get(*column_index)
+                .is_some_and(|column| !column.collapsed)
+        })
+        .map(|column_index| data::AgentFocusViewData {
+            row_index: focus.row_index,
+            column_index,
+        })
+}
+
+/// Finds the next visible column in the focused row.
+///
+/// Example: focus col 0 with col 1 visible -> focus col 1.
+fn next_visible_agent_column(
+    rows: &[data::AgentRowViewData],
+    focus: data::AgentFocusViewData,
+) -> Option<data::AgentFocusViewData> {
+    let row = rows.get(focus.row_index)?;
+    ((focus.column_index + 1)..row.columns.len())
+        .find(|column_index| {
+            row.columns
+                .get(*column_index)
+                .is_some_and(|column| !column.collapsed)
+        })
+        .map(|column_index| data::AgentFocusViewData {
+            row_index: focus.row_index,
+            column_index,
+        })
+}
+
+/// Finds a visible cell in a neighboring visible row.
+///
+/// Example: `down` from row 0 col 2 -> row 1 col 2, or the nearest visible column.
+fn visible_agent_row_focus(
+    rows: &[data::AgentRowViewData],
+    focus: data::AgentFocusViewData,
+    forward: bool,
+) -> Option<data::AgentFocusViewData> {
+    let range: Box<dyn Iterator<Item = usize>> = if forward {
+        Box::new((focus.row_index + 1)..rows.len())
+    } else {
+        Box::new((0..focus.row_index).rev())
+    };
+    for row_index in range {
+        let Some(row) = rows.get(row_index).filter(|row| !row.collapsed) else {
+            continue;
+        };
+        if let Some(column_index) = nearest_visible_agent_column(row, focus.column_index) {
+            return Some(data::AgentFocusViewData {
+                row_index,
+                column_index,
+            });
+        }
+    }
+    None
+}
+
+/// Finds the visible column nearest to the preferred column index.
+///
+/// Example: preferred col 3 in a two-column row -> visible col 1.
+fn nearest_visible_agent_column(
+    row: &data::AgentRowViewData,
+    preferred_column_index: usize,
+) -> Option<usize> {
+    if row
+        .columns
+        .get(preferred_column_index)
+        .is_some_and(|column| !column.collapsed)
+    {
+        return Some(preferred_column_index);
+    }
+    let mut best = None;
+    let mut best_distance = usize::MAX;
+    for (column_index, column) in row.columns.iter().enumerate() {
+        if column.collapsed {
+            continue;
+        }
+        let distance = column_index.abs_diff(preferred_column_index);
+        if distance < best_distance {
+            best = Some(column_index);
+            best_distance = distance;
+        }
+    }
+    best
+}
+
+/// Creates a stable-enough Agent column id for persisted UI layout.
+fn new_agent_column_id(index: usize) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    format!("col-{now:x}-{index:x}")
 }
