@@ -99,6 +99,8 @@ fn chinese_text(source: &'static str) -> &'static str {
         "Confirm Delete" => "确认删除",
         "Close Workspace" => "关闭工作区",
         "Add Subagent" => "添加子 Agent",
+        "Close Agent Column" => "关闭 Agent 列",
+        "Close Agent Row" => "关闭 Agent 行",
         "Restart Agent" => "重启 Agent",
         "Switch Agent" => "切换 Agent",
         "Switch Theme" => "切换主题",
@@ -197,6 +199,26 @@ fn chinese_text(source: &'static str) -> &'static str {
         "Max FPS" => "最大 FPS",
         "Caps application-scheduled repaint requests." => "限制应用主动请求重绘的频率。",
         "Agent" => "Agent",
+        "Md" => "Markdown",
+        "Add row" => "添加行",
+        "Add col" => "添加列",
+        "Close row" => "关闭行",
+        "Close col" => "关闭列",
+        "Collapse col" => "折叠列",
+        "Collapse other cols" => "折叠其他列",
+        "Collapse row" => "折叠行",
+        "Collapse other rows" => "折叠其他行",
+        "Close Agent column?" => "关闭 Agent 列？",
+        "Close Agent row?" => "关闭 Agent 行？",
+        "Close Column" => "关闭列",
+        "Close Row" => "关闭行",
+        "This closes the column and deletes {count} agent(s) in it." => {
+            "这会关闭该列，并删除其中 {count} 个 Agent。"
+        }
+        "This closes the row and deletes {count} agent(s) in it." => {
+            "这会关闭该行，并删除其中 {count} 个 Agent。"
+        }
+        "No agent tab." => "没有 Agent 标签。",
         "Auto go after idle minutes" => "空闲后自动 go 的分钟数",
         "Sends go once when a Busy agent has no new output." => {
             "当 Busy 状态 Agent 没有新输出时自动发送一次 go。"
@@ -612,6 +634,8 @@ fn japanese_text(source: &'static str) -> &'static str {
         "Confirm Delete" => "削除の確認",
         "Close Workspace" => "ワークスペースを閉じる",
         "Add Subagent" => "サブ Agent を追加",
+        "Close Agent Column" => "Agent 列を閉じる",
+        "Close Agent Row" => "Agent 行を閉じる",
         "Restart Agent" => "Agent を再起動",
         "Switch Agent" => "Agent を切り替え",
         "Switch Theme" => "テーマを切り替え",
@@ -712,6 +736,26 @@ fn japanese_text(source: &'static str) -> &'static str {
             "アプリが要求する再描画頻度を制限します。"
         }
         "Agent" => "Agent",
+        "Md" => "Markdown",
+        "Add row" => "行を追加",
+        "Add col" => "列を追加",
+        "Close row" => "行を閉じる",
+        "Close col" => "列を閉じる",
+        "Collapse col" => "列を折りたたむ",
+        "Collapse other cols" => "他の列を折りたたむ",
+        "Collapse row" => "行を折りたたむ",
+        "Collapse other rows" => "他の行を折りたたむ",
+        "Close Agent column?" => "Agent 列を閉じますか？",
+        "Close Agent row?" => "Agent 行を閉じますか？",
+        "Close Column" => "列を閉じる",
+        "Close Row" => "行を閉じる",
+        "This closes the column and deletes {count} agent(s) in it." => {
+            "この列を閉じ、中の Agent {count} 件を削除します。"
+        }
+        "This closes the row and deletes {count} agent(s) in it." => {
+            "この行を閉じ、中の Agent {count} 件を削除します。"
+        }
+        "No agent tab." => "Agent タブがありません。",
         "Auto go after idle minutes" => "アイドル後に自動 go する分数",
         "Sends go once when a Busy agent has no new output." => {
             "Busy の Agent に新しい出力がないとき、一度だけ go を送信します。"
