@@ -24,12 +24,12 @@ pub(super) fn workspace_mode_tabs(
     ui.horizontal(|ui| {
         for (label, mode, active) in [
             (
-                "Agent",
+                i18n::text(language, "Agent"),
                 CenterMode::Agent,
                 current_mode == CenterMode::Agent,
             ),
             (
-                "Md",
+                i18n::text(language, "Md"),
                 markdown_tab_mode(current_mode),
                 matches!(current_mode, CenterMode::Editor | CenterMode::Preview),
             ),
