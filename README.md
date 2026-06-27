@@ -54,6 +54,8 @@ Switching workspaces swaps the entire bundle. A terminal, agent session, selecte
 
 The agent surface embeds a real terminal backend and launches the selected coding agent from the workspace root by default. It supports resumable sessions, subagents, translated input drafts, quick replies, status hooks, and activity-aware UI state.
 
+Agent sessions can be arranged as a visible grid. A workspace starts as one row with one column, and additional rows or columns can be added from the Agent surface context menu. Each column owns its own agent tabs and add-tab control. Rows and columns can be resized with splitters, folded, restored, or closed, and the focused cell receives keyboard input. `Ctrl+Arrow` moves focus across visible columns and rows without sending the arrow key into the agent terminal.
+
 Each agent tab can carry its own optional launch settings, including model, Codex model provider, effort, fast mode where supported, and work directory. Work directory overrides are agent-scoped and persisted with the workspace. They can be typed directly or filled from a folder picker, and an empty value falls back to the workspace root. The child process is launched in that directory instead of passing a directory flag through the agent CLI, so Codex and Claude use the same behavior.
 
 Codex status hooks feed the workspace activity state directly into the app through the local hook socket. This avoids polling the status file during active sessions while keeping the persisted file as a startup fallback.
@@ -100,6 +102,8 @@ Inside the embedded Helix surface, `Alt+D` and `Cmd+D` can send the current `fil
 ### Keep A Workspace Shell
 
 Each workspace has a persistent terminal separate from the agent. It stays rooted in the workspace and can be left and resumed like any other workspace surface.
+
+`F11` toggles an app fullscreen mode that hides the workspace rail, outline, and top mode bar while keeping the active center surface and bottom status bar visible.
 
 ### Attach Local Tools
 
@@ -153,7 +157,7 @@ The format is deliberately plain Markdown so it remains readable without `gsdv`.
 
 The app stores runtime state under `~/.gsdv`: workspace metadata, recent documents, favorites, settings, agent status, notifications, reviewer scripts, and extra tools.
 
-Network proxy settings can be applied to newly launched agents, terminals, Helix, and scripts. This keeps external process behavior aligned with the app environment.
+Network proxy settings can be applied to newly launched agents, terminals, Helix, and scripts. The proxy page keeps saved values separate from the enable switch, so a proxy can be turned off without clearing the URL and `no_proxy` fields.
 
 The hook endpoint is a Unix domain socket on Linux and macOS, and a named pipe on Windows. Messages use a small length-prefixed frame with a `key:data` payload so the same channel can carry agent status updates, Helix cursor-location actions, and future local integrations.
 
