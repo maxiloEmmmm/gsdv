@@ -2018,7 +2018,9 @@ impl GsdvGuiApp {
         }
 
         let screen = ctx.screen_rect();
-        let rail_width = if self.rail_collapsed {
+        let rail_width = if self.app_fullscreen {
+            0.0
+        } else if self.rail_collapsed {
             COMPACT_WORKSPACE_RAIL_WIDTH
         } else {
             WORKSPACE_RAIL_WIDTH
@@ -2055,7 +2057,9 @@ impl GsdvGuiApp {
         }
 
         let screen = ctx.screen_rect();
-        let rail_width = if self.rail_collapsed {
+        let rail_width = if self.app_fullscreen {
+            0.0
+        } else if self.rail_collapsed {
             COMPACT_WORKSPACE_RAIL_WIDTH
         } else {
             WORKSPACE_RAIL_WIDTH
@@ -2092,7 +2096,9 @@ impl GsdvGuiApp {
         }
 
         let screen = ctx.screen_rect();
-        let rail_width = if self.rail_collapsed {
+        let rail_width = if self.app_fullscreen {
+            0.0
+        } else if self.rail_collapsed {
             COMPACT_WORKSPACE_RAIL_WIDTH
         } else {
             WORKSPACE_RAIL_WIDTH
