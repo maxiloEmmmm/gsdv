@@ -59,7 +59,7 @@ impl GsdvGuiApp {
         self.suppress_default_agent_input = true;
         match command {
             UiCommand::CloseTopLayer => self.close_top_keyboard_layer(),
-            UiCommand::ToggleAppFullscreen => self.toggle_app_fullscreen(),
+            UiCommand::ToggleAppFullscreen => self.toggle_app_fullscreen(ctx),
             UiCommand::MoveAgentFocus(direction) => {
                 self.move_agent_focus(self.active_workspace, direction)
             }
@@ -108,8 +108,9 @@ impl GsdvGuiApp {
     }
 
     /// Toggles app chrome visibility for focused center work.
-    pub(super) fn toggle_app_fullscreen(&mut self) {
+    pub(super) fn toggle_app_fullscreen(&mut self, ctx: &egui::Context) {
         self.app_fullscreen = !self.app_fullscreen;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(!self.app_fullscreen));
         self.request_app_repaint();
     }
 
