@@ -917,13 +917,13 @@ impl GsdvGuiApp {
             } else {
                 StripBuilder::new(ui)
                     .clip(true)
-                    .size(Size::exact(30.0))
+                    .size(Size::exact(36.0))
                     .size(Size::remainder())
                     .vertical(|mut strip| {
                         strip.strip(|builder| {
                             builder
                                 .size(Size::remainder())
-                                .size(Size::exact(392.0))
+                                .size(Size::exact(334.0))
                                 .horizontal(|mut strip| {
                                     strip.cell(|ui| {
                                         agent_tab_action = workspace_mode_tabs(
@@ -942,16 +942,18 @@ impl GsdvGuiApp {
                                         );
                                     });
                                     strip.cell(|ui| {
-                                        ui.horizontal(|ui| {
-                                            if rest_entry_button(
-                                                ui,
-                                                self.runtime_settings.pomodoro_enabled,
-                                                self.app_language,
-                                            )
-                                            .clicked()
-                                            {
-                                                self.pomodoro.start_resting(Instant::now());
-                                                self.push_pomodoro_notification(
+                                        ui.with_layout(
+                                            Layout::left_to_right(Align::Center),
+                                            |ui| {
+                                                if rest_entry_button(
+                                                    ui,
+                                                    self.runtime_settings.pomodoro_enabled,
+                                                    self.app_language,
+                                                )
+                                                .clicked()
+                                                {
+                                                    self.pomodoro.start_resting(Instant::now());
+                                                    self.push_pomodoro_notification(
                                                     i18n::text_with_arg(
                                                         self.app_language,
                                                         "Manual rest started for {minutes} minutes",
@@ -961,34 +963,39 @@ impl GsdvGuiApp {
                                                             .to_string(),
                                                     ),
                                                 );
-                                                self.request_app_repaint();
-                                            }
-                                            if work_entry_button(
-                                                ui,
-                                                self.runtime_settings.pomodoro_enabled
-                                                    && self.pomodoro.phase
-                                                        != PomodoroPhase::Working,
-                                                self.app_language,
-                                            )
-                                            .clicked()
-                                            {
-                                                self.pomodoro.start_working(Instant::now());
-                                                self.push_pomodoro_notification(
-                                                    i18n::text_with_arg(
-                                                        self.app_language,
-                                                        "Starting work for {minutes} minutes",
-                                                        "{minutes}",
-                                                        self.runtime_settings
-                                                            .pomodoro_work_minutes
-                                                            .to_string(),
-                                                    ),
-                                                );
-                                                self.request_app_repaint();
-                                            }
-                                            if help_entry_button(ui, self.app_language).clicked() {
-                                                self.set_active_app_dialog(Some(AppDialog::Help));
-                                            }
-                                        });
+                                                    self.request_app_repaint();
+                                                }
+                                                if work_entry_button(
+                                                    ui,
+                                                    self.runtime_settings.pomodoro_enabled
+                                                        && self.pomodoro.phase
+                                                            != PomodoroPhase::Working,
+                                                    self.app_language,
+                                                )
+                                                .clicked()
+                                                {
+                                                    self.pomodoro.start_working(Instant::now());
+                                                    self.push_pomodoro_notification(
+                                                        i18n::text_with_arg(
+                                                            self.app_language,
+                                                            "Starting work for {minutes} minutes",
+                                                            "{minutes}",
+                                                            self.runtime_settings
+                                                                .pomodoro_work_minutes
+                                                                .to_string(),
+                                                        ),
+                                                    );
+                                                    self.request_app_repaint();
+                                                }
+                                                if help_entry_button(ui, self.app_language)
+                                                    .clicked()
+                                                {
+                                                    self.set_active_app_dialog(Some(
+                                                        AppDialog::Help,
+                                                    ));
+                                                }
+                                            },
+                                        );
                                     });
                                 });
                         });
