@@ -59,6 +59,10 @@ impl GsdvGuiApp {
         self.suppress_default_agent_input = true;
         match command {
             UiCommand::CloseTopLayer => self.close_top_keyboard_layer(),
+            UiCommand::ToggleAppFullscreen => self.toggle_app_fullscreen(),
+            UiCommand::MoveAgentFocus(direction) => {
+                self.move_agent_focus(self.active_workspace, direction)
+            }
             UiCommand::OpenHelp => self.set_active_app_dialog(Some(AppDialog::Help)),
             UiCommand::SaveDocument => {
                 if self.workflow_task_surface_visible() {
@@ -101,6 +105,12 @@ impl GsdvGuiApp {
             UiCommand::SelectAgentSlot(slot_index) => self.select_agent_slot_by_index(slot_index),
             UiCommand::Reviewer(command) => self.dispatch_reviewer_command(ctx, command),
         }
+    }
+
+    /// Toggles app chrome visibility for focused center work.
+    pub(super) fn toggle_app_fullscreen(&mut self) {
+        self.app_fullscreen = !self.app_fullscreen;
+        self.request_app_repaint();
     }
 
     pub(super) fn dispatch_reviewer_command(
@@ -533,6 +543,116 @@ impl GsdvGuiApp {
     /// Handles commands requested from the Agent tab context menu.
     pub(super) fn handle_agent_tab_action(&mut self, ctx: &egui::Context, action: AgentTabAction) {
         match action {
+            AgentTabAction::AddSubagentToColumn { column_id } => {
+                let agent_kind = self
+                    .current_workspace()
+                    .map(|workspace| workspace.agent_kind)
+                    .unwrap_or(self.default_agent_kind);
+                self.set_active_app_dialog(Some(AppDialog::AddSubagent {
+                    index: self.active_workspace,
+                    column_id,
+                    name: String::new(),
+                    agent_kind,
+                    agent_model: String::new(),
+                    agent_model_provider: String::new(),
+                    model_providers: data::load_codex_model_provider_names(),
+                    agent_effort: String::new(),
+                    agent_fast_mode: None,
+                    agent_work_dir: String::new(),
+                    session_id: String::new(),
+                }));
+            }
+            AgentTabAction::AddRow { row_index } => {
+                let Some(column_id) = self.add_agent_row(self.active_workspace, row_index) else {
+                    return;
+                };
+                let agent_kind = self
+                    .current_workspace()
+                    .map(|workspace| workspace.agent_kind)
+                    .unwrap_or(self.default_agent_kind);
+                self.set_active_app_dialog(Some(AppDialog::AddSubagent {
+                    index: self.active_workspace,
+                    column_id,
+                    name: String::new(),
+                    agent_kind,
+                    agent_model: String::new(),
+                    agent_model_provider: String::new(),
+                    model_providers: data::load_codex_model_provider_names(),
+                    agent_effort: String::new(),
+                    agent_fast_mode: None,
+                    agent_work_dir: String::new(),
+                    session_id: String::new(),
+                }));
+            }
+            AgentTabAction::AddColumn { row_index } => {
+                let Some(column_id) = self.add_agent_column(self.active_workspace, row_index)
+                else {
+                    return;
+                };
+                let agent_kind = self
+                    .current_workspace()
+                    .map(|workspace| workspace.agent_kind)
+                    .unwrap_or(self.default_agent_kind);
+                self.set_active_app_dialog(Some(AppDialog::AddSubagent {
+                    index: self.active_workspace,
+                    column_id,
+                    name: String::new(),
+                    agent_kind,
+                    agent_model: String::new(),
+                    agent_model_provider: String::new(),
+                    model_providers: data::load_codex_model_provider_names(),
+                    agent_effort: String::new(),
+                    agent_fast_mode: None,
+                    agent_work_dir: String::new(),
+                    session_id: String::new(),
+                }));
+            }
+            AgentTabAction::CloseRow { row_index } => {
+                self.set_active_app_dialog(Some(AppDialog::CloseAgentRow {
+                    index: self.active_workspace,
+                    row_index,
+                }));
+            }
+            AgentTabAction::CloseColumn {
+                row_index,
+                column_index,
+            } => {
+                let Some(column_id) = self
+                    .current_workspace()
+                    .and_then(|workspace| workspace.agent_rows.get(row_index))
+                    .and_then(|row| row.columns.get(column_index))
+                    .map(|column| column.id.clone())
+                else {
+                    return;
+                };
+                self.set_active_app_dialog(Some(AppDialog::CloseAgentColumn {
+                    index: self.active_workspace,
+                    column_id,
+                }));
+            }
+            AgentTabAction::CollapseRow { row_index } => {
+                self.set_agent_row_collapsed(self.active_workspace, row_index, true);
+            }
+            AgentTabAction::CollapseOtherRows { row_index } => {
+                self.collapse_other_agent_rows(self.active_workspace, row_index);
+            }
+            AgentTabAction::CollapseColumn {
+                row_index,
+                column_index,
+            } => {
+                self.set_agent_column_collapsed(
+                    self.active_workspace,
+                    row_index,
+                    column_index,
+                    true,
+                );
+            }
+            AgentTabAction::CollapseOtherColumns {
+                row_index,
+                column_index,
+            } => {
+                self.collapse_other_agent_columns(self.active_workspace, row_index, column_index);
+            }
             AgentTabAction::Restart(slot) => {
                 self.set_active_agent_slot(self.active_workspace, slot);
                 self.set_active_app_dialog(Some(AppDialog::RestartAgent {
@@ -598,17 +718,17 @@ impl GsdvGuiApp {
                     self.persist_workspaces();
                 }
             }
-            AgentTabAction::MoveSubagentLeft(id) => {
-                self.move_subagent_left(ctx, self.active_workspace, &id);
+            AgentTabAction::MoveSubagentLeft { column_id, id, .. } => {
+                self.move_subagent_left(ctx, self.active_workspace, &column_id, &id);
             }
-            AgentTabAction::MoveSubagentRight(id) => {
-                self.move_subagent_right(ctx, self.active_workspace, &id);
+            AgentTabAction::MoveSubagentRight { column_id, id, .. } => {
+                self.move_subagent_right(ctx, self.active_workspace, &column_id, &id);
             }
-            AgentTabAction::MoveSubagentToHead(id) => {
-                self.move_subagent_to_head(ctx, self.active_workspace, &id);
+            AgentTabAction::MoveSubagentToHead { column_id, id, .. } => {
+                self.move_subagent_to_head(ctx, self.active_workspace, &column_id, &id);
             }
-            AgentTabAction::MoveSubagentToTail(id) => {
-                self.move_subagent_to_tail(ctx, self.active_workspace, &id);
+            AgentTabAction::MoveSubagentToTail { column_id, id, .. } => {
+                self.move_subagent_to_tail(ctx, self.active_workspace, &column_id, &id);
             }
             AgentTabAction::MoveSubagentToWorkspace { id, target_index } => {
                 self.move_subagent_to_workspace(ctx, self.active_workspace, &id, target_index);

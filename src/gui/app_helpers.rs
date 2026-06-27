@@ -77,7 +77,7 @@ pub(super) fn stabilize_text_edit_ime_output(
 pub(super) fn codex_auth_client(settings: &NetworkSettings) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder();
     let proxy = settings.proxy.trim();
-    if !proxy.is_empty() {
+    if settings.proxy_enabled && !proxy.is_empty() {
         let no_proxy = reqwest::NoProxy::from_string(&settings.effective_no_proxy());
         let proxy = reqwest::Proxy::all(proxy)
             .map_err(|error| format!("invalid Codex auth proxy: {error}"))?

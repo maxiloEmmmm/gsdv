@@ -102,6 +102,10 @@ pub struct WorkspaceViewData {
     pub activity: WorkspaceActivity,
     /// Extra agent sessions that belong to this workspace.
     pub subagents: Vec<SubagentViewData>,
+    /// Visible Agent rows owned by this workspace.
+    pub agent_rows: Vec<AgentRowViewData>,
+    /// Focused Agent row and column used for keyboard routing.
+    pub agent_focus: Option<AgentFocusViewData>,
     pub center_mode: CenterMode,
     pub previous_center_mode: CenterMode,
     pub route: Route,
@@ -118,6 +122,65 @@ pub struct WorkspaceViewData {
     pub markdown_outline_collapsed: bool,
     /// Workspace-scoped freeform memo shown in the notification drawer.
     pub memo: String,
+}
+
+/// Persisted and runtime metadata for one visible Agent row.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct AgentRowViewData {
+    /// Agent columns displayed inside this row.
+    #[serde(default)]
+    pub columns: Vec<AgentColumnViewData>,
+    /// Relative height used by the draggable multi-row layout.
+    #[serde(default = "default_agent_row_height_weight")]
+    pub height_weight: f32,
+    /// Whether this row is collapsed into a restore strip.
+    #[serde(default)]
+    pub collapsed: bool,
+}
+
+/// Persisted and runtime metadata for one visible Agent column.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct AgentColumnViewData {
+    /// Stable id used by UI state, splitters, and dialog routing.
+    pub id: String,
+    /// Agent tabs displayed inside this column.
+    #[serde(default)]
+    pub tabs: Vec<AgentColumnSlot>,
+    /// The currently selected tab in this column.
+    #[serde(default)]
+    pub active_slot: AgentColumnSlot,
+    /// Relative width used by the draggable multi-column layout.
+    #[serde(default = "default_agent_column_width_weight")]
+    pub width_weight: f32,
+    /// Whether this column is collapsed into a restore strip.
+    #[serde(default)]
+    pub collapsed: bool,
+}
+
+/// Focused Agent grid cell for keyboard and active-agent routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct AgentFocusViewData {
+    /// Zero-based row index.
+    pub row_index: usize,
+    /// Zero-based column index inside the row.
+    pub column_index: usize,
+}
+
+/// Stored identifier for a main-agent or subagent tab in one column.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentColumnSlot {
+    /// The workspace's built-in primary Agent.
+    Main,
+    /// A named subagent stored in the workspace sidecar.
+    Subagent(String),
+}
+
+impl Default for AgentColumnSlot {
+    /// Uses the built-in Agent when older sidecar data has no active tab.
+    fn default() -> Self {
+        Self::Main
+    }
 }
 
 /// 单个 workspace 内部的 Markdown 最近访问记录。
@@ -231,17 +294,54 @@ pub enum AppLanguage {
     Japanese,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct NetworkSettings {
+    /// Whether proxy env vars should be injected into child processes.
+    pub proxy_enabled: bool,
     /// Primary proxy URL used for child processes.
-    #[serde(default)]
     pub proxy: String,
     /// Additional no_proxy entries appended after gsdv built-ins.
-    #[serde(default)]
     pub no_proxy: String,
     /// Whether to emit both HTTP(S) and SOCKS proxy env variants.
-    #[serde(default)]
     pub mirror_proxy_protocol: bool,
+}
+
+/// Serialized network settings shape, used to migrate older proxy configs.
+#[derive(Debug, Default, Deserialize)]
+struct NetworkSettingsFile {
+    /// Stored proxy switch; missing in old settings files.
+    #[serde(default)]
+    proxy_enabled: Option<bool>,
+    /// Stored primary proxy URL.
+    #[serde(default)]
+    proxy: String,
+    /// Stored no_proxy additions.
+    #[serde(default)]
+    no_proxy: String,
+    /// Stored protocol mirroring switch.
+    #[serde(default)]
+    mirror_proxy_protocol: bool,
+}
+
+impl<'de> Deserialize<'de> for NetworkSettings {
+    /// Loads network settings and keeps old non-empty proxy configs enabled.
+    ///
+    /// Example: `{ "proxy": "http://127.0.0.1:7890" }` -> enabled proxy.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let file = NetworkSettingsFile::deserialize(deserializer)?;
+        let proxy_enabled = file
+            .proxy_enabled
+            .unwrap_or_else(|| !file.proxy.trim().is_empty());
+        Ok(Self {
+            proxy_enabled,
+            proxy: file.proxy,
+            no_proxy: file.no_proxy,
+            mirror_proxy_protocol: file.mirror_proxy_protocol,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -294,6 +394,16 @@ impl Default for RuntimeSettings {
 /// Returns the default upper bound for application-driven repaint requests.
 fn default_max_frame_rate() -> u16 {
     DEFAULT_MAX_FRAME_RATE
+}
+
+/// Returns the default relative width for one Agent column.
+fn default_agent_column_width_weight() -> f32 {
+    1.0
+}
+
+/// Returns the default relative height for one Agent row.
+fn default_agent_row_height_weight() -> f32 {
+    1.0
 }
 
 /// 返回 Agent Busy 无输出自动继续的默认等待分钟数。
@@ -437,22 +547,23 @@ impl NetworkSettings {
     pub fn env_vars(&self) -> Vec<(String, String)> {
         let mut env = Vec::new();
         let proxy = self.proxy.trim();
-        if !proxy.is_empty() {
-            if proxy_is_socks5(proxy) {
-                env.push(("all_proxy".to_string(), proxy.to_string()));
-                if self.mirror_proxy_protocol {
-                    if let Some(http_proxy) = mirrored_http_proxy(proxy) {
-                        env.push(("http_proxy".to_string(), http_proxy.clone()));
-                        env.push(("https_proxy".to_string(), http_proxy));
-                    }
+        if !self.proxy_enabled || proxy.is_empty() {
+            return env;
+        }
+        if proxy_is_socks5(proxy) {
+            env.push(("all_proxy".to_string(), proxy.to_string()));
+            if self.mirror_proxy_protocol {
+                if let Some(http_proxy) = mirrored_http_proxy(proxy) {
+                    env.push(("http_proxy".to_string(), http_proxy.clone()));
+                    env.push(("https_proxy".to_string(), http_proxy));
                 }
-            } else {
-                env.push(("http_proxy".to_string(), proxy.to_string()));
-                env.push(("https_proxy".to_string(), proxy.to_string()));
-                if self.mirror_proxy_protocol {
-                    if let Some(socks_proxy) = mirrored_socks5_proxy(proxy) {
-                        env.push(("all_proxy".to_string(), socks_proxy));
-                    }
+            }
+        } else {
+            env.push(("http_proxy".to_string(), proxy.to_string()));
+            env.push(("https_proxy".to_string(), proxy.to_string()));
+            if self.mirror_proxy_protocol {
+                if let Some(socks_proxy) = mirrored_socks5_proxy(proxy) {
+                    env.push(("all_proxy".to_string(), socks_proxy));
                 }
             }
         }
@@ -608,6 +719,15 @@ struct SubagentFile {
     /// Subagents that belong to one workspace.
     #[serde(default)]
     subagents: Vec<SubagentViewData>,
+    /// Legacy visible Agent columns for this workspace.
+    #[serde(default)]
+    columns: Vec<AgentColumnViewData>,
+    /// Visible Agent rows for this workspace.
+    #[serde(default)]
+    rows: Vec<AgentRowViewData>,
+    /// Focused Agent row and column.
+    #[serde(default)]
+    focus: Option<AgentFocusViewData>,
 }
 
 /// Sidecar payload for workspace-local outline favorites.
@@ -1200,6 +1320,9 @@ pub fn save_workspace_subagents(workspace: &WorkspaceViewData) {
     }
     let file = SubagentFile {
         subagents: workspace.subagents.clone(),
+        columns: Vec::new(),
+        rows: workspace.agent_rows.clone(),
+        focus: workspace.agent_focus,
     };
     if let Ok(content) = serde_json::to_string_pretty(&file) {
         let _ = fs::write(path, content);
@@ -1337,20 +1460,37 @@ pub fn new_subagent(
 }
 
 /// Loads subagents persisted in the workspace sidecar.
-fn load_workspace_subagents(
+fn load_workspace_agent_layout(
     workspace_path: &Path,
     default_agent_kind: AgentKind,
-) -> Vec<SubagentViewData> {
+) -> (
+    Vec<SubagentViewData>,
+    Vec<AgentRowViewData>,
+    Option<AgentFocusViewData>,
+) {
     let Some(path) = workspace_subagents_path(workspace_path) else {
-        return Vec::new();
+        return (
+            Vec::new(),
+            default_agent_rows(&[]),
+            Some(default_agent_focus()),
+        );
     };
     let Ok(content) = fs::read_to_string(path) else {
-        return Vec::new();
+        return (
+            Vec::new(),
+            default_agent_rows(&[]),
+            Some(default_agent_focus()),
+        );
     };
     let Ok(file) = serde_json::from_str::<SubagentFile>(&content) else {
-        return Vec::new();
+        return (
+            Vec::new(),
+            default_agent_rows(&[]),
+            Some(default_agent_focus()),
+        );
     };
-    file.subagents
+    let subagents = file
+        .subagents
         .into_iter()
         .filter(|subagent| !subagent.id.trim().is_empty() && !subagent.name.trim().is_empty())
         .map(|mut subagent| {
@@ -1373,7 +1513,204 @@ fn load_workspace_subagents(
             subagent.activity = WorkspaceActivity::Unknown;
             subagent
         })
-        .collect()
+        .collect::<Vec<_>>();
+    let rows = if file.rows.is_empty() {
+        vec![AgentRowViewData {
+            columns: file.columns,
+            height_weight: default_agent_row_height_weight(),
+            collapsed: false,
+        }]
+    } else {
+        file.rows
+    };
+    let (rows, focus) = normalize_agent_rows(rows, file.focus, &subagents);
+    (subagents, rows, focus)
+}
+
+/// Builds the compatibility single-row Agent layout for legacy sidecars.
+fn default_agent_rows(subagents: &[SubagentViewData]) -> Vec<AgentRowViewData> {
+    let mut tabs = Vec::with_capacity(subagents.len() + 1);
+    tabs.push(AgentColumnSlot::Main);
+    tabs.extend(
+        subagents
+            .iter()
+            .map(|subagent| AgentColumnSlot::Subagent(subagent.id.clone())),
+    );
+    vec![AgentRowViewData {
+        columns: vec![AgentColumnViewData {
+            id: "main".to_string(),
+            tabs,
+            active_slot: AgentColumnSlot::Main,
+            width_weight: default_agent_column_width_weight(),
+            collapsed: false,
+        }],
+        height_weight: default_agent_row_height_weight(),
+        collapsed: false,
+    }]
+}
+
+/// Returns the default focused Agent cell.
+fn default_agent_focus() -> AgentFocusViewData {
+    AgentFocusViewData {
+        row_index: 0,
+        column_index: 0,
+    }
+}
+
+/// Normalizes Agent rows after loading or before saving workspace state.
+pub fn normalize_agent_rows(
+    rows: Vec<AgentRowViewData>,
+    focus: Option<AgentFocusViewData>,
+    subagents: &[SubagentViewData],
+) -> (Vec<AgentRowViewData>, Option<AgentFocusViewData>) {
+    let valid_subagents = subagents
+        .iter()
+        .map(|subagent| subagent.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut seen_column_ids = BTreeSet::new();
+    let mut seen_slots = HashSet::new();
+    let mut normalized_rows = Vec::new();
+    for (row_index, mut row) in rows.into_iter().enumerate() {
+        if !row.height_weight.is_finite() || row.height_weight <= 0.0 {
+            row.height_weight = default_agent_row_height_weight();
+        }
+        let mut columns = Vec::new();
+        for (column_index, mut column) in row.columns.into_iter().enumerate() {
+            if column.id.trim().is_empty() || !seen_column_ids.insert(column.id.clone()) {
+                column.id = format!("col-{}-{:x}-{:x}", now_ms(), row_index, column_index);
+            }
+            column.tabs.retain(|slot| match slot {
+                AgentColumnSlot::Main => true,
+                AgentColumnSlot::Subagent(id) => valid_subagents.contains(id.as_str()),
+            });
+            column.tabs.retain(|slot| seen_slots.insert(slot.clone()));
+            if !column.tabs.contains(&column.active_slot) {
+                column.active_slot = column
+                    .tabs
+                    .first()
+                    .cloned()
+                    .unwrap_or(AgentColumnSlot::Main);
+            }
+            if !column.width_weight.is_finite() || column.width_weight <= 0.0 {
+                column.width_weight = default_agent_column_width_weight();
+            }
+            columns.push(column);
+        }
+        if row_index == 0 && columns.is_empty() {
+            columns.push(default_agent_rows(&[]).remove(0).columns.remove(0));
+        }
+        normalize_agent_column_widths(&mut columns);
+        row.columns = columns;
+        if !row.columns.is_empty() || row_index == 0 {
+            normalized_rows.push(row);
+        }
+    }
+    if normalized_rows.is_empty() {
+        normalized_rows = default_agent_rows(subagents);
+        seen_slots = normalized_rows
+            .iter()
+            .flat_map(|row| row.columns.iter())
+            .flat_map(|column| column.tabs.iter().cloned())
+            .collect();
+    }
+    for subagent in subagents {
+        let slot = AgentColumnSlot::Subagent(subagent.id.clone());
+        if seen_slots.insert(slot.clone()) {
+            normalized_rows[0].columns[0].tabs.push(slot);
+        }
+    }
+    if seen_slots.insert(AgentColumnSlot::Main) {
+        normalized_rows[0].columns[0]
+            .tabs
+            .insert(0, AgentColumnSlot::Main);
+    }
+    normalize_agent_column_widths(&mut normalized_rows[0].columns);
+    normalize_agent_row_heights(&mut normalized_rows);
+    let focus = normalize_agent_focus_for_rows(focus, &normalized_rows);
+    (normalized_rows, focus)
+}
+
+/// Keeps Agent column width weights positive and normalized.
+pub fn normalize_agent_column_widths(columns: &mut [AgentColumnViewData]) {
+    if columns.is_empty() {
+        return;
+    }
+    for column in columns.iter_mut() {
+        if !column.width_weight.is_finite() || column.width_weight <= 0.0 {
+            column.width_weight = default_agent_column_width_weight();
+        }
+    }
+    let total = columns
+        .iter()
+        .map(|column| column.width_weight)
+        .sum::<f32>();
+    if total <= f32::EPSILON {
+        let weight = default_agent_column_width_weight();
+        for column in columns {
+            column.width_weight = weight;
+        }
+        return;
+    }
+    for column in columns {
+        column.width_weight /= total;
+    }
+}
+
+/// Keeps Agent row height weights positive and normalized.
+pub fn normalize_agent_row_heights(rows: &mut [AgentRowViewData]) {
+    if rows.is_empty() {
+        return;
+    }
+    for row in rows.iter_mut() {
+        if !row.height_weight.is_finite() || row.height_weight <= 0.0 {
+            row.height_weight = default_agent_row_height_weight();
+        }
+    }
+    let total = rows.iter().map(|row| row.height_weight).sum::<f32>();
+    if total <= f32::EPSILON {
+        for row in rows {
+            row.height_weight = default_agent_row_height_weight();
+        }
+        return;
+    }
+    for row in rows {
+        row.height_weight /= total;
+    }
+}
+
+/// Clamps focus to a visible Agent cell, returning none when all cells are folded.
+pub fn normalize_agent_focus_for_rows(
+    focus: Option<AgentFocusViewData>,
+    rows: &[AgentRowViewData],
+) -> Option<AgentFocusViewData> {
+    if let Some(focus) = focus
+        && rows.get(focus.row_index).is_some_and(|row| !row.collapsed)
+        && rows
+            .get(focus.row_index)
+            .and_then(|row| row.columns.get(focus.column_index))
+            .is_some_and(|column| !column.collapsed)
+    {
+        return Some(focus);
+    }
+    first_visible_agent_focus(rows)
+}
+
+/// Finds the first expanded Agent cell in row-major order.
+pub fn first_visible_agent_focus(rows: &[AgentRowViewData]) -> Option<AgentFocusViewData> {
+    for (row_index, row) in rows.iter().enumerate() {
+        if row.collapsed {
+            continue;
+        }
+        for (column_index, column) in row.columns.iter().enumerate() {
+            if !column.collapsed {
+                return Some(AgentFocusViewData {
+                    row_index,
+                    column_index,
+                });
+            }
+        }
+    }
+    None
 }
 
 /// 读取 workspace 级 outline 收藏。
@@ -1440,8 +1777,10 @@ fn build_workspace(
     let memo = load_workspace_memo(&path);
     let outline_favorites = load_workspace_outline_favorites(&path);
     let recent_markdowns = load_workspace_recent_markdowns(&path);
-    let mut subagents = load_workspace_subagents(&path, agent_kind);
+    let (mut subagents, mut agent_rows, mut agent_focus) =
+        load_workspace_agent_layout(&path, agent_kind);
     refresh_subagent_statuses(&mut subagents, statuses_by_id, statuses_by_session);
+    (agent_rows, agent_focus) = normalize_agent_rows(agent_rows, agent_focus, &subagents);
 
     WorkspaceViewData {
         name: workspace_name(&path),
@@ -1459,6 +1798,8 @@ fn build_workspace(
         session_id,
         activity,
         subagents,
+        agent_rows,
+        agent_focus,
         center_mode: stored.center_mode.unwrap_or(CenterMode::Agent),
         previous_center_mode: stored.center_mode.unwrap_or(CenterMode::Agent),
         route: Route::Workspace,
@@ -2044,7 +2385,8 @@ fn prune_agent_statuses_to_store_sessions(store: &StoreFile) {
         .map(str::to_string)
         .chain(store.workspaces.iter().flat_map(|workspace| {
             let path = PathBuf::from(&workspace.path);
-            load_workspace_subagents(&path, workspace.agent_kind.unwrap_or_default())
+            load_workspace_agent_layout(&path, workspace.agent_kind.unwrap_or_default())
+                .0
                 .into_iter()
                 .filter_map(|subagent| subagent.session_id)
         }))

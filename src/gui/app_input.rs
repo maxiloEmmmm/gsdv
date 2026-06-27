@@ -226,6 +226,9 @@ fn input_runtime_workspace_route_action(
     let input = &request.input;
     match request.center_mode {
         CenterMode::Agent | CenterMode::Terminal => {
+            if let Some(direction) = read_agent_focus_move(input) {
+                return InputRuntimeKeyboardAction::Command(UiCommand::MoveAgentFocus(direction));
+            }
             if request.center_mode == CenterMode::Agent
                 && extra_tools_shortcut_pressed(input)
                 && !request.workspace_terminal_open
@@ -262,6 +265,28 @@ fn input_runtime_workspace_route_action(
                 .unwrap_or(InputRuntimeKeyboardAction::None)
         }
     }
+}
+
+/// Reads Ctrl+Arrow focus movement for the Agent grid.
+///
+/// Example: `Ctrl+Right` -> `Some(AgentFocusMove::Right)`.
+fn read_agent_focus_move(input: &egui::InputState) -> Option<AgentFocusMove> {
+    if !input.modifiers.ctrl {
+        return None;
+    }
+    if input.key_pressed(egui::Key::ArrowLeft) {
+        return Some(AgentFocusMove::Left);
+    }
+    if input.key_pressed(egui::Key::ArrowRight) {
+        return Some(AgentFocusMove::Right);
+    }
+    if input.key_pressed(egui::Key::ArrowUp) {
+        return Some(AgentFocusMove::Up);
+    }
+    if input.key_pressed(egui::Key::ArrowDown) {
+        return Some(AgentFocusMove::Down);
+    }
+    None
 }
 
 /// 解析 reviewer route 内部输入。

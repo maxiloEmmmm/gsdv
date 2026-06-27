@@ -101,8 +101,8 @@ pub(super) fn agent_slot_tab_button(
 ) -> egui::Response {
     let (dot, _) = activity_style(activity);
     let response = ui.add_sized(
-        [label.chars().count().max(4) as f32 * 8.0 + 32.0, 24.0],
-        Button::new(RichText::new(label).color(if active {
+        [label.chars().count().max(4) as f32 * 8.0 + 32.0, 30.0],
+        Button::new(RichText::new(label).size(13.0).color(if active {
             theme::primary()
         } else {
             theme::text()
@@ -123,7 +123,7 @@ pub(super) fn agent_slot_tab_button(
     );
     let center = egui::pos2(response.rect.left() + 10.0, response.rect.center().y);
     paint_activity_dot(ui, center, dot, activity, true, repaint_controller);
-    response
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// 绘制 main/subagent 槽位右键菜单，动作始终绑定被点击的槽位。
