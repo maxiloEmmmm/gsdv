@@ -683,16 +683,13 @@ pub(super) fn markdown_name_suggestion_button(ui: &mut Ui, text: &str) -> egui::
 }
 
 pub(super) fn help_entry_button(ui: &mut Ui, language: AppLanguage) -> egui::Response {
+    let text = i18n::text(language, "Help");
     ui.add_sized(
-        [104.0, 28.0],
-        Button::new(
-            RichText::new(i18n::text(language, "Help"))
-                .strong()
-                .color(theme::primary()),
-        )
-        .fill(theme::primary_soft())
-        .stroke(Stroke::new(1.0, theme::primary_border()))
-        .corner_radius(CornerRadius::same(theme::RADIUS_SM)),
+        [action_button_width(text, 86.0, 132.0), 28.0],
+        Button::new(RichText::new(text).strong().color(theme::primary()))
+            .fill(theme::primary_soft())
+            .stroke(Stroke::new(1.0, theme::primary_border()))
+            .corner_radius(CornerRadius::same(theme::RADIUS_SM)),
     )
     .on_hover_text(i18n::text(language, "Open keyboard help"))
 }
@@ -703,17 +700,14 @@ pub(super) fn rest_entry_button(
     enabled: bool,
     language: AppLanguage,
 ) -> egui::Response {
+    let text = i18n::text(language, "Rest");
     ui.add_enabled_ui(enabled, |ui| {
         ui.add_sized(
-            [104.0, 28.0],
-            Button::new(
-                RichText::new(i18n::text(language, "Rest"))
-                    .strong()
-                    .color(theme::warning()),
-            )
-            .fill(theme::surface_elevated())
-            .stroke(Stroke::new(1.0, theme::border()))
-            .corner_radius(CornerRadius::same(theme::RADIUS_SM)),
+            [action_button_width(text, 86.0, 132.0), 28.0],
+            Button::new(RichText::new(text).strong().color(theme::warning()))
+                .fill(theme::surface_elevated())
+                .stroke(Stroke::new(1.0, theme::border()))
+                .corner_radius(CornerRadius::same(theme::RADIUS_SM)),
         )
     })
     .inner
@@ -730,17 +724,14 @@ pub(super) fn work_entry_button(
     enabled: bool,
     language: AppLanguage,
 ) -> egui::Response {
+    let text = i18n::text(language, "Work");
     ui.add_enabled_ui(enabled, |ui| {
         ui.add_sized(
-            [104.0, 28.0],
-            Button::new(
-                RichText::new(i18n::text(language, "Work"))
-                    .strong()
-                    .color(theme::primary()),
-            )
-            .fill(theme::surface_elevated())
-            .stroke(Stroke::new(1.0, theme::border()))
-            .corner_radius(CornerRadius::same(theme::RADIUS_SM)),
+            [action_button_width(text, 86.0, 132.0), 28.0],
+            Button::new(RichText::new(text).strong().color(theme::primary()))
+                .fill(theme::surface_elevated())
+                .stroke(Stroke::new(1.0, theme::border()))
+                .corner_radius(CornerRadius::same(theme::RADIUS_SM)),
         )
     })
     .inner

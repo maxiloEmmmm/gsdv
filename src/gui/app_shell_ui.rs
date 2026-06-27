@@ -923,7 +923,7 @@ impl GsdvGuiApp {
                         strip.strip(|builder| {
                             builder
                                 .size(Size::remainder())
-                                .size(Size::exact(334.0))
+                                .size(Size::exact(392.0))
                                 .horizontal(|mut strip| {
                                     strip.cell(|ui| {
                                         agent_tab_action = workspace_mode_tabs(
