@@ -168,6 +168,7 @@ impl GsdvGuiApp {
             active_agent_busy,
             route,
             center_mode,
+            app_fullscreen: self.app_fullscreen,
             active_app_dialog_open,
             extra_tools_open: self.extra_tools.open,
             workflow_quick_dialog_open,
