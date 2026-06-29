@@ -99,6 +99,7 @@ impl GsdvGuiApp {
         let mut start_codex_auth = false;
         let mut outline_action = None;
         let mut open_recent_helix_target = None;
+        let screen = ctx.screen_rect();
 
         egui::Window::new(app_dialog_title(&dialog, self.app_language))
             .order(modal_dialog_order())
@@ -106,6 +107,10 @@ impl GsdvGuiApp {
             .resizable(false)
             .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
             .fixed_size(match dialog {
+                AppDialog::WorkflowQuickModal => Vec2::new(
+                    (screen.width() * 0.8).min(screen.width().max(1.0)).max(1.0),
+                    (screen.height() * 0.8).min(screen.height().max(1.0)).max(1.0),
+                ),
                 AppDialog::RecentMarkdownOutline { .. } => Vec2::new(620.0, 520.0),
                 AppDialog::RecentAgentHelixTargets => Vec2::new(620.0, 420.0),
                 AppDialog::CreateMarkdown { .. }
@@ -146,6 +151,9 @@ impl GsdvGuiApp {
                     .inner_margin(Margin::same(18)),
             )
             .show(ctx, |ui| match dialog.clone() {
+                AppDialog::WorkflowQuickModal => {
+                    self.workflow_quick_modal_surface(ui);
+                }
                 AppDialog::RecentMarkdownOutline { mut nodes } => {
                     let mut action = None;
                     let selected = self
@@ -2307,6 +2315,7 @@ fn app_dialog_title(dialog: &AppDialog, language: AppLanguage) -> &str {
         AppDialog::RecentMarkdownOutline { .. } => "Recent Markdown",
         AppDialog::RecentAgentHelixTargets => "Recent Helix Targets",
         AppDialog::UnsavedSwitch { .. } => "Unsaved Changes",
+        AppDialog::WorkflowQuickModal => "Workflow",
         AppDialog::WorkflowUnsavedSwitch { .. } => "Unsaved Workflow",
         AppDialog::WorkflowAddProject { .. } => "New Workflow Project",
         AppDialog::WorkflowAddTask { .. } => "New Workflow Task",

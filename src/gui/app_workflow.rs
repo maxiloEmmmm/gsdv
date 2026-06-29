@@ -42,6 +42,26 @@ impl GsdvGuiApp {
         self.set_outline_panel_tab(ctx, next_tab);
     }
 
+    /// Toggles the fullscreen workflow quick modal without changing the main center mode.
+    ///
+    /// Example: fullscreen `Alt+Z` -> open modal and restore the last task selection.
+    pub(super) fn toggle_workflow_quick_modal(&mut self, ctx: &egui::Context) {
+        if matches!(
+            self.active_app_dialog(),
+            Some(AppDialog::WorkflowQuickModal)
+        ) {
+            self.set_active_app_dialog(None);
+            return;
+        }
+        self.request_workflow_tree_refresh(ctx, self.active_workspace);
+        if let Some(target) = self.workflow_task_surface_target_to_restore() {
+            self.request_workflow_target(ctx, target);
+        } else if let Some(state) = self.workflow_states.get_mut(self.active_workspace) {
+            state.pending_task_restore_after_load = true;
+        }
+        self.set_active_app_dialog(Some(AppDialog::WorkflowQuickModal));
+    }
+
     /// 切到普通 outline 时显示 Agent surface。
     fn route_outline_tab_to_agent(&mut self) {
         let Some(workspace) = self.current_workspace_mut() else {

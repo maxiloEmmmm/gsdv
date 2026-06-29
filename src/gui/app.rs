@@ -1744,6 +1744,8 @@ struct InputRuntimeRequest {
     active_app_dialog_open: bool,
     /// 外置工具 modal 是否打开。
     extra_tools_open: bool,
+    /// workflow quick modal 是否打开。
+    workflow_quick_dialog_open: bool,
     /// 当前 app modal 是否为 Agent 输入翻译弹窗。
     agent_translation_dialog_open: bool,
     /// reviewer modal dialog 是否打开。
@@ -1998,6 +2000,7 @@ enum AppDialog {
     WorkflowUnsavedSwitch {
         target: WorkflowSelectionTarget,
     },
+    WorkflowQuickModal,
     WorkflowAddTask {
         project_key: String,
         key: String,

@@ -150,6 +150,12 @@ fn input_runtime_keyboard_action(request: &InputRuntimeRequest) -> InputRuntimeK
         return InputRuntimeKeyboardAction::Command(UiCommand::ToggleRecentAgentHelixTargets);
     }
     if request.active_app_dialog_open || request.active_reviewer_dialog_open {
+        if request.workflow_quick_dialog_open
+            && command_or_alt_shortcut_modifier(input.modifiers)
+            && shortcut_key_pressed(input, egui::Key::Z)
+        {
+            return InputRuntimeKeyboardAction::Command(UiCommand::ToggleOutlineWorkflowTab);
+        }
         if request.agent_translation_dialog_open
             && let Some(command) = read_agent_translation_dialog_command(input)
         {
