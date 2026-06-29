@@ -2505,12 +2505,13 @@ fn terminal_output_click_for_resolved_path(
 /// 在后台完成终端路径 metadata 分类。
 pub(super) fn classify_terminal_output_path_click(
     click: TerminalFileLineClick,
-) -> TerminalOutputClick {
+) -> Option<TerminalOutputClick> {
     let path = click.path.clone();
     if path.is_dir() || (path.is_file() && is_terminal_image_path(&path)) {
-        return TerminalOutputClick::RevealPath(path);
+        return Some(TerminalOutputClick::RevealPath(path));
     }
-    TerminalOutputClick::FileLine(click)
+    path.is_file()
+        .then_some(TerminalOutputClick::FileLine(click))
 }
 
 /// Paints an underline over hovered clickable Agent output.

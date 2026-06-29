@@ -834,7 +834,7 @@ impl GsdvGuiApp {
             let click =
                 tokio::task::spawn_blocking(move || classify_terminal_output_path_click(click))
                     .await;
-            if let Ok(click) = click {
+            if let Ok(Some(click)) = click {
                 let _ = tx.send(AppEvent::TerminalOutputPathClassified {
                     workspace_index,
                     click,

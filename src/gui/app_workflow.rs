@@ -169,11 +169,7 @@ impl GsdvGuiApp {
 
     /// 返回当前选中 workflow 节点的逻辑路径。
     fn selected_workflow_copy_path(&self) -> Option<String> {
-        if self
-            .outline_panel_tabs
-            .get(self.active_workspace)
-            .is_none_or(|tab| *tab != OutlinePanelTab::Workflow)
-        {
+        if !self.workflow_copy_context_active() {
             return None;
         }
         let state = self.workflow_states.get(self.active_workspace)?;
@@ -194,6 +190,17 @@ impl GsdvGuiApp {
                 step_path,
             } => workflow_step_copy_path_from_tree(tree, task_path, step_path),
         }
+    }
+
+    /// 判断当前 UI 是否允许复制 workflow selection 路径。
+    fn workflow_copy_context_active(&self) -> bool {
+        matches!(
+            self.active_app_dialog(),
+            Some(AppDialog::WorkflowQuickModal)
+        ) || self
+            .outline_panel_tabs
+            .get(self.active_workspace)
+            .is_some_and(|tab| *tab == OutlinePanelTab::Workflow)
     }
 
     /// 请求刷新指定 workspace 的 workflow tree。
