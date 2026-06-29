@@ -151,6 +151,12 @@ fn input_runtime_keyboard_action(request: &InputRuntimeRequest) -> InputRuntimeK
     }
     if request.active_app_dialog_open || request.active_reviewer_dialog_open {
         if request.workflow_quick_dialog_open
+            && !request.wants_keyboard_input
+            && workflow_quick_copy_shortcut_pressed(input)
+        {
+            return InputRuntimeKeyboardAction::Command(UiCommand::CopyWorkflowPath);
+        }
+        if request.workflow_quick_dialog_open
             && command_or_alt_shortcut_modifier(input.modifiers)
             && shortcut_key_pressed(input, egui::Key::Z)
         {
@@ -409,6 +415,31 @@ fn read_agent_translation_dialog_command(input: &egui::InputState) -> Option<UiC
         return Some(UiCommand::ToggleRecentAgentHelixTargets);
     }
     None
+}
+
+/// Detects copy shortcuts owned by the fullscreen workflow quick modal.
+fn workflow_quick_copy_shortcut_pressed(input: &egui::InputState) -> bool {
+    input.events.iter().any(|event| match event {
+        egui::Event::Copy => true,
+        egui::Event::Key {
+            key,
+            physical_key,
+            pressed: true,
+            repeat: false,
+            modifiers,
+            ..
+        } => {
+            (*key == egui::Key::C || *physical_key == Some(egui::Key::C))
+                && workflow_quick_copy_modifiers(*modifiers)
+        }
+        _ => false,
+    }) || (input.key_pressed(egui::Key::C) && workflow_quick_copy_modifiers(input.modifiers))
+}
+
+/// Matches platform copy chords for quick workflow tree selection.
+fn workflow_quick_copy_modifiers(modifiers: egui::Modifiers) -> bool {
+    (modifiers.mac_cmd || modifiers.command) && !modifiers.alt && !modifiers.ctrl
+        || modifiers.ctrl && !modifiers.alt && !modifiers.mac_cmd && !modifiers.command
 }
 
 pub(super) fn read_ui_command(
