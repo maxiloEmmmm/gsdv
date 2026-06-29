@@ -1941,7 +1941,7 @@ impl GsdvGuiApp {
             }
             self.request_app_repaint();
         } else if let Some(target) = target {
-            self.request_workflow_target(ui.ctx(), target);
+            self.request_workflow_quick_target(ui.ctx(), target);
         } else if let Some(step_select) = step_select
             && let Some((_, task)) = task_context.as_ref()
         {

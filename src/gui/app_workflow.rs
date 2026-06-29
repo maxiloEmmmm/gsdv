@@ -55,11 +55,11 @@ impl GsdvGuiApp {
         }
         self.request_workflow_tree_refresh(ctx, self.active_workspace);
         if let Some(target) = self.workflow_task_surface_target_to_restore() {
-            self.request_workflow_target(ctx, target);
+            self.request_workflow_quick_target(ctx, target);
         } else if let Some(state) = self.workflow_states.get_mut(self.active_workspace) {
-            state.pending_task_restore_after_load = true;
+            state.pending_task_restore_after_load = Some(WorkflowTargetOpenMode::QuickModal);
+            self.set_active_app_dialog(Some(AppDialog::WorkflowQuickModal));
         }
-        self.set_active_app_dialog(Some(AppDialog::WorkflowQuickModal));
     }
 
     /// 切到普通 outline 时显示 Agent surface。
@@ -89,7 +89,7 @@ impl GsdvGuiApp {
         if let Some(target) = self.workflow_task_surface_target_to_restore() {
             self.request_workflow_target(ctx, target);
         } else if let Some(state) = self.workflow_states.get_mut(self.active_workspace) {
-            state.pending_task_restore_after_load = true;
+            state.pending_task_restore_after_load = Some(WorkflowTargetOpenMode::Workspace);
         }
     }
 
@@ -257,6 +257,7 @@ impl GsdvGuiApp {
         };
         state.loading = false;
         let mut pending_target = None;
+        let mut pending_target_mode = WorkflowTargetOpenMode::Workspace;
         match result {
             Ok(tree) => {
                 let project_keys: BTreeSet<String> = tree
@@ -264,16 +265,24 @@ impl GsdvGuiApp {
                     .iter()
                     .map(|project| project.key.clone())
                     .collect();
-                let pending_task_restore = state.pending_task_restore_after_load;
-                state.pending_task_restore_after_load = false;
+                let pending_task_restore = state.pending_task_restore_after_load.take();
                 state
                     .collapsed_project_keys
                     .retain(|key| project_keys.contains(key));
                 state.tree = Some(tree);
                 state.load_error = None;
                 pending_target = state.pending_target_after_save.take();
-                if pending_target.is_none() && pending_task_restore {
+                if pending_target.is_some() {
+                    pending_target_mode = state
+                        .pending_target_after_save_mode
+                        .take()
+                        .unwrap_or(WorkflowTargetOpenMode::Workspace);
+                }
+                if pending_target.is_none()
+                    && let Some(open_mode) = pending_task_restore
+                {
                     pending_target = self.workflow_task_surface_target_to_restore_for(index);
+                    pending_target_mode = open_mode;
                 }
             }
             Err(error) => {
@@ -282,7 +291,7 @@ impl GsdvGuiApp {
             }
         }
         if let Some(target) = pending_target {
-            self.open_workflow_target_now(ctx, target);
+            self.open_workflow_target_now_with_mode(ctx, target, pending_target_mode);
         }
     }
 
@@ -292,11 +301,33 @@ impl GsdvGuiApp {
         ctx: &egui::Context,
         target: WorkflowSelectionTarget,
     ) {
+        self.request_workflow_target_with_mode(ctx, target, WorkflowTargetOpenMode::Workspace);
+    }
+
+    /// 请求在 quick modal 内打开 workflow 目标，不改背后的 workspace surface。
+    pub(super) fn request_workflow_quick_target(
+        &mut self,
+        ctx: &egui::Context,
+        target: WorkflowSelectionTarget,
+    ) {
+        self.request_workflow_target_with_mode(ctx, target, WorkflowTargetOpenMode::QuickModal);
+    }
+
+    /// 按指定 UI 影响范围请求打开 workflow 目标。
+    fn request_workflow_target_with_mode(
+        &mut self,
+        ctx: &egui::Context,
+        target: WorkflowSelectionTarget,
+        open_mode: WorkflowTargetOpenMode,
+    ) {
         if self.workflow_switch_requires_save(&target) {
-            self.set_active_app_dialog(Some(AppDialog::WorkflowUnsavedSwitch { target }));
+            self.set_active_app_dialog(Some(AppDialog::WorkflowUnsavedSwitch {
+                target,
+                open_mode,
+            }));
             return;
         }
-        self.open_workflow_target_now(ctx, target);
+        self.open_workflow_target_now_with_mode(ctx, target, open_mode);
     }
 
     /// 不再询问未保存状态，直接打开 workflow 目标。
@@ -305,6 +336,19 @@ impl GsdvGuiApp {
         ctx: &egui::Context,
         target: WorkflowSelectionTarget,
     ) {
+        self.open_workflow_target_now_with_mode(ctx, target, WorkflowTargetOpenMode::Workspace);
+    }
+
+    /// 按指定 UI 影响范围直接打开 workflow 目标。
+    pub(super) fn open_workflow_target_now_with_mode(
+        &mut self,
+        ctx: &egui::Context,
+        target: WorkflowSelectionTarget,
+        open_mode: WorkflowTargetOpenMode,
+    ) {
+        if open_mode == WorkflowTargetOpenMode::QuickModal {
+            self.set_active_app_dialog(Some(AppDialog::WorkflowQuickModal));
+        }
         match target.clone() {
             WorkflowSelectionTarget::WorkspaceRoot { root_path } => {
                 if let Some(state) = self.workflow_states.get_mut(self.active_workspace) {
@@ -313,11 +357,15 @@ impl GsdvGuiApp {
                     state.editor = None;
                     clear_workflow_step_selection(state);
                 }
-                self.request_open_file(root_path);
-                if let Some(workspace) = self.current_workspace_mut() {
-                    workspace.center_mode = CenterMode::Editor;
+                if open_mode == WorkflowTargetOpenMode::Workspace {
+                    self.request_open_file(root_path);
+                    if let Some(workspace) = self.current_workspace_mut() {
+                        workspace.center_mode = CenterMode::Editor;
+                    }
+                    self.persist_workspaces();
+                } else {
+                    self.request_app_repaint();
                 }
-                self.persist_workspaces();
             }
             WorkflowSelectionTarget::Project { root_path } => {
                 if let Some(state) = self.workflow_states.get_mut(self.active_workspace) {
@@ -326,11 +374,15 @@ impl GsdvGuiApp {
                     state.editor = None;
                     clear_workflow_step_selection(state);
                 }
-                self.request_open_file(root_path);
-                if let Some(workspace) = self.current_workspace_mut() {
-                    workspace.center_mode = CenterMode::Editor;
+                if open_mode == WorkflowTargetOpenMode::Workspace {
+                    self.request_open_file(root_path);
+                    if let Some(workspace) = self.current_workspace_mut() {
+                        workspace.center_mode = CenterMode::Editor;
+                    }
+                    self.persist_workspaces();
+                } else {
+                    self.request_app_repaint();
                 }
-                self.persist_workspaces();
             }
             WorkflowSelectionTarget::Task { task_path } => {
                 let task_editor = self.reusable_or_fresh_workflow_task_editor(&task_path);
@@ -343,7 +395,9 @@ impl GsdvGuiApp {
                     state.editor = None;
                     clear_workflow_step_selection(state);
                 }
-                if let Some(workspace) = self.current_workspace_mut() {
+                if open_mode == WorkflowTargetOpenMode::Workspace
+                    && let Some(workspace) = self.current_workspace_mut()
+                {
                     workspace.center_mode = CenterMode::Editor;
                 }
                 self.request_app_repaint();
@@ -370,7 +424,9 @@ impl GsdvGuiApp {
                     state.editor = Some(editor);
                     set_single_workflow_step_selection(state, &task_path, &step_path);
                 }
-                if let Some(workspace) = self.current_workspace_mut() {
+                if open_mode == WorkflowTargetOpenMode::Workspace
+                    && let Some(workspace) = self.current_workspace_mut()
+                {
                     workspace.center_mode = CenterMode::Editor;
                 }
                 self.request_app_repaint();
@@ -448,6 +504,20 @@ impl GsdvGuiApp {
         ctx: &egui::Context,
         pending_target: Option<WorkflowSelectionTarget>,
     ) {
+        self.save_active_workflow_step_with_mode(
+            ctx,
+            pending_target,
+            WorkflowTargetOpenMode::Workspace,
+        );
+    }
+
+    /// 保存当前 workflow step，并按指定 UI 范围打开后续目标。
+    pub(super) fn save_active_workflow_step_with_mode(
+        &mut self,
+        ctx: &egui::Context,
+        pending_target: Option<WorkflowSelectionTarget>,
+        pending_target_mode: WorkflowTargetOpenMode,
+    ) {
         let active_workspace = self.active_workspace;
         let Some(workspace) = self.workspaces.get(active_workspace) else {
             return;
@@ -464,6 +534,10 @@ impl GsdvGuiApp {
             editor.save_error = None;
         }
         state.pending_target_after_save = pending_target;
+        state.pending_target_after_save_mode = state
+            .pending_target_after_save
+            .as_ref()
+            .map(|_| pending_target_mode);
         let step_path = state.editor.as_ref().map(|editor| editor.step_path.clone());
         let step_text = state.editor.as_ref().map(|editor| editor.step_text.clone());
         let request = WorkflowSaveRequest {
@@ -700,6 +774,7 @@ impl GsdvGuiApp {
             task_path: task_path.to_path_buf(),
             step_path: vec![task.steps.len()],
         });
+        state.pending_target_after_save_mode = Some(WorkflowTargetOpenMode::Workspace);
     }
 
     /// 重写指向已重命名目录前缀的文档和 workflow 状态路径。
