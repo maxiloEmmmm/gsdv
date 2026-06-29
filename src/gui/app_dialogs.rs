@@ -53,6 +53,13 @@ impl GsdvGuiApp {
             .and_then(Clone::clone)
     }
 
+    /// 返回 quick workflow modal 上方当前打开的二级确认框。
+    pub(super) fn active_workflow_quick_overlay_dialog(&self) -> Option<AppDialog> {
+        self.workflow_quick_overlay_dialogs
+            .get(self.active_workspace)
+            .and_then(Clone::clone)
+    }
+
     pub(super) fn set_active_app_dialog(&mut self, dialog: Option<AppDialog>) {
         let previous_dialog = self.active_app_dialog();
         if matches!(dialog, Some(AppDialog::Settings))
@@ -64,9 +71,22 @@ impl GsdvGuiApp {
         {
             self.network_settings_dialog_baseline = None;
         }
+        if !matches!(dialog, Some(AppDialog::WorkflowQuickModal)) {
+            self.set_workflow_quick_overlay_dialog(None);
+        }
         if self.workspaces.is_empty() {
             self.global_app_dialog = dialog;
         } else if let Some(slot) = self.app_dialogs.get_mut(self.active_workspace) {
+            *slot = dialog;
+        }
+    }
+
+    /// 设置 quick workflow modal 上方的二级确认框。
+    pub(super) fn set_workflow_quick_overlay_dialog(&mut self, dialog: Option<AppDialog>) {
+        if let Some(slot) = self
+            .workflow_quick_overlay_dialogs
+            .get_mut(self.active_workspace)
+        {
             *slot = dialog;
         }
     }
@@ -75,6 +95,11 @@ impl GsdvGuiApp {
         let Some(dialog) = self.active_app_dialog() else {
             return;
         };
+        let quick_overlay_dialog = matches!(dialog, AppDialog::WorkflowQuickModal)
+            .then(|| self.active_workflow_quick_overlay_dialog())
+            .flatten();
+        let mut next_quick_overlay_dialog = quick_overlay_dialog.clone();
+        let mut quick_overlay_dialog_changed = false;
         let mut next_dialog = Some(dialog.clone());
         let mut save_then_open = None;
         let mut discard_then_open = None;
@@ -152,7 +177,13 @@ impl GsdvGuiApp {
             )
             .show(ctx, |ui| match dialog.clone() {
                 AppDialog::WorkflowQuickModal => {
-                    self.workflow_quick_modal_surface(ui);
+                    if quick_overlay_dialog.is_some() {
+                        ui.add_enabled_ui(false, |ui| {
+                            self.workflow_quick_modal_surface(ui);
+                        });
+                    } else {
+                        self.workflow_quick_modal_surface(ui);
+                    }
                 }
                 AppDialog::RecentMarkdownOutline { mut nodes } => {
                     let mut action = None;
@@ -1884,6 +1915,65 @@ impl GsdvGuiApp {
                 }
             });
 
+        if let Some(AppDialog::WorkflowUnsavedSwitch { target, open_mode }) =
+            quick_overlay_dialog.clone()
+        {
+            let overlay_dialog = AppDialog::WorkflowUnsavedSwitch {
+                target: target.clone(),
+                open_mode,
+            };
+            egui::Window::new(app_dialog_title(&overlay_dialog, self.app_language))
+                .id(egui::Id::new("workflow-quick-overlay-dialog"))
+                .order(modal_dialog_order())
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+                .fixed_size(Vec2::new(500.0, 260.0))
+                .frame(
+                    Frame::new()
+                        .fill(theme::bg())
+                        .stroke(Stroke::new(1.0, theme::border()))
+                        .corner_radius(CornerRadius::same(theme::RADIUS_LG))
+                        .inner_margin(Margin::same(18)),
+                )
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("!").size(30.0).color(theme::warning()));
+                        ui.vertical(|ui| {
+                            ui.label(
+                                RichText::new(i18n::text(
+                                    self.app_language,
+                                    "You have unsaved workflow changes",
+                                ))
+                                .strong(),
+                            );
+                            ui.label(muted(i18n::text(
+                                self.app_language,
+                                "Save both panes before switching, discard edits, or stay here.",
+                            )));
+                        });
+                    });
+                    ui.add_space(18.0);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if secondary_action(ui, i18n::text(self.app_language, "Cancel")).clicked() {
+                            next_quick_overlay_dialog = None;
+                            quick_overlay_dialog_changed = true;
+                        }
+                        if secondary_action(ui, i18n::text(self.app_language, "Discard")).clicked()
+                        {
+                            workflow_discard_then_select = Some((target.clone(), open_mode));
+                            next_quick_overlay_dialog = None;
+                            quick_overlay_dialog_changed = true;
+                        }
+                        if primary_action(ui, i18n::text(self.app_language, "Save")).clicked() {
+                            workflow_save_then_select = Some((target.clone(), open_mode));
+                            next_quick_overlay_dialog = None;
+                            quick_overlay_dialog_changed = true;
+                        }
+                    });
+                });
+        }
+
         if start_codex_auth {
             self.spawn_codex_auth_task(ctx);
         }
@@ -1894,6 +1984,9 @@ impl GsdvGuiApp {
                 &self.network_settings,
             );
         self.set_active_app_dialog(next_dialog);
+        if quick_overlay_dialog_changed {
+            self.set_workflow_quick_overlay_dialog(next_quick_overlay_dialog);
+        }
         if restart_terminals_for_network_settings {
             self.restart_open_terminal_hosts_for_network_settings(ctx);
         }

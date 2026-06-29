@@ -161,6 +161,7 @@ impl GsdvGuiApp {
         self.pending_agent_theme_restarts.push(None);
         self.documents.push(DocumentState::default());
         self.app_dialogs.push(None);
+        self.workflow_quick_overlay_dialogs.push(None);
         self.global_app_dialog = None;
         self.outline_tree_rects.push(None);
         self.outline_favorites_only.push(false);
@@ -242,6 +243,7 @@ impl GsdvGuiApp {
         self.pending_agent_theme_restarts.remove(index);
         self.documents.remove(index);
         self.app_dialogs.remove(index);
+        self.workflow_quick_overlay_dialogs.remove(index);
         self.outline_tree_rects.remove(index);
         self.outline_favorites_only.remove(index);
         self.outline_panel_tabs.remove(index);

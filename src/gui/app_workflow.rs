@@ -328,6 +328,14 @@ impl GsdvGuiApp {
         open_mode: WorkflowTargetOpenMode,
     ) {
         if self.workflow_switch_requires_save(&target) {
+            if open_mode == WorkflowTargetOpenMode::QuickModal {
+                self.set_active_app_dialog(Some(AppDialog::WorkflowQuickModal));
+                self.set_workflow_quick_overlay_dialog(Some(AppDialog::WorkflowUnsavedSwitch {
+                    target,
+                    open_mode,
+                }));
+                return;
+            }
             self.set_active_app_dialog(Some(AppDialog::WorkflowUnsavedSwitch {
                 target,
                 open_mode,

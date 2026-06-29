@@ -413,6 +413,8 @@ struct GsdvGuiApp {
     pending_agent_theme_restarts: Vec<Option<Instant>>,
     documents: Vec<DocumentState>,
     app_dialogs: Vec<Option<AppDialog>>,
+    /// quick workflow modal 上方的二级确认框，按 workspace 隔离。
+    workflow_quick_overlay_dialogs: Vec<Option<AppDialog>>,
     global_app_dialog: Option<AppDialog>,
     /// 每个 workspace 最近一次绘制出的 outline tree 区域。
     outline_tree_rects: Vec<Option<Rect>>,
@@ -867,6 +869,7 @@ impl GsdvGuiApp {
             })
             .collect();
         let app_dialogs = (0..value.workspaces.len()).map(|_| None).collect();
+        let workflow_quick_overlay_dialogs = (0..value.workspaces.len()).map(|_| None).collect();
         let outline_tree_rects = (0..value.workspaces.len()).map(|_| None).collect();
         let outline_favorites_only = (0..value.workspaces.len()).map(|_| false).collect();
         let outline_panel_tabs = (0..value.workspaces.len())
@@ -898,6 +901,7 @@ impl GsdvGuiApp {
             pending_agent_theme_restarts,
             documents,
             app_dialogs,
+            workflow_quick_overlay_dialogs,
             global_app_dialog: None,
             outline_tree_rects,
             outline_favorites_only,
