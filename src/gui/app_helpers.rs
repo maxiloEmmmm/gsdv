@@ -722,9 +722,14 @@ pub(super) fn rest_entry_button(
 pub(super) fn work_entry_button(
     ui: &mut Ui,
     enabled: bool,
+    reset: bool,
     language: AppLanguage,
 ) -> egui::Response {
-    let text = i18n::text(language, "Work");
+    let text = if reset {
+        i18n::text(language, "Reset")
+    } else {
+        i18n::text(language, "Work")
+    };
     ui.add_enabled_ui(enabled, |ui| {
         ui.add_sized(
             [action_button_width(text, 86.0, 132.0), 26.0],
@@ -736,7 +741,11 @@ pub(super) fn work_entry_button(
     })
     .inner
     .on_hover_text(if enabled {
-        i18n::text(language, "Start work now")
+        if reset {
+            i18n::text(language, "Reset work timer")
+        } else {
+            i18n::text(language, "Start work now")
+        }
     } else {
         i18n::text(language, "Pomodoro is disabled in settings")
     })

@@ -954,22 +954,23 @@ impl GsdvGuiApp {
                                                 {
                                                     self.pomodoro.start_resting(Instant::now());
                                                     self.push_pomodoro_notification(
-                                                    i18n::text_with_arg(
-                                                        self.app_language,
-                                                        "Manual rest started for {minutes} minutes",
-                                                        "{minutes}",
-                                                        self.runtime_settings
-                                                            .pomodoro_rest_minutes
-                                                            .to_string(),
-                                                    ),
-                                                );
+                                                        i18n::text_with_arg(
+                                                            self.app_language,
+                                                            "Manual rest started for {minutes} minutes",
+                                                            "{minutes}",
+                                                            self.runtime_settings
+                                                                .pomodoro_rest_minutes
+                                                                .to_string(),
+                                                        ),
+                                                    );
                                                     self.request_app_repaint();
                                                 }
+                                                let reset_work =
+                                                    self.pomodoro.phase == PomodoroPhase::Working;
                                                 if work_entry_button(
                                                     ui,
-                                                    self.runtime_settings.pomodoro_enabled
-                                                        && self.pomodoro.phase
-                                                            != PomodoroPhase::Working,
+                                                    self.runtime_settings.pomodoro_enabled,
+                                                    reset_work,
                                                     self.app_language,
                                                 )
                                                 .clicked()
@@ -978,7 +979,11 @@ impl GsdvGuiApp {
                                                     self.push_pomodoro_notification(
                                                         i18n::text_with_arg(
                                                             self.app_language,
-                                                            "Starting work for {minutes} minutes",
+                                                            if reset_work {
+                                                                "Work timer reset for {minutes} minutes"
+                                                            } else {
+                                                                "Starting work for {minutes} minutes"
+                                                            },
                                                             "{minutes}",
                                                             self.runtime_settings
                                                                 .pomodoro_work_minutes

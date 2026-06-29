@@ -379,7 +379,9 @@ fn chinese_text(source: &'static str) -> &'static str {
         "Start rest now" => "立即开始休息",
         "Pomodoro is disabled in settings" => "番茄钟已在设置中禁用",
         "Work" => "工作",
+        "Reset" => "重置",
         "Start work now" => "立即开始工作",
+        "Reset work timer" => "重置工作计时",
         "Manual rest started for {minutes} minutes" => "手动进入休息 {minutes} 分钟",
         "Work ended, resting for {minutes} minutes" => "工作结束，进入休息 {minutes} 分钟",
         "Quiet now, continue resting" => "已安静，继续休息",
@@ -388,6 +390,7 @@ fn chinese_text(source: &'static str) -> &'static str {
         "Input detected, waiting for quiet to continue rest" => "检测到输入，等待安静后继续休息",
         "Input detected, returning to work" => "检测到输入，准备回到工作",
         "Starting work for {minutes} minutes" => "立即开始工作 {minutes} 分钟",
+        "Work timer reset for {minutes} minutes" => "工作计时已重置为 {minutes} 分钟",
         "Resting {time}" => "休息中 {time}",
         "No document selected" => "未选择文档",
         "Select a markdown file to preview rendered content." => {
@@ -926,7 +929,9 @@ fn japanese_text(source: &'static str) -> &'static str {
         "Start rest now" => "今すぐ休憩を開始",
         "Pomodoro is disabled in settings" => "ポモドーロは設定で無効です",
         "Work" => "作業",
+        "Reset" => "リセット",
         "Start work now" => "今すぐ作業を開始",
+        "Reset work timer" => "作業タイマーをリセット",
         "Manual rest started for {minutes} minutes" => "{minutes} 分の休憩を手動開始",
         "Work ended, resting for {minutes} minutes" => "作業終了、{minutes} 分休憩します",
         "Quiet now, continue resting" => "静かになりました。休憩を続けます",
@@ -937,6 +942,7 @@ fn japanese_text(source: &'static str) -> &'static str {
         }
         "Input detected, returning to work" => "入力を検出。作業に戻ります",
         "Starting work for {minutes} minutes" => "{minutes} 分の作業を今すぐ開始",
+        "Work timer reset for {minutes} minutes" => "作業タイマーを {minutes} 分にリセットしました",
         "Resting {time}" => "休憩中 {time}",
         "No document selected" => "ドキュメント未選択",
         "Select a markdown file to preview rendered content." => {
