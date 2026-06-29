@@ -24,7 +24,7 @@ impl GsdvGuiApp {
         let in_reviewer_route = self
             .current_workspace()
             .is_some_and(|workspace| workspace.route == Route::Reviewer);
-        read_base_route_command_for_input(input, in_reviewer_route)
+        read_base_route_command_for_input(input, in_reviewer_route, self.app_fullscreen)
     }
 
     /// Allows Helix toggling only where terminal-style shortcut capture is expected.
@@ -76,13 +76,8 @@ impl GsdvGuiApp {
             UiCommand::ToggleWorkspaceTerminal => self.route_to_workspace_terminal_drawer(),
             UiCommand::ToggleNotifications => self.toggle_notifications(),
             UiCommand::ToggleRecentMarkdownOutline => self.toggle_recent_markdown_outline_dialog(),
-            UiCommand::ToggleOutlineWorkflowTab => {
-                if self.app_fullscreen {
-                    self.toggle_workflow_quick_modal(ctx);
-                } else {
-                    self.toggle_outline_workflow_tab(ctx);
-                }
-            }
+            UiCommand::ToggleOutlineWorkflowTab => self.toggle_outline_workflow_tab(ctx),
+            UiCommand::ToggleWorkflowQuickModal => self.toggle_workflow_quick_modal(ctx),
             UiCommand::PasteRecentMarkdownDiffsToAgent => {
                 self.paste_recent_markdown_diffs_to_agent(ctx);
             }

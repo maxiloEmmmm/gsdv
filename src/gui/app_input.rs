@@ -154,7 +154,7 @@ fn input_runtime_keyboard_action(request: &InputRuntimeRequest) -> InputRuntimeK
             && command_or_alt_shortcut_modifier(input.modifiers)
             && shortcut_key_pressed(input, egui::Key::Z)
         {
-            return InputRuntimeKeyboardAction::Command(UiCommand::ToggleOutlineWorkflowTab);
+            return InputRuntimeKeyboardAction::Command(UiCommand::ToggleWorkflowQuickModal);
         }
         if request.agent_translation_dialog_open
             && let Some(command) = read_agent_translation_dialog_command(input)
@@ -214,9 +214,11 @@ fn input_runtime_keyboard_action(request: &InputRuntimeRequest) -> InputRuntimeK
     {
         return InputRuntimeKeyboardAction::SuppressTerminalInput;
     }
-    if let Some(command) =
-        read_base_route_command_for_input(input, request.route == Route::Reviewer)
-    {
+    if let Some(command) = read_base_route_command_for_input(
+        input,
+        request.route == Route::Reviewer,
+        request.app_fullscreen,
+    ) {
         return InputRuntimeKeyboardAction::Command(command);
     }
     match request.route {
@@ -258,9 +260,11 @@ fn input_runtime_workspace_route_action(
             }
         }
         CenterMode::Editor | CenterMode::Preview => {
-            if let Some(command) =
-                read_workspace_route_command(input, request.keyboard_layer_can_close_with_escape)
-            {
+            if let Some(command) = read_workspace_route_command(
+                input,
+                request.keyboard_layer_can_close_with_escape,
+                request.app_fullscreen,
+            ) {
                 return InputRuntimeKeyboardAction::Command(command);
             }
             if request.wants_keyboard_input {
@@ -300,7 +304,7 @@ fn input_runtime_reviewer_route_action(
     request: &InputRuntimeRequest,
 ) -> InputRuntimeKeyboardAction {
     let input = &request.input;
-    if let Some(command) = read_reviewer_route_command(input, true) {
+    if let Some(command) = read_reviewer_route_command(input, true, request.app_fullscreen) {
         return InputRuntimeKeyboardAction::Command(command);
     }
     let action = crate::gui::diff_viewer::read_diff_viewer_keyboard_action(
@@ -321,6 +325,7 @@ fn input_runtime_reviewer_route_action(
 pub(super) fn read_base_route_command_for_input(
     input: &egui::InputState,
     in_reviewer_route: bool,
+    app_fullscreen: bool,
 ) -> Option<UiCommand> {
     let command_or_alt = command_or_alt_shortcut_modifier(input.modifiers);
     let agent_slot_modifier = agent_slot_shortcut_modifier(input.modifiers);
@@ -340,7 +345,7 @@ pub(super) fn read_base_route_command_for_input(
         return Some(UiCommand::AgentMarkdownShortcut);
     }
     if command_or_alt && shortcut_key_pressed(input, egui::Key::Z) {
-        return Some(UiCommand::ToggleOutlineWorkflowTab);
+        return Some(workflow_z_command(app_fullscreen));
     }
     if command_or_alt && input.key_pressed(egui::Key::M) {
         return Some(UiCommand::TranslateAgentInput);
@@ -382,6 +387,15 @@ pub(super) fn read_base_route_command_for_input(
     })
 }
 
+/// Maps Cmd/Alt+Z to the route-specific workflow surface.
+fn workflow_z_command(app_fullscreen: bool) -> UiCommand {
+    if app_fullscreen {
+        UiCommand::ToggleWorkflowQuickModal
+    } else {
+        UiCommand::ToggleOutlineWorkflowTab
+    }
+}
+
 /// 解析 Agent 翻译弹窗打开时仍允许的快捷键。
 fn read_agent_translation_dialog_command(input: &egui::InputState) -> Option<UiCommand> {
     let command_or_alt = command_or_alt_shortcut_modifier(input.modifiers);
@@ -404,6 +418,7 @@ pub(super) fn read_ui_command(
     notification_drawer_open: bool,
     terminal_drawer_open: bool,
     helix_shortcut_allowed: bool,
+    app_fullscreen: bool,
 ) -> Option<UiCommand> {
     let command = input.modifiers.command;
     let command_or_alt = command_or_alt_shortcut_modifier(input.modifiers);
@@ -458,7 +473,7 @@ pub(super) fn read_ui_command(
         return Some(UiCommand::AgentMarkdownShortcut);
     }
     if command_or_alt && shortcut_key_pressed(input, egui::Key::Z) {
-        return Some(UiCommand::ToggleOutlineWorkflowTab);
+        return Some(workflow_z_command(app_fullscreen));
     }
     if command_or_alt && input.key_pressed(egui::Key::M) {
         return Some(UiCommand::TranslateAgentInput);
@@ -537,6 +552,7 @@ enum TerminalDrawerCommandScope {
 fn read_workspace_route_command(
     input: &egui::InputState,
     has_closeable_keyboard_layer: bool,
+    app_fullscreen: bool,
 ) -> Option<UiCommand> {
     read_ui_command(
         input,
@@ -545,12 +561,14 @@ fn read_workspace_route_command(
         false,
         false,
         true,
+        app_fullscreen,
     )
 }
 
 fn read_reviewer_route_command(
     input: &egui::InputState,
     has_closeable_keyboard_layer: bool,
+    app_fullscreen: bool,
 ) -> Option<UiCommand> {
     read_ui_command(
         input,
@@ -559,6 +577,7 @@ fn read_reviewer_route_command(
         false,
         false,
         true,
+        app_fullscreen,
     )
 }
 

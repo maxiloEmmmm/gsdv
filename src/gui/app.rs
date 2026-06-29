@@ -1740,6 +1740,8 @@ struct InputRuntimeRequest {
     route: Route,
     /// 当前 workspace center mode。
     center_mode: CenterMode,
+    /// app 是否处于 F11 全屏模式。
+    app_fullscreen: bool,
     /// app modal dialog 是否打开。
     active_app_dialog_open: bool,
     /// 外置工具 modal 是否打开。
@@ -2275,6 +2277,7 @@ enum UiCommand {
     ToggleNotifications,
     ToggleRecentMarkdownOutline,
     ToggleOutlineWorkflowTab,
+    ToggleWorkflowQuickModal,
     PasteRecentMarkdownDiffsToAgent,
     TranslateAgentInput,
     ApplyAgentInputTranslation,
