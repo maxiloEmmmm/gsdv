@@ -745,8 +745,9 @@ impl GsdvGuiApp {
             task_path: task.path.clone(),
         };
         let selected = workflow_task_is_selected(task, selected);
+        let done = workflow_task_done(task);
         let (response, _, _) =
-            workflow_tree_row(ui, 1, None, None, None, false, &task.label, selected, None);
+            workflow_tree_row(ui, 1, None, None, None, done, &task.label, selected, None);
         response.context_menu(|ui| {
             if ui
                 .button(i18n::text(self.app_language, "Copy path"))
@@ -914,6 +915,12 @@ impl GsdvGuiApp {
             let mut agent_tab_action = None;
             if self.app_fullscreen {
                 self.workspace_center_surface(ui, current_mode);
+                // 触发条件：F11 全屏下用户按住 Alt。
+                // 不能复用普通 header：它会挤压全屏内容布局。
+                // 防止回归：全屏需要临时访问 Rest/Reset/Help。
+                if ui.ctx().input(|input| input.modifiers.alt) {
+                    self.fullscreen_workspace_action_overlay(ui.ctx());
+                }
             } else {
                 StripBuilder::new(ui)
                     .clip(true)
@@ -942,65 +949,7 @@ impl GsdvGuiApp {
                                         );
                                     });
                                     strip.cell(|ui| {
-                                        ui.with_layout(
-                                            Layout::left_to_right(Align::Center),
-                                            |ui| {
-                                                if rest_entry_button(
-                                                    ui,
-                                                    self.runtime_settings.pomodoro_enabled,
-                                                    self.app_language,
-                                                )
-                                                .clicked()
-                                                {
-                                                    self.pomodoro.start_resting(Instant::now());
-                                                    self.push_pomodoro_notification(
-                                                        i18n::text_with_arg(
-                                                            self.app_language,
-                                                            "Manual rest started for {minutes} minutes",
-                                                            "{minutes}",
-                                                            self.runtime_settings
-                                                                .pomodoro_rest_minutes
-                                                                .to_string(),
-                                                        ),
-                                                    );
-                                                    self.request_app_repaint();
-                                                }
-                                                let reset_work =
-                                                    self.pomodoro.phase == PomodoroPhase::Working;
-                                                if work_entry_button(
-                                                    ui,
-                                                    self.runtime_settings.pomodoro_enabled,
-                                                    reset_work,
-                                                    self.app_language,
-                                                )
-                                                .clicked()
-                                                {
-                                                    self.pomodoro.start_working(Instant::now());
-                                                    self.push_pomodoro_notification(
-                                                        i18n::text_with_arg(
-                                                            self.app_language,
-                                                            if reset_work {
-                                                                "Work timer reset for {minutes} minutes"
-                                                            } else {
-                                                                "Starting work for {minutes} minutes"
-                                                            },
-                                                            "{minutes}",
-                                                            self.runtime_settings
-                                                                .pomodoro_work_minutes
-                                                                .to_string(),
-                                                        ),
-                                                    );
-                                                    self.request_app_repaint();
-                                                }
-                                                if help_entry_button(ui, self.app_language)
-                                                    .clicked()
-                                                {
-                                                    self.set_active_app_dialog(Some(
-                                                        AppDialog::Help,
-                                                    ));
-                                                }
-                                            },
-                                        );
+                                        self.workspace_header_actions(ui);
                                     });
                                 });
                         });
@@ -1012,6 +961,73 @@ impl GsdvGuiApp {
             }
         } else {
             self.reviewer_surface(ui, reviewer_mode);
+        }
+    }
+
+    /// 绘制全屏 Alt 临时操作浮层。
+    fn fullscreen_workspace_action_overlay(&mut self, ctx: &egui::Context) {
+        const WIDTH: f32 = 334.0;
+        const HEIGHT: f32 = 36.0;
+        const MARGIN: f32 = 12.0;
+
+        let screen = ctx.screen_rect();
+        let pos = egui::pos2(screen.right() - WIDTH - MARGIN, screen.top() + MARGIN);
+        egui::Area::new("fullscreen-workspace-action-overlay".into())
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos)
+            .show(ctx, |ui| {
+                ui.set_min_size(Vec2::new(WIDTH, HEIGHT));
+                ui.set_max_size(Vec2::new(WIDTH, HEIGHT));
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    self.workspace_header_actions(ui);
+                });
+            });
+    }
+
+    /// 绘制 workspace header 右侧的 Rest/Reset/Help 操作。
+    fn workspace_header_actions(&mut self, ui: &mut Ui) {
+        if rest_entry_button(
+            ui,
+            self.runtime_settings.pomodoro_enabled,
+            self.app_language,
+        )
+        .clicked()
+        {
+            self.pomodoro.start_resting(Instant::now());
+            self.push_pomodoro_notification(i18n::text_with_arg(
+                self.app_language,
+                "Manual rest started for {minutes} minutes",
+                "{minutes}",
+                self.runtime_settings.pomodoro_rest_minutes.to_string(),
+            ));
+            self.request_app_repaint();
+        }
+
+        let reset_work = self.pomodoro.phase == PomodoroPhase::Working;
+        if work_entry_button(
+            ui,
+            self.runtime_settings.pomodoro_enabled,
+            reset_work,
+            self.app_language,
+        )
+        .clicked()
+        {
+            self.pomodoro.start_working(Instant::now());
+            self.push_pomodoro_notification(i18n::text_with_arg(
+                self.app_language,
+                if reset_work {
+                    "Work timer reset for {minutes} minutes"
+                } else {
+                    "Starting work for {minutes} minutes"
+                },
+                "{minutes}",
+                self.runtime_settings.pomodoro_work_minutes.to_string(),
+            ));
+            self.request_app_repaint();
+        }
+
+        if help_entry_button(ui, self.app_language).clicked() {
+            self.set_active_app_dialog(Some(AppDialog::Help));
         }
     }
 
@@ -2972,4 +2988,26 @@ fn workflow_task_is_selected(
         | Some(WorkflowSelectionTarget::Project { .. })
         | None => false,
     }
+}
+
+/// 判断 task 下所有可勾选 step 是否都已完成。
+fn workflow_task_done(task: &WorkflowTaskNode) -> bool {
+    let (has_checkable, all_checked) = workflow_steps_done_state(&task.steps);
+    has_checkable && all_checked
+}
+
+/// 汇总 step 子树中的 checkbox 完成状态。
+fn workflow_steps_done_state(steps: &[WorkflowStepNode]) -> (bool, bool) {
+    let mut has_checkable = false;
+    let mut all_checked = true;
+    for step in steps {
+        if step.checkable {
+            has_checkable = true;
+            all_checked &= step.checked;
+        }
+        let (child_has_checkable, child_all_checked) = workflow_steps_done_state(&step.children);
+        has_checkable |= child_has_checkable;
+        all_checked &= child_all_checked;
+    }
+    (has_checkable, all_checked)
 }

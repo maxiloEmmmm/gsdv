@@ -475,6 +475,10 @@ impl GsdvGuiApp {
             self.close_notifications_restoring_route();
             return;
         }
+        if self.active_workflow_quick_overlay_dialog().is_some() {
+            self.set_workflow_quick_overlay_dialog(None);
+            return;
+        }
         if self.active_app_dialog().is_some() {
             self.set_active_app_dialog(None);
             return;
