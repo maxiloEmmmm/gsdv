@@ -1139,6 +1139,15 @@ enum OutlinePanelTab {
     Workflow,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// workflow target 打开后允许影响的 UI 范围。
+enum WorkflowTargetOpenMode {
+    /// 普通 workflow 工作台，可切换 center mode 和打开文档。
+    Workspace,
+    /// 全屏 quick modal，仅更新 modal 内部 workflow 状态。
+    QuickModal,
+}
+
 #[derive(Debug, Clone, Default)]
 /// 单个 workspace 的 workflow UI 状态。
 struct WorkflowUiState {
@@ -1154,14 +1163,16 @@ struct WorkflowUiState {
     selected: Option<WorkflowSelectionTarget>,
     /// 最近一次选中的 task 工作台目标，用于切回 workflow 时恢复上下文。
     last_task_surface_target: Option<WorkflowSelectionTarget>,
-    /// workflow tree 加载完成后是否需要恢复 task 工作台。
-    pending_task_restore_after_load: bool,
+    /// workflow tree 加载完成后是否需要恢复 task 上下文。
+    pending_task_restore_after_load: Option<WorkflowTargetOpenMode>,
     /// 当前 task 说明编辑器。
     task_editor: Option<WorkflowTaskEditor>,
     /// 当前叶子 step 片段编辑器。
     editor: Option<WorkflowStepEditor>,
     /// 片段保存成功后要继续打开的目标。
     pending_target_after_save: Option<WorkflowSelectionTarget>,
+    /// 片段保存后打开目标时使用的 UI 影响范围。
+    pending_target_after_save_mode: Option<WorkflowTargetOpenMode>,
     /// task 工作台内两个片段 pane 是否显示 Markdown preview。
     preview_fragments: bool,
     /// 当前 task 工作台中多选的 step 路径。
@@ -2001,6 +2012,7 @@ enum AppDialog {
     },
     WorkflowUnsavedSwitch {
         target: WorkflowSelectionTarget,
+        open_mode: WorkflowTargetOpenMode,
     },
     WorkflowQuickModal,
     WorkflowAddTask {

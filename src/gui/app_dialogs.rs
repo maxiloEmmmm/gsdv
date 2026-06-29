@@ -266,7 +266,7 @@ impl GsdvGuiApp {
                         }
                     });
                 }
-                AppDialog::WorkflowUnsavedSwitch { target } => {
+                AppDialog::WorkflowUnsavedSwitch { target, open_mode } => {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("!").size(30.0).color(theme::warning()));
                         ui.vertical(|ui| {
@@ -290,11 +290,11 @@ impl GsdvGuiApp {
                         }
                         if secondary_action(ui, i18n::text(self.app_language, "Discard")).clicked()
                         {
-                            workflow_discard_then_select = Some(target.clone());
+                            workflow_discard_then_select = Some((target.clone(), open_mode));
                             next_dialog = None;
                         }
                         if primary_action(ui, i18n::text(self.app_language, "Save")).clicked() {
-                            workflow_save_then_select = Some(target.clone());
+                            workflow_save_then_select = Some((target.clone(), open_mode));
                             next_dialog = None;
                         }
                     });
@@ -1915,11 +1915,11 @@ impl GsdvGuiApp {
         if let Some(target) = discard_then_open {
             self.discard_and_open_file(target);
         }
-        if let Some(target) = workflow_save_then_select {
-            self.save_active_workflow_step(ctx, Some(target));
+        if let Some((target, open_mode)) = workflow_save_then_select {
+            self.save_active_workflow_step_with_mode(ctx, Some(target), open_mode);
         }
-        if let Some(target) = workflow_discard_then_select {
-            self.open_workflow_target_now(ctx, target);
+        if let Some((target, open_mode)) = workflow_discard_then_select {
+            self.open_workflow_target_now_with_mode(ctx, target, open_mode);
         }
         if let Some(request) = workflow_mutation {
             self.request_workflow_mutation(ctx, request);
