@@ -239,6 +239,19 @@ fn chinese_text(source: &'static str) -> &'static str {
         "When disabled, Codex Responses keeps rebuilding WebSocket connections instead of silently using HTTP." => {
             "禁用后，Codex Responses 会持续重建 WebSocket 连接，不会静默改用 HTTP。"
         }
+        "Remote server" => "远程服务",
+        "Enable remote server" => "启用远程服务",
+        "Listens for the built-in remote HTTP and WebSocket API." => {
+            "监听内置远程 HTTP 和 WebSocket API。"
+        }
+        "Listen address" => "监听地址",
+        "Port" => "端口",
+        "Changes restart the listener after Settings events are processed." => {
+            "修改后会在 Settings 事件处理阶段重启监听。"
+        }
+        "Remote server stopped" => "远程服务已停止",
+        "Remote server listening on {address}" => "远程服务正在监听 {address}",
+        "Remote server failed: {error}" => "远程服务失败：{error}",
         "Pomodoro" => "番茄钟",
         "Enable pomodoro" => "启用番茄钟",
         "Work minutes" => "工作分钟",
@@ -780,6 +793,19 @@ fn japanese_text(source: &'static str) -> &'static str {
         "When disabled, Codex Responses keeps rebuilding WebSocket connections instead of silently using HTTP." => {
             "無効時、Codex Responses は HTTP へ静かに切り替えず WebSocket 接続を再構築し続けます。"
         }
+        "Remote server" => "リモートサーバー",
+        "Enable remote server" => "リモートサーバーを有効化",
+        "Listens for the built-in remote HTTP and WebSocket API." => {
+            "組み込みのリモート HTTP / WebSocket API を待ち受けます。"
+        }
+        "Listen address" => "待ち受けアドレス",
+        "Port" => "ポート",
+        "Changes restart the listener after Settings events are processed." => {
+            "変更後、Settings イベント処理でリスナーを再起動します。"
+        }
+        "Remote server stopped" => "リモートサーバーを停止しました",
+        "Remote server listening on {address}" => "リモートサーバーは {address} で待ち受け中",
+        "Remote server failed: {error}" => "リモートサーバー失敗: {error}",
         "Pomodoro" => "ポモドーロ",
         "Enable pomodoro" => "ポモドーロを有効化",
         "Work minutes" => "作業時間（分）",

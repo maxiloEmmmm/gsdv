@@ -153,6 +153,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install Windows make
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install make -y
+
       - name: Install Linux GUI dependencies
         if: runner.os == 'Linux'
         shell: bash
@@ -174,7 +191,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          cargo build --release --locked --bin gsdv
+          make build
 
           stage_dir="dist/${{ matrix.asset_prefix }}"
           mkdir -p "${stage_dir}"

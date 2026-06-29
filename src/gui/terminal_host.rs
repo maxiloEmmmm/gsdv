@@ -21,6 +21,7 @@ use eframe::egui::{
     self, Align2, Color32, CursorIcon, Event, FontFamily, FontId, Key, Modifiers, PointerButton,
     Pos2, Rect, Sense, Stroke, Ui, Vec2,
 };
+use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -29,6 +30,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::watch;
 
 static TERMINAL_ID: AtomicU64 = AtomicU64::new(1);
 static TERMINAL_SPAWN_ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -37,6 +39,7 @@ const TERMINAL_BELL_FLASH_DURATION: Duration = Duration::from_millis(180);
 const TERMINAL_WAKEUP_FORWARD_INTERVAL: Duration = Duration::from_millis(100);
 const TERMINAL_REPAINT_FORWARD_INTERVAL: Duration = Duration::from_millis(200);
 const TERMINAL_TITLE_FORWARD_INTERVAL: Duration = Duration::from_millis(500);
+const TERMINAL_REMOTE_EXPORT_LINES: i32 = 500;
 
 // alacritty_terminal emits ColorRequest with its internal dynamic color indexes:
 // 256 = default foreground, 257 = default background, 258 = cursor.
@@ -236,6 +239,111 @@ pub enum TerminalRuntimeEventKind {
 /// Terminal runtime 向外投递轻量通知的函数。
 pub type TerminalRuntimeEventSink = Arc<dyn Fn(TerminalRuntimeEvent) + Send + Sync + 'static>;
 
+/// Remote WebSocket 可订阅的 terminal 只读输出源。
+#[derive(Clone)]
+pub struct TerminalRemoteOutputSource {
+    /// alacritty terminal grid 共享状态。
+    term: Arc<FairMutex<Term<TerminalEventProxy>>>,
+    /// 最新 UI 主题，用于把 ANSI 颜色解析成稳定 RGB。
+    theme_mode: Arc<Mutex<gui_theme::ThemeMode>>,
+    /// terminal 输出变化序号接收端。
+    output_rx: watch::Receiver<u64>,
+}
+
+/// Remote 输出订阅端保存的行比较状态。
+#[derive(Debug, Clone)]
+pub struct TerminalRemoteOutputState {
+    /// 上次已检查的 terminal 输出变化序号。
+    output_sequence: u64,
+    /// 上次已发送的 terminal 行签名。
+    row_signatures: Vec<TerminalRemoteRowSignature>,
+}
+
+/// Remote terminal 当前完整输出快照。
+#[derive(Debug, Clone, Serialize)]
+pub struct TerminalRemoteSnapshot {
+    /// 当前 terminal 列数。
+    pub cols: usize,
+    /// 当前 terminal buffer 行。
+    pub rows: Vec<TerminalRemoteRow>,
+    /// 当前 terminal 光标。
+    pub cursor: TerminalRemoteCursor,
+}
+
+/// Remote terminal append-only 增量输出。
+#[derive(Debug, Clone, Serialize)]
+pub struct TerminalRemoteAppend {
+    /// 自上次发送后新增的底部行。
+    pub rows: Vec<TerminalRemoteRow>,
+}
+
+/// Remote terminal 输出变化分类。
+#[derive(Debug, Clone, Serialize)]
+pub enum TerminalRemoteUpdate {
+    /// 当前 terminal buffer 与上次发送内容一致。
+    Unchanged,
+    /// 当前变化可以用 append-only 增量表达。
+    Append(TerminalRemoteAppend),
+    /// 当前变化需要完整 snapshot 才能表达。
+    Snapshot(TerminalRemoteSnapshot),
+}
+
+/// Remote terminal 单行结构化输出。
+#[derive(Debug, Clone, Serialize)]
+pub struct TerminalRemoteRow {
+    /// alacritty grid 逻辑行号，scrollback 为负数。
+    pub line_index: i32,
+    /// 本行是否由终端自动换行产生。
+    pub wrapped: bool,
+    /// 本行按样式合并后的文本 run。
+    pub runs: Vec<TerminalRemoteRun>,
+}
+
+/// Remote terminal 一个连续同样式文本 run。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TerminalRemoteRun {
+    /// run 文本，包含普通空格和零宽组合字符。
+    pub text: String,
+    /// 前景色，格式为 #RRGGBB。
+    pub fg: String,
+    /// 背景色，格式为 #RRGGBB。
+    pub bg: String,
+    /// 是否粗体。
+    pub bold: bool,
+    /// 是否斜体。
+    pub italic: bool,
+    /// 是否弱化。
+    pub dim: bool,
+    /// 是否隐藏。
+    pub hidden: bool,
+    /// 是否反显。
+    pub inverse: bool,
+    /// 下划线样式。
+    pub underline: &'static str,
+    /// 是否删除线。
+    pub strikeout: bool,
+}
+
+/// Remote terminal 光标位置和形状。
+#[derive(Debug, Clone, Serialize)]
+pub struct TerminalRemoteCursor {
+    /// 光标所在逻辑行号。
+    pub line_index: i32,
+    /// 光标所在列号。
+    pub col_index: usize,
+    /// 光标形状。
+    pub shape: &'static str,
+}
+
+/// Remote append 比较使用的行签名。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TerminalRemoteRowSignature {
+    /// 本行是否由终端自动换行产生。
+    wrapped: bool,
+    /// 本行不含逻辑行号的 run 内容。
+    runs: Vec<TerminalRemoteRun>,
+}
+
 pub trait TerminalHost {
     fn kind(&self) -> TerminalSurfaceKind;
     fn workspace_root(&self) -> &Path;
@@ -256,6 +364,8 @@ pub struct GuiTerminalHost {
     runtime_state: Arc<Mutex<TerminalRuntimeState>>,
     /// 当前主题，供 terminal runtime 回复 OSC dynamic color query。
     runtime_theme_mode: Arc<Mutex<gui_theme::ThemeMode>>,
+    /// Agent remote 输出订阅的轻量变化信号。
+    remote_output_tx: watch::Sender<u64>,
     font: FontId,
 }
 
@@ -312,6 +422,64 @@ impl From<TerminalSize> for WindowSize {
             cell_width: size.cell_width.max(1.0).round() as u16,
             cell_height: size.cell_height.max(1.0).round() as u16,
         }
+    }
+}
+
+impl TerminalRemoteOutputSource {
+    /// 等待 terminal 输出变化，适用于 remote WebSocket 订阅循环。
+    pub async fn changed(&mut self) -> bool {
+        self.output_rx.changed().await.is_ok()
+    }
+
+    /// 导出当前完整 terminal buffer 快照和后续 append 对比状态。
+    pub fn snapshot(&self) -> (TerminalRemoteSnapshot, TerminalRemoteOutputState) {
+        let snapshot = terminal_remote_snapshot(self);
+        let state = TerminalRemoteOutputState {
+            output_sequence: *self.output_rx.borrow(),
+            row_signatures: terminal_remote_row_signatures(&snapshot.rows),
+        };
+        (snapshot, state)
+    }
+
+    /// 导出自上次状态后追加到底部的行。
+    pub fn append_since(&self, state: &mut TerminalRemoteOutputState) -> TerminalRemoteAppend {
+        let snapshot = terminal_remote_snapshot(self);
+        let next_signatures = terminal_remote_row_signatures(&snapshot.rows);
+        let start = terminal_remote_append_start(&state.row_signatures, &next_signatures);
+        state.row_signatures = next_signatures;
+        TerminalRemoteAppend {
+            rows: start
+                .filter(|start| *start < snapshot.rows.len())
+                .map(|start| snapshot.rows[start..].to_vec())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// 导出自上次状态后的最小远端更新。
+    pub fn update_since(&self, state: &mut TerminalRemoteOutputState) -> TerminalRemoteUpdate {
+        let output_sequence = *self.output_rx.borrow();
+        if output_sequence == state.output_sequence {
+            return TerminalRemoteUpdate::Unchanged;
+        }
+        state.output_sequence = output_sequence;
+
+        let snapshot = terminal_remote_snapshot(self);
+        let next_signatures = terminal_remote_row_signatures(&snapshot.rows);
+        if next_signatures == state.row_signatures {
+            return TerminalRemoteUpdate::Unchanged;
+        }
+
+        let start = terminal_remote_append_start(&state.row_signatures, &next_signatures);
+        state.row_signatures = next_signatures;
+        if let Some(start) = start
+            && start < snapshot.rows.len()
+        {
+            return TerminalRemoteUpdate::Append(TerminalRemoteAppend {
+                rows: snapshot.rows[start..].to_vec(),
+            });
+        }
+
+        TerminalRemoteUpdate::Snapshot(snapshot)
     }
 }
 
@@ -529,6 +697,25 @@ impl TerminalBackend {
             lines,
             layout_size,
         };
+        self.apply_resize(next);
+    }
+
+    /// 按 terminal grid 尺寸同步 emulator 和底层 PTY。
+    fn resize_cells(&mut self, cols: u16, lines: u16) {
+        let next = TerminalSize {
+            cols,
+            lines,
+            layout_size: Vec2::new(
+                self.size.cell_width * f32::from(cols),
+                self.size.cell_height * f32::from(lines),
+            ),
+            ..self.size
+        };
+        self.apply_resize(next);
+    }
+
+    /// 应用已经计算好的 terminal 尺寸。
+    fn apply_resize(&mut self, next: TerminalSize) {
         if next == self.size {
             return;
         }
@@ -538,9 +725,10 @@ impl TerminalBackend {
             *runtime_size = next;
         }
         self.notifier.on_resize(next.into());
-        self.term
-            .lock()
-            .resize(AlacrittyTermSize::new(cols as usize, lines as usize));
+        self.term.lock().resize(AlacrittyTermSize::new(
+            next.cols as usize,
+            next.lines as usize,
+        ));
     }
 
     /// Converts egui drag coordinates into an alacritty grid point.
@@ -734,6 +922,7 @@ impl GuiTerminalHost {
         let (event_tx, pty_events) = unbounded_channel();
         let runtime_state = Arc::new(Mutex::new(TerminalRuntimeState::default()));
         let runtime_theme_mode = Arc::new(Mutex::new(theme_mode));
+        let (remote_output_tx, _) = watch::channel(0_u64);
         let shell = terminal_command(workspace, kind);
         let args = terminal_args(workspace, kind, id, agent_launch, agent_session_id);
         let env = terminal_env(workspace, kind, network_settings);
@@ -772,6 +961,7 @@ impl GuiTerminalHost {
                 runtime_size: backend.runtime_size.clone(),
                 runtime_state: runtime_state.clone(),
                 runtime_theme_mode: runtime_theme_mode.clone(),
+                remote_output_tx: remote_output_tx.clone(),
                 event_sink,
             },
         );
@@ -788,6 +978,7 @@ impl GuiTerminalHost {
             backend,
             runtime_state,
             runtime_theme_mode,
+            remote_output_tx,
             font: FontId::monospace(14.0),
         })
     }
@@ -806,6 +997,7 @@ impl GuiTerminalHost {
         let (event_tx, pty_events) = unbounded_channel();
         let runtime_state = Arc::new(Mutex::new(TerminalRuntimeState::default()));
         let runtime_theme_mode = Arc::new(Mutex::new(theme_mode));
+        let (remote_output_tx, _) = watch::channel(0_u64);
         let args = helix_args(&spec);
         let launch_command = command_display("hx", &args);
         let backend = spawn_backend_with_env(
@@ -834,6 +1026,7 @@ impl GuiTerminalHost {
                 runtime_size: backend.runtime_size.clone(),
                 runtime_state: runtime_state.clone(),
                 runtime_theme_mode: runtime_theme_mode.clone(),
+                remote_output_tx: remote_output_tx.clone(),
                 event_sink,
             },
         );
@@ -850,6 +1043,7 @@ impl GuiTerminalHost {
             backend,
             runtime_state,
             runtime_theme_mode,
+            remote_output_tx,
             font: FontId::monospace(14.0),
         })
     }
@@ -881,6 +1075,25 @@ impl GuiTerminalHost {
     /// 返回 terminal host 稳定 id，用于 AppEvent 轻量通知路由。
     pub fn id(&self) -> u64 {
         self.backend.id
+    }
+
+    /// 返回 remote agent 输出订阅使用的只读输出源。
+    pub fn remote_output_source(&self) -> TerminalRemoteOutputSource {
+        TerminalRemoteOutputSource {
+            term: self.backend.term.clone(),
+            theme_mode: self.runtime_theme_mode.clone(),
+            output_rx: self.remote_output_tx.subscribe(),
+        }
+    }
+
+    /// 按 remote 浏览器视口同步 agent terminal grid。
+    pub fn resize_remote_grid(&mut self, cols: u16, lines: u16) {
+        self.backend.resize_cells(cols, lines);
+        // 触发条件：remote 页面 resize 改变 terminal grid。
+        // 不能等 PTY 输出：纯 resize 可能只改变 reflow 后的可见内容。
+        // 防止回归：浏览器已发送尺寸但 WS 订阅迟迟不刷新 snapshot。
+        self.remote_output_tx
+            .send_modify(|sequence| *sequence = sequence.wrapping_add(1));
     }
 
     pub fn take_abnormal_agent_exit(&mut self) -> Option<AgentProcessExit> {
@@ -1260,6 +1473,8 @@ struct TerminalRuntimeDrainer {
     runtime_state: Arc<Mutex<TerminalRuntimeState>>,
     /// 最新 UI 主题。
     runtime_theme_mode: Arc<Mutex<gui_theme::ThemeMode>>,
+    /// Agent remote 输出订阅的轻量变化信号。
+    remote_output_tx: watch::Sender<u64>,
     /// 向 AppEvent 队列投递轻量通知的出口。
     event_sink: TerminalRuntimeEventSink,
 }
@@ -1296,6 +1511,14 @@ fn handle_terminal_runtime_event(drainer: &TerminalRuntimeDrainer, event: PtyEve
     match event {
         PtyEvent::Wakeup => {
             crate::gui::perf_log::count("terminal.drain.wakeup");
+            if drainer.kind == TerminalSurfaceKind::Agent {
+                // 触发条件：Agent terminal 收到 PTY 输出。
+                // 不能在这里导出 grid：drainer 是高频内部事件路径。
+                // 防止回归：remote WS 订阅把 terminal runtime 卡住。
+                drainer
+                    .remote_output_tx
+                    .send_modify(|sequence| *sequence = sequence.wrapping_add(1));
+            }
             emit_terminal_runtime_event(drainer, TerminalRuntimeEventKind::Output);
         }
         PtyEvent::ColorRequest(index, formatter) => {
@@ -2734,6 +2957,193 @@ fn terminal_agent_input_text_snapshot(backend: &TerminalBackend) -> Option<Strin
     } else {
         Some(text)
     }
+}
+
+/// 导出 remote WebSocket 使用的完整 terminal buffer 快照。
+fn terminal_remote_snapshot(source: &TerminalRemoteOutputSource) -> TerminalRemoteSnapshot {
+    let term = source.term.lock();
+    let mode = source
+        .theme_mode
+        .lock()
+        .map(|mode| *mode)
+        .unwrap_or(gui_theme::ThemeMode::Dark);
+    let content = term.renderable_content();
+    let grid = term.grid();
+    let cols = grid.columns();
+    let mut rows = Vec::with_capacity(grid.total_lines());
+    let mut current_line = None;
+    let mut current_runs = Vec::new();
+    let mut current_wrapped = false;
+    // 触发条件：remote Web 端订阅 agent terminal 输出。
+    // 不能导出完整 scrollback：每行每 cell 都要序列化并进入浏览器。
+    // 防止回归：一连接 remote 页面就因大 JSON 和海量 DOM 占满 CPU。
+    let top_line = grid.topmost_line();
+    let bottom_line = grid.bottommost_line();
+    let export_top = Line(
+        bottom_line
+            .0
+            .saturating_sub(TERMINAL_REMOTE_EXPORT_LINES.saturating_sub(1))
+            .max(top_line.0),
+    );
+    let start = Point::new(export_top, grid.last_column());
+
+    for indexed in grid.iter_from(start) {
+        let line = indexed.point.line.0;
+        if current_line.is_some_and(|current| current != line) {
+            rows.push(TerminalRemoteRow {
+                line_index: current_line.unwrap_or(line),
+                wrapped: current_wrapped,
+                runs: std::mem::take(&mut current_runs),
+            });
+            current_wrapped = false;
+        }
+        current_line = Some(line);
+        let cell = indexed.cell;
+        current_wrapped |= cell.flags.contains(Flags::WRAPLINE);
+        if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+            continue;
+        }
+        terminal_remote_push_run(
+            &mut current_runs,
+            terminal_remote_run(cell, content.colors, mode),
+        );
+    }
+
+    if let Some(line_index) = current_line {
+        rows.push(TerminalRemoteRow {
+            line_index,
+            wrapped: current_wrapped,
+            runs: current_runs,
+        });
+    }
+
+    TerminalRemoteSnapshot {
+        cols,
+        rows,
+        cursor: TerminalRemoteCursor {
+            line_index: content.cursor.point.line.0,
+            col_index: content.cursor.point.column.0,
+            shape: terminal_remote_cursor_shape(content.cursor.shape),
+        },
+    }
+}
+
+/// 向当前行追加 run，并合并相邻同样式文本。
+fn terminal_remote_push_run(runs: &mut Vec<TerminalRemoteRun>, run: TerminalRemoteRun) {
+    if let Some(last) = runs.last_mut()
+        && terminal_remote_run_same_style(last, &run)
+    {
+        last.text.push_str(&run.text);
+        return;
+    }
+    runs.push(run);
+}
+
+/// 判断两个 remote run 是否可安全合并。
+fn terminal_remote_run_same_style(left: &TerminalRemoteRun, right: &TerminalRemoteRun) -> bool {
+    left.fg == right.fg
+        && left.bg == right.bg
+        && left.bold == right.bold
+        && left.italic == right.italic
+        && left.dim == right.dim
+        && left.hidden == right.hidden
+        && left.inverse == right.inverse
+        && left.underline == right.underline
+        && left.strikeout == right.strikeout
+}
+
+/// 构造 remote run，适用于 Web 端复刻 terminal 样式。
+fn terminal_remote_run(
+    cell: &Cell,
+    colors: &alacritty_terminal::term::color::Colors,
+    mode: gui_theme::ThemeMode,
+) -> TerminalRemoteRun {
+    let (fg, bg) = terminal_cell_colors(cell, false, colors, mode);
+    let mut text = String::new();
+    if cell.flags.contains(Flags::HIDDEN) {
+        text.push(' ');
+    } else {
+        text.push(cell.c);
+    }
+    for mark in cell.zerowidth().unwrap_or_default() {
+        text.push(*mark);
+    }
+    TerminalRemoteRun {
+        text,
+        fg: terminal_remote_color(fg),
+        bg: terminal_remote_color(bg),
+        bold: cell.flags.intersects(Flags::BOLD | Flags::DIM_BOLD),
+        italic: cell.flags.contains(Flags::ITALIC),
+        dim: cell.flags.intersects(Flags::DIM | Flags::DIM_BOLD),
+        hidden: cell.flags.contains(Flags::HIDDEN),
+        inverse: cell.flags.contains(Flags::INVERSE),
+        underline: terminal_remote_underline(cell.flags),
+        strikeout: cell.flags.contains(Flags::STRIKEOUT),
+    }
+}
+
+/// 把 egui 颜色序列化成 remote API 约定的 RGB 字符串。
+fn terminal_remote_color(color: Color32) -> String {
+    format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b())
+}
+
+/// 返回 remote API 使用的下划线名称。
+fn terminal_remote_underline(flags: Flags) -> &'static str {
+    if flags.contains(Flags::DOUBLE_UNDERLINE) {
+        "double"
+    } else if flags.contains(Flags::UNDERCURL) {
+        "curly"
+    } else if flags.contains(Flags::DOTTED_UNDERLINE) {
+        "dotted"
+    } else if flags.contains(Flags::DASHED_UNDERLINE) {
+        "dashed"
+    } else if flags.contains(Flags::UNDERLINE) {
+        "single"
+    } else {
+        "none"
+    }
+}
+
+/// 返回 remote API 使用的光标形状名称。
+fn terminal_remote_cursor_shape(shape: CursorShape) -> &'static str {
+    match shape {
+        CursorShape::Block => "block",
+        CursorShape::HollowBlock => "hollow_block",
+        CursorShape::Underline => "underline",
+        CursorShape::Beam => "beam",
+        CursorShape::Hidden => "hidden",
+    }
+}
+
+/// 为 append-only 比较构造不含逻辑行号的行签名。
+fn terminal_remote_row_signatures(rows: &[TerminalRemoteRow]) -> Vec<TerminalRemoteRowSignature> {
+    rows.iter()
+        .map(|row| TerminalRemoteRowSignature {
+            wrapped: row.wrapped,
+            runs: row.runs.clone(),
+        })
+        .collect()
+}
+
+/// 找到当前 buffer 中从哪一行开始属于新增 append。
+fn terminal_remote_append_start(
+    previous: &[TerminalRemoteRowSignature],
+    current: &[TerminalRemoteRowSignature],
+) -> Option<usize> {
+    if current.starts_with(previous) {
+        return Some(previous.len());
+    }
+    let max_overlap = previous.len().min(current.len());
+    for overlap in (1..=max_overlap).rev() {
+        let previous_start = previous.len() - overlap;
+        if previous[previous_start..] == current[..overlap] {
+            return Some(overlap);
+        }
+    }
+    // 触发条件：原地改写、清屏、全屏 TUI 重绘会破坏 append 前缀。
+    // 不能发 patch：remote 协议明确只做 append-only。
+    // 防止回归：Web 端把 spinner 或重绘误当成新增 transcript。
+    None
 }
 
 /// Split result for text with Codex image placeholders.

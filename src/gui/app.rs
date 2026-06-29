@@ -2,7 +2,8 @@ use crate::BranchInfo;
 use crate::gui::agent::{AgentKind, AgentLaunchConfig};
 use crate::gui::data::{
     self, AppLanguage, CenterMode, FontSettings, InitialGuiData, NetworkSettings, OutlineNode,
-    ReviewerMode, Route, RuntimeSettings, WorkspaceActivity, WorkspaceViewData,
+    RemoteServerSettings, ReviewerMode, Route, RuntimeSettings, WorkspaceActivity,
+    WorkspaceViewData,
 };
 use crate::gui::hook;
 use crate::gui::i18n;
@@ -18,7 +19,8 @@ use crate::gui::repaint_gate;
 use crate::gui::reviewer_adapter::{ReviewerAdapter, ReviewerBranchTarget};
 use crate::gui::terminal_host::{
     AgentProcessExit, GuiTerminalHost, HelixLaunchSpec, TerminalFileLineClick, TerminalHost,
-    TerminalInputShortcutScope, TerminalOutputClick, TerminalRuntimeEvent,
+    TerminalInputShortcutScope, TerminalOutputClick, TerminalRemoteOutputSource,
+    TerminalRemoteOutputState, TerminalRemoteSnapshot, TerminalRemoteUpdate, TerminalRuntimeEvent,
     TerminalRuntimeEventKind, TerminalRuntimeEventSink, TerminalSurfaceKind,
     agent_input_bytes_from_events_with_kitty_protocol, classify_terminal_output_path_click,
     terminal_agent_input_submit_bytes,
@@ -104,6 +106,9 @@ use app_reviewer_ui::{ReviewerDiffCopyKind, apply_reviewer_diff_selection_overri
 
 #[path = "app_reviewer_state.rs"]
 mod app_reviewer_state;
+
+#[path = "app_remote_server.rs"]
+mod app_remote_server;
 
 #[path = "app_shell_ui.rs"]
 mod app_shell_ui;
@@ -255,6 +260,7 @@ pub fn run() -> eframe::Result<()> {
             let mut app =
                 GsdvGuiApp::new_with_font_settings(data, agent_launch, font_settings, system_fonts);
             app.set_fs_watch_repaint_context(cc.egui_ctx.clone());
+            app.restart_remote_server(&cc.egui_ctx, false);
             Ok(Box::new(app))
         }),
     )
@@ -468,6 +474,8 @@ struct GsdvGuiApp {
     pending_font_settings_save: bool,
     /// network settings 需要从事件阶段派发持久化。
     pending_network_settings_save: bool,
+    /// remote server 设置变化后需要从事件阶段重启 listener。
+    pending_remote_server_restart: bool,
     /// 默认 agent 类型需要从事件阶段持久化。
     pending_default_agent_kind_save: bool,
     /// debug 截图请求文件轮询是否启用。
@@ -529,6 +537,10 @@ struct GsdvGuiApp {
     network_settings: NetworkSettings,
     runtime_settings: RuntimeSettings,
     network_settings_dialog_baseline: Option<NetworkSettings>,
+    /// 当前 remote server listener 的配置代次。
+    remote_server_generation: u64,
+    /// 当前 remote server listener 后台任务。
+    remote_server_task: Option<tokio::task::JoinHandle<()>>,
     /// settings 和 auth dialog 中显示的 Codex OAuth 状态。
     codex_auth: CodexAuthUiState,
     font_settings: FontSettings,
@@ -936,6 +948,7 @@ impl GsdvGuiApp {
             pending_language_settings_save: false,
             pending_font_settings_save: false,
             pending_network_settings_save: false,
+            pending_remote_server_restart: false,
             pending_default_agent_kind_save: false,
             screenshot_request_poll_enabled: screenshot_request_poll_enabled(),
             workspace_store_dirty_at: None,
@@ -971,6 +984,8 @@ impl GsdvGuiApp {
             network_settings: data::load_network_settings(),
             runtime_settings: data::load_runtime_settings(),
             network_settings_dialog_baseline: None,
+            remote_server_generation: 0,
+            remote_server_task: None,
             codex_auth: CodexAuthUiState::new(),
             font_settings,
             system_fonts,
@@ -1692,6 +1707,12 @@ enum AppEvent {
     CodexAuthFinished {
         result: Result<crate::ai::CodexAuthInfo, String>,
     },
+    /// remote server listener 成功绑定到目标地址。
+    RemoteServerStarted { generation: u64, address: String },
+    /// remote server listener 启动或接收连接失败。
+    RemoteServerFailed { generation: u64, error: String },
+    /// remote HTTP API 通过唯一队列请求 GUI 状态或 agent 侧效果。
+    RemoteApiRequest(app_remote_server::RemoteApiEnvelope),
     /// 文件系统 watcher 发出一个原始 notify 事件。
     FsWatch(notify::Result<notify::Event>),
     /// Reviewer script 产生一行通知。
