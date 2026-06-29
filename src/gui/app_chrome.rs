@@ -392,11 +392,24 @@ pub(super) fn terminal_file_helix_workdir(workspace_dir: &Path, file_path: &Path
 
 /// Resolves a terminal `path:line` path against the active workspace.
 pub(super) fn resolve_terminal_file_line_path(workspace_dir: &Path, path: &Path) -> PathBuf {
+    if let Some(expanded) = expand_terminal_home_path(path) {
+        return expanded;
+    }
     if path.is_absolute() {
         path.to_path_buf()
     } else {
         workspace_dir.join(path)
     }
+}
+
+/// Expands shell-style home paths before terminal files are opened.
+fn expand_terminal_home_path(path: &Path) -> Option<PathBuf> {
+    let value = path.to_str()?;
+    let home = crate::home::home_dir()?;
+    if value == "~" {
+        return Some(home);
+    }
+    value.strip_prefix("~/").map(|rest| home.join(rest))
 }
 
 pub(super) fn network_settings_changed_since(

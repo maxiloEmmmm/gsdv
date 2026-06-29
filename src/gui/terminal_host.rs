@@ -3055,22 +3055,16 @@ fn file_line_match_at_column(
     column: usize,
     visible_line: i32,
 ) -> Option<TerminalFileLineMatch> {
-    let bytes = line.as_bytes();
     let mut index = 0usize;
-    while index < bytes.len() {
-        while index < bytes.len() && !file_line_path_byte(bytes[index]) {
-            index += 1;
-        }
-        let raw_start = index;
-        while index < bytes.len() && file_line_path_byte(bytes[index]) {
-            index += 1;
-        }
-        if raw_start == index || index >= bytes.len() || bytes[index] != b':' {
-            index = index.saturating_add(1);
+    while let Some((raw_start, raw_end)) = next_file_path_token_span(line, index) {
+        index = raw_end;
+        if index >= line.len() || !line[index..].starts_with(':') {
+            index = next_char_index(line, index);
             continue;
         }
         let line_start = index + 1;
         let mut line_end = line_start;
+        let bytes = line.as_bytes();
         while line_end < bytes.len() && bytes[line_end].is_ascii_digit() {
             line_end += 1;
         }
@@ -3094,8 +3088,8 @@ fn file_line_match_at_column(
                 token_end = range_end;
             }
         }
-        let path = line[raw_start..index].trim_matches(file_line_trim_char);
-        let trim_left = line[raw_start..index].len().saturating_sub(path.len());
+        let path = line[raw_start..raw_end].trim_matches(file_line_trim_char);
+        let trim_left = line[raw_start..raw_end].len().saturating_sub(path.len());
         let start = raw_start + trim_left;
         let start_column = byte_to_terminal_column(line, start);
         let end_column = byte_to_terminal_column(line, token_end);
@@ -3149,21 +3143,10 @@ fn file_path_match_at_column(
     visible_line: i32,
     workspace_root: &Path,
 ) -> Option<TerminalFileLineMatch> {
-    let bytes = line.as_bytes();
     let mut index = 0usize;
-    while index < bytes.len() {
-        while index < bytes.len() && !file_line_path_byte(bytes[index]) {
-            index += 1;
-        }
-        let raw_start = index;
-        while index < bytes.len() && file_line_path_byte(bytes[index]) {
-            index += 1;
-        }
-        if raw_start == index {
-            index = index.saturating_add(1);
-            continue;
-        }
-        let raw_token = &line[raw_start..index];
+    while let Some((raw_start, raw_end)) = next_file_path_token_span(line, index) {
+        index = raw_end;
+        let raw_token = &line[raw_start..raw_end];
         let path = raw_token.trim_matches(file_line_trim_char);
         let trim_left = raw_token.len().saturating_sub(path.len());
         let start = raw_start + trim_left;
@@ -3205,6 +3188,34 @@ fn path_may_be_file_reference(path: &str) -> bool {
     path.contains('/') || path.starts_with('.') || path.starts_with('~')
 }
 
+/// Finds the next terminal path-like token span on UTF-8 character boundaries.
+fn next_file_path_token_span(line: &str, mut index: usize) -> Option<(usize, usize)> {
+    while index < line.len() {
+        let ch = line[index..].chars().next()?;
+        if file_line_path_char(ch) {
+            break;
+        }
+        index += ch.len_utf8();
+    }
+    let start = index;
+    while index < line.len() {
+        let ch = line[index..].chars().next()?;
+        if !file_line_path_char(ch) {
+            break;
+        }
+        index += ch.len_utf8();
+    }
+    (start < index).then_some((start, index))
+}
+
+/// Advances one UTF-8 char from a known boundary.
+fn next_char_index(line: &str, index: usize) -> usize {
+    line.get(index..)
+        .and_then(|rest| rest.chars().next())
+        .map(|ch| index + ch.len_utf8())
+        .unwrap_or(line.len())
+}
+
 /// 判断终端路径是否是图片，图片点击交给文件管理器定位。
 fn is_terminal_image_path(path: &Path) -> bool {
     path.extension()
@@ -3232,6 +3243,9 @@ fn is_terminal_image_path(path: &Path) -> bool {
 
 /// Resolves a terminal output path against its terminal workspace root.
 fn resolve_terminal_file_path(workspace_root: &Path, path: &Path) -> PathBuf {
+    if let Some(expanded) = expand_terminal_home_path(path) {
+        return expanded;
+    }
     if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -3239,12 +3253,22 @@ fn resolve_terminal_file_path(workspace_root: &Path, path: &Path) -> PathBuf {
     }
 }
 
-/// Returns whether a byte can be part of a simple file path token.
-fn file_line_path_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric()
-        || matches!(
-            byte,
-            b'/' | b'.' | b'_' | b'-' | b'~' | b'@' | b'+' | b'=' | b'\\'
+/// Expands shell-style home paths emitted by terminal output.
+fn expand_terminal_home_path(path: &Path) -> Option<PathBuf> {
+    let value = path.to_str()?;
+    let home = crate::home::home_dir()?;
+    if value == "~" {
+        return Some(home);
+    }
+    value.strip_prefix("~/").map(|rest| home.join(rest))
+}
+
+/// Returns whether a char can be part of a simple file path token.
+fn file_line_path_char(value: char) -> bool {
+    !value.is_whitespace()
+        && !matches!(
+            value,
+            ':' | '"' | '\'' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | ';'
         )
 }
 
