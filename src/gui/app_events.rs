@@ -109,6 +109,10 @@ impl GsdvGuiApp {
         let active_workspace = self.active_workspace;
         let wants_keyboard_input = ctx.wants_keyboard_input();
         let active_app_dialog_open = self.active_app_dialog().is_some();
+        let workflow_quick_dialog_open = matches!(
+            self.active_app_dialog(),
+            Some(AppDialog::WorkflowQuickModal)
+        );
         let agent_translation_dialog_open =
             self.active_app_dialog().is_some_and(|dialog| match dialog {
                 AppDialog::Message { title, .. } => title.starts_with("Agent Input Translation"),
@@ -166,6 +170,7 @@ impl GsdvGuiApp {
             center_mode,
             active_app_dialog_open,
             extra_tools_open: self.extra_tools.open,
+            workflow_quick_dialog_open,
             agent_translation_dialog_open,
             active_reviewer_dialog_open,
             notifications_open,

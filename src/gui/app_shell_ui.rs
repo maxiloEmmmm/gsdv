@@ -1819,6 +1819,186 @@ impl GsdvGuiApp {
         }
     }
 
+    /// Renders the fullscreen workflow quick modal with tree, steps, and editors.
+    ///
+    /// Example: fullscreen `Alt+Z` -> compact project/task tree, step tree, task and step editors.
+    pub(super) fn workflow_quick_modal_surface(&mut self, ui: &mut Ui) {
+        let selected = self
+            .workflow_states
+            .get(self.active_workspace)
+            .and_then(|state| state.selected.clone());
+        let tree = self
+            .workflow_states
+            .get(self.active_workspace)
+            .and_then(|state| state.tree.clone());
+        let Some(tree) = tree else {
+            workflow_empty_editor_message(ui, i18n::text(self.app_language, "Loading workflow..."));
+            return;
+        };
+
+        let mut target = None;
+        let mut toggled_project_key = None;
+        let mut context_dialog = None;
+        let mut copy_path = None;
+        let mut step_select = None;
+        let mut merge_step_paths = None;
+        let task_context = self.current_workflow_task_context();
+        let selected_step_paths = task_context
+            .as_ref()
+            .and_then(|(_, task)| {
+                self.workflow_states
+                    .get(self.active_workspace)
+                    .filter(|state| {
+                        state.step_selection_task_path.as_deref() == Some(task.path.as_path())
+                    })
+                    .map(|state| state.selected_step_paths.clone())
+            })
+            .unwrap_or_default();
+
+        let available = ui.available_size();
+        if available.x <= 1.0 || available.y <= 1.0 {
+            return;
+        }
+        let first_width = available.x.min(260.0).max(220.0);
+        let second_width = available.x.min(300.0).max(240.0);
+        StripBuilder::new(ui)
+            .size(Size::exact(first_width))
+            .size(Size::exact(8.0))
+            .size(Size::exact(second_width))
+            .size(Size::exact(8.0))
+            .size(Size::remainder())
+            .horizontal(|mut strip| {
+                strip.cell(|ui| {
+                    self.workflow_quick_tree_column(
+                        ui,
+                        &tree,
+                        selected.as_ref(),
+                        &mut target,
+                        &mut toggled_project_key,
+                        &mut context_dialog,
+                        &mut copy_path,
+                    );
+                });
+                strip.empty();
+                strip.cell(|ui| {
+                    if let Some((project_label, task)) = task_context.as_ref() {
+                        workflow_task_step_tree_panel(
+                            ui,
+                            task,
+                            selected.as_ref(),
+                            &selected_step_paths,
+                            &mut target,
+                            &mut step_select,
+                            &mut context_dialog,
+                            &mut merge_step_paths,
+                            &mut copy_path,
+                            project_label,
+                            self.app_language,
+                        );
+                    } else {
+                        workflow_empty_editor_message(
+                            ui,
+                            i18n::text(self.app_language, "Select a workflow task."),
+                        );
+                    }
+                });
+                strip.empty();
+                strip.cell(|ui| {
+                    StripBuilder::new(ui)
+                        .size(Size::remainder())
+                        .size(Size::exact(8.0))
+                        .size(Size::remainder())
+                        .vertical(|mut strip| {
+                            strip.cell(|ui| self.workflow_task_desc_editor_surface_inner(ui, true));
+                            strip.empty();
+                            strip.cell(|ui| self.workflow_step_editor_surface_inner(ui, true));
+                        });
+                });
+            });
+
+        if let Some(dialog) = context_dialog {
+            self.set_active_app_dialog(Some(dialog));
+        } else if let Some(step_paths) = merge_step_paths {
+            if let Some((_, task)) = task_context.as_ref() {
+                let title = workflow_merge_default_title(task, &step_paths);
+                self.set_active_app_dialog(Some(AppDialog::WorkflowMergeSteps {
+                    task_path: task.path.clone(),
+                    step_paths,
+                    title,
+                }));
+            }
+        } else if let Some(path) = copy_path {
+            ui.ctx().copy_text(path);
+            self.push_toast(
+                i18n::text(self.app_language, "Workflow path copied"),
+                theme::success(),
+            );
+        } else if let Some(key) = toggled_project_key {
+            if let Some(state) = self.workflow_states.get_mut(self.active_workspace) {
+                if !state.collapsed_project_keys.remove(&key) {
+                    state.collapsed_project_keys.insert(key);
+                }
+            }
+            self.request_app_repaint();
+        } else if let Some(target) = target {
+            self.request_workflow_target(ui.ctx(), target);
+        } else if let Some(step_select) = step_select
+            && let Some((_, task)) = task_context.as_ref()
+        {
+            self.apply_workflow_step_selection(ui.ctx(), task, step_select);
+        }
+    }
+
+    /// Renders the modal's first workflow tree column and preserves existing copy actions.
+    ///
+    /// Example: right-click task -> `Copy path` uses the same copied text as the outline tree.
+    fn workflow_quick_tree_column(
+        &self,
+        ui: &mut Ui,
+        tree: &WorkflowTree,
+        selected: Option<&WorkflowSelectionTarget>,
+        target: &mut Option<WorkflowSelectionTarget>,
+        toggled_project_key: &mut Option<String>,
+        context_dialog: &mut Option<AppDialog>,
+        copy_path: &mut Option<String>,
+    ) {
+        let collapsed_project_keys = self
+            .workflow_states
+            .get(self.active_workspace)
+            .map(|state| state.collapsed_project_keys.clone())
+            .unwrap_or_default();
+        ScrollArea::vertical()
+            .id_salt(("workflow-quick-tree", self.active_workspace))
+            .max_height(ui.available_height().max(1.0))
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                self.render_workflow_root_node(
+                    ui,
+                    tree,
+                    selected,
+                    target,
+                    context_dialog,
+                    copy_path,
+                );
+                for project in &tree.projects {
+                    self.render_workflow_project_node(
+                        ui,
+                        project,
+                        collapsed_project_keys.contains(&project.key),
+                        selected,
+                        target,
+                        toggled_project_key,
+                        context_dialog,
+                        copy_path,
+                    );
+                }
+                if tree.projects.is_empty() {
+                    ui.label(muted(i18n::text(self.app_language, "No workflow projects")));
+                }
+            });
+    }
+
     /// 应用 task 工作台里的 step 单选或 Shift 范围选择。
     fn apply_workflow_step_selection(
         &mut self,
@@ -1885,6 +2065,14 @@ impl GsdvGuiApp {
 
     /// 绘制 workflow task 说明编辑器。
     pub(super) fn workflow_task_desc_editor_surface(&mut self, ui: &mut Ui) {
+        let interactive = self.center_surface_accepts_keyboard_input();
+        self.workflow_task_desc_editor_surface_inner(ui, interactive);
+    }
+
+    /// Renders the task description editor with caller-controlled interactivity.
+    ///
+    /// Example: center surface uses normal keyboard ownership; quick modal passes `true`.
+    fn workflow_task_desc_editor_surface_inner(&mut self, ui: &mut Ui, interactive: bool) {
         let Some(editor) = self
             .workflow_states
             .get(self.active_workspace)
@@ -1898,7 +2086,6 @@ impl GsdvGuiApp {
             return;
         };
         let editor_font = effective_editor_font_id(&self.font_settings);
-        let interactive = self.center_surface_accepts_keyboard_input();
         let mut next_task_text = editor.task_text.clone();
         let save_error = editor.save_error.clone();
         let preview = self
@@ -1951,6 +2138,14 @@ impl GsdvGuiApp {
 
     /// 绘制 workflow step 片段编辑器。
     pub(super) fn workflow_step_editor_surface(&mut self, ui: &mut Ui) {
+        let interactive = self.center_surface_accepts_keyboard_input();
+        self.workflow_step_editor_surface_inner(ui, interactive);
+    }
+
+    /// Renders the step description editor with caller-controlled interactivity.
+    ///
+    /// Example: quick modal passes `true` so text editing works while the modal is open.
+    fn workflow_step_editor_surface_inner(&mut self, ui: &mut Ui, interactive: bool) {
         let Some(editor) = self
             .workflow_states
             .get(self.active_workspace)
@@ -1964,7 +2159,6 @@ impl GsdvGuiApp {
             return;
         };
         let editor_font = effective_editor_font_id(&self.font_settings);
-        let interactive = self.center_surface_accepts_keyboard_input();
         let mut next_step_text = editor.step_text.clone();
         let save_error = editor.save_error.clone();
         let preview = self
