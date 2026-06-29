@@ -15,6 +15,14 @@
 | --- | --- |
 | ![gsdv work-flow task view](assets/examples/ig_03fac067c40a3437016a1cf9ab82a08191b8c6cf2bf5bce090.png) | ![gsdv reviewer diff view](assets/examples/ig_03fac067c40a3437016a1cfa2c3f888191b77212ab30a26699.png) |
 
+## Showcase
+
+![gsdv remote web demo](assets/showcase/remote-web-demo.gif)
+
+| Fullscreen agent workspace | Row and column agent split |
+| --- | --- |
+| ![gsdv fullscreen agent workspace](assets/showcase/fullscreen-agent-workspace.png) | ![gsdv row and column agent split](assets/showcase/agent-row-column-split.png) |
+
 It keeps the coding agent, project notes, implementation workflow, repository review, and workspace shell inside one focused app window. The goal is not to become a general IDE. The goal is to keep the operational context around an AI-assisted project visible, editable, and reviewable while work is happening.
 
 The current integration focus is Codex. Claude-compatible paths still exist where they are useful, but the most actively shaped workflows, defaults, and hook integrations are optimized around Codex sessions.
