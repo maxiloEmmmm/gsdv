@@ -17,6 +17,7 @@ egui_glow = "0.31"
 egui_extras = "0.31"
 glow = "0.16"
 alacritty_terminal = "0.25.1"
+axum = { version = "0.8.9", features = ["ws"] }
 base64 = "0.22"
 futures = "0.3"
 image = { version = "0.25", default-features = false, features = ["png"] }

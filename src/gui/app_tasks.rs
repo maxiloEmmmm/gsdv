@@ -137,6 +137,10 @@ impl GsdvGuiApp {
             self.pending_network_settings_save = false;
             self.spawn_network_settings_save(self.network_settings.clone());
         }
+        if self.pending_remote_server_restart {
+            self.pending_remote_server_restart = false;
+            self.restart_remote_server(ctx, true);
+        }
         if self.pending_default_agent_kind_save {
             self.pending_default_agent_kind_save = false;
             self.spawn_default_agent_kind_save(self.default_agent_kind);

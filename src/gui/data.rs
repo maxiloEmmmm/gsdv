@@ -27,6 +27,11 @@ pub const MIN_POMODORO_MINUTES: u16 = 1;
 pub const MAX_POMODORO_MINUTES: u16 = 180;
 pub const MIN_POMODORO_WARNING_REMAINING_PERCENT: u8 = 1;
 pub const MAX_POMODORO_WARNING_REMAINING_PERCENT: u8 = 99;
+pub const DEFAULT_REMOTE_SERVER_ENABLED: bool = true;
+pub const DEFAULT_REMOTE_SERVER_HOST: &str = "0.0.0.0";
+pub const DEFAULT_REMOTE_SERVER_PORT: u16 = 20050;
+pub const MIN_REMOTE_SERVER_PORT: u16 = 1;
+pub const MAX_REMOTE_SERVER_PORT: u16 = u16::MAX;
 /// Fixed Codex model provider option requested by the UI.
 pub const CODEX_MODEL_PROVIDER_NEVER: &str = "never";
 
@@ -373,9 +378,19 @@ pub struct RuntimeSettings {
     /// Whether Codex Responses may fall back to HTTP after repeated WebSocket failures.
     #[serde(default)]
     pub codex_responses_http_fallback_enabled: bool,
+    /// Whether the embedded remote HTTP/WebSocket server should listen.
+    #[serde(default = "default_remote_server_enabled")]
+    pub remote_server_enabled: bool,
+    /// Listen host for the embedded remote HTTP/WebSocket server.
+    #[serde(default = "default_remote_server_host")]
+    pub remote_server_host: String,
+    /// Listen port for the embedded remote HTTP/WebSocket server.
+    #[serde(default = "default_remote_server_port")]
+    pub remote_server_port: u16,
 }
 
 impl Default for RuntimeSettings {
+    /// Builds first-run runtime defaults used when the store has no settings.
     fn default() -> Self {
         Self {
             max_frame_rate: default_max_frame_rate(),
@@ -387,7 +402,38 @@ impl Default for RuntimeSettings {
             agent_custom_quick_replies: String::new(),
             agent_input_translation_auto_trigger: false,
             codex_responses_http_fallback_enabled: false,
+            remote_server_enabled: default_remote_server_enabled(),
+            remote_server_host: default_remote_server_host(),
+            remote_server_port: default_remote_server_port(),
         }
+    }
+}
+
+impl RuntimeSettings {
+    /// Returns the remote listener subset used by the server lifecycle owner.
+    pub fn remote_server_settings(&self) -> RemoteServerSettings {
+        RemoteServerSettings {
+            enabled: self.remote_server_enabled,
+            host: self.remote_server_host.clone(),
+            port: self.remote_server_port,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteServerSettings {
+    /// Whether the embedded remote HTTP/WebSocket server should listen.
+    pub enabled: bool,
+    /// Listen host accepted by Tokio's socket address resolver.
+    pub host: String,
+    /// TCP listen port.
+    pub port: u16,
+}
+
+impl RemoteServerSettings {
+    /// Formats the configured listener address for bind calls and UI messages.
+    pub fn bind_address(&self) -> String {
+        format!("{}:{}", self.host, self.port)
     }
 }
 
@@ -429,6 +475,21 @@ fn default_pomodoro_rest_minutes() -> u16 {
 /// 返回哈基米工作末段预警的默认剩余百分比。
 fn default_pomodoro_warning_remaining_percent() -> u8 {
     DEFAULT_POMODORO_WARNING_REMAINING_PERCENT
+}
+
+/// Returns whether the remote server listens on first-run settings.
+fn default_remote_server_enabled() -> bool {
+    DEFAULT_REMOTE_SERVER_ENABLED
+}
+
+/// Returns the first-run remote server listen host.
+fn default_remote_server_host() -> String {
+    DEFAULT_REMOTE_SERVER_HOST.to_string()
+}
+
+/// Returns the first-run remote server listen port.
+fn default_remote_server_port() -> u16 {
+    DEFAULT_REMOTE_SERVER_PORT
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -1122,9 +1183,23 @@ fn sanitize_runtime_settings(mut settings: RuntimeSettings) -> RuntimeSettings {
             MIN_POMODORO_WARNING_REMAINING_PERCENT,
             MAX_POMODORO_WARNING_REMAINING_PERCENT,
         );
+    settings.remote_server_host = sanitize_remote_server_host(&settings.remote_server_host);
+    settings.remote_server_port = settings
+        .remote_server_port
+        .clamp(MIN_REMOTE_SERVER_PORT, MAX_REMOTE_SERVER_PORT);
     settings.agent_custom_quick_replies =
         sanitize_agent_custom_quick_replies(&settings.agent_custom_quick_replies);
     settings
+}
+
+/// Normalizes the remote listen host without inventing DNS behavior.
+fn sanitize_remote_server_host(value: &str) -> String {
+    let value = value.trim();
+    if value.is_empty() {
+        DEFAULT_REMOTE_SERVER_HOST.to_string()
+    } else {
+        value.to_string()
+    }
 }
 
 /// Trims custom quick replies while preserving line-based editing semantics.

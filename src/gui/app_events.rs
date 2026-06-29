@@ -204,6 +204,7 @@ impl GsdvGuiApp {
             || self.pending_language_settings_save
             || self.pending_font_settings_save
             || self.pending_network_settings_save
+            || self.pending_remote_server_restart
             || self.pending_default_agent_kind_save
     }
 
@@ -1044,6 +1045,18 @@ impl GsdvGuiApp {
                         );
                     }
                 }
+            }
+            AppEvent::RemoteServerStarted {
+                generation,
+                address,
+            } => {
+                self.apply_remote_server_started(generation, address);
+            }
+            AppEvent::RemoteServerFailed { generation, error } => {
+                self.apply_remote_server_failed(generation, error);
+            }
+            AppEvent::RemoteApiRequest(envelope) => {
+                self.handle_remote_api_envelope(ctx, envelope);
             }
             AppEvent::FsWatch(event) => {
                 self.apply_fs_watch_event(event);

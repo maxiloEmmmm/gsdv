@@ -1801,8 +1801,15 @@ impl GsdvGuiApp {
                                 next_dialog = Some(AppDialog::CodexAuth);
                             }
                             ui.add_space(12.0);
+                            let previous_remote_settings =
+                                self.runtime_settings.remote_server_settings();
                             if runtime_settings_editor(ui, &mut self.runtime_settings, language) {
                                 self.pending_runtime_settings_save = true;
+                                if previous_remote_settings
+                                    != self.runtime_settings.remote_server_settings()
+                                {
+                                    self.pending_remote_server_restart = true;
+                                }
                                 if !self.runtime_settings.pomodoro_enabled {
                                     self.pomodoro.start_working(Instant::now());
                                 }
@@ -3342,6 +3349,57 @@ fn runtime_settings_editor(
             ui.separator();
             ui.add_space(10.0);
             ui.label(
+                RichText::new(i18n::text(language, "Remote server"))
+                    .strong()
+                    .size(14.0)
+                    .color(theme::text()),
+            );
+            ui.add_space(8.0);
+            changed |= ui
+                .checkbox(
+                    &mut settings.remote_server_enabled,
+                    i18n::text(language, "Enable remote server"),
+                )
+                .changed();
+            ui.label(muted(i18n::text(
+                language,
+                "Listens for the built-in remote HTTP and WebSocket API.",
+            )));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label(muted(i18n::text(language, "Listen address")));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    changed |= ui
+                        .add_sized(
+                            [220.0, 32.0],
+                            settings_singleline_text_edit(&mut settings.remote_server_host)
+                                .hint_text(data::DEFAULT_REMOTE_SERVER_HOST),
+                        )
+                        .changed();
+                });
+            });
+            ui.horizontal(|ui| {
+                ui.label(muted(i18n::text(language, "Port")));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut settings.remote_server_port)
+                                .range(
+                                    data::MIN_REMOTE_SERVER_PORT..=data::MAX_REMOTE_SERVER_PORT,
+                                )
+                                .speed(1),
+                        )
+                        .changed();
+                });
+            });
+            ui.label(muted(i18n::text(
+                language,
+                "Changes restart the listener after Settings events are processed.",
+            )));
+            ui.add_space(12.0);
+            ui.separator();
+            ui.add_space(10.0);
+            ui.label(
                 RichText::new(i18n::text(language, "Pomodoro"))
                     .strong()
                     .size(14.0)
@@ -3418,6 +3476,13 @@ fn runtime_settings_editor(
             data::MIN_POMODORO_WARNING_REMAINING_PERCENT,
             data::MAX_POMODORO_WARNING_REMAINING_PERCENT,
         );
+    settings.remote_server_host = settings.remote_server_host.trim().to_string();
+    if settings.remote_server_host.is_empty() {
+        settings.remote_server_host = data::DEFAULT_REMOTE_SERVER_HOST.to_string();
+    }
+    settings.remote_server_port = settings
+        .remote_server_port
+        .clamp(data::MIN_REMOTE_SERVER_PORT, data::MAX_REMOTE_SERVER_PORT);
     changed
 }
 

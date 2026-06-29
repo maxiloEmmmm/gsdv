@@ -1,0 +1,11 @@
+{
+  "compilerOptions": {
+    "checkJs": true,
+    "jsx": "preserve",
+    "jsxImportSource": "vue",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "target": "ES2022"
+  },
+  "include": ["src/**/*.js", "src/**/*.jsx", "src/**/*.vue"]
+}
