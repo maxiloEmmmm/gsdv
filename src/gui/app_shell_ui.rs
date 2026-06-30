@@ -978,57 +978,57 @@ impl GsdvGuiApp {
             .show(ctx, |ui| {
                 ui.set_min_size(Vec2::new(WIDTH, HEIGHT));
                 ui.set_max_size(Vec2::new(WIDTH, HEIGHT));
-                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    self.workspace_header_actions(ui);
-                });
+                self.workspace_header_actions(ui);
             });
     }
 
     /// 绘制 workspace header 右侧的 Rest/Reset/Help 操作。
     fn workspace_header_actions(&mut self, ui: &mut Ui) {
-        if rest_entry_button(
-            ui,
-            self.runtime_settings.pomodoro_enabled,
-            self.app_language,
-        )
-        .clicked()
-        {
-            self.pomodoro.start_resting(Instant::now());
-            self.push_pomodoro_notification(i18n::text_with_arg(
+        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+            if rest_entry_button(
+                ui,
+                self.runtime_settings.pomodoro_enabled,
                 self.app_language,
-                "Manual rest started for {minutes} minutes",
-                "{minutes}",
-                self.runtime_settings.pomodoro_rest_minutes.to_string(),
-            ));
-            self.request_app_repaint();
-        }
+            )
+            .clicked()
+            {
+                self.pomodoro.start_resting(Instant::now());
+                self.push_pomodoro_notification(i18n::text_with_arg(
+                    self.app_language,
+                    "Manual rest started for {minutes} minutes",
+                    "{minutes}",
+                    self.runtime_settings.pomodoro_rest_minutes.to_string(),
+                ));
+                self.request_app_repaint();
+            }
 
-        let reset_work = self.pomodoro.phase == PomodoroPhase::Working;
-        if work_entry_button(
-            ui,
-            self.runtime_settings.pomodoro_enabled,
-            reset_work,
-            self.app_language,
-        )
-        .clicked()
-        {
-            self.pomodoro.start_working(Instant::now());
-            self.push_pomodoro_notification(i18n::text_with_arg(
+            let reset_work = self.pomodoro.phase == PomodoroPhase::Working;
+            if work_entry_button(
+                ui,
+                self.runtime_settings.pomodoro_enabled,
+                reset_work,
                 self.app_language,
-                if reset_work {
-                    "Work timer reset for {minutes} minutes"
-                } else {
-                    "Starting work for {minutes} minutes"
-                },
-                "{minutes}",
-                self.runtime_settings.pomodoro_work_minutes.to_string(),
-            ));
-            self.request_app_repaint();
-        }
+            )
+            .clicked()
+            {
+                self.pomodoro.start_working(Instant::now());
+                self.push_pomodoro_notification(i18n::text_with_arg(
+                    self.app_language,
+                    if reset_work {
+                        "Work timer reset for {minutes} minutes"
+                    } else {
+                        "Starting work for {minutes} minutes"
+                    },
+                    "{minutes}",
+                    self.runtime_settings.pomodoro_work_minutes.to_string(),
+                ));
+                self.request_app_repaint();
+            }
 
-        if help_entry_button(ui, self.app_language).clicked() {
-            self.set_active_app_dialog(Some(AppDialog::Help));
-        }
+            if help_entry_button(ui, self.app_language).clicked() {
+                self.set_active_app_dialog(Some(AppDialog::Help));
+            }
+        });
     }
 
     /// Renders the route content that remains visible in F11 app fullscreen.
