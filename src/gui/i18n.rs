@@ -100,6 +100,7 @@ fn chinese_text(source: &'static str) -> &'static str {
         "Confirm Delete" => "确认删除",
         "Close Workspace" => "关闭工作区",
         "Add Subagent" => "添加子 Agent",
+        "Close Subagent" => "关闭子 Agent",
         "Close Agent Column" => "关闭 Agent 列",
         "Close Agent Row" => "关闭 Agent 行",
         "Restart Agent" => "重启 Agent",
@@ -205,16 +206,25 @@ fn chinese_text(source: &'static str) -> &'static str {
         "Add col" => "添加列",
         "Close row" => "关闭行",
         "Close col" => "关闭列",
+        "Close subagent" => "关闭子 Agent",
         "Collapse col" => "折叠列",
         "Collapse other cols" => "折叠其他列",
         "Collapse row" => "折叠行",
         "Collapse other rows" => "折叠其他行",
+        "Move to left col" => "移动到左侧列",
+        "Move to right col" => "移动到右侧列",
+        "Move to upper row" => "移动到上方行",
+        "Move to lower row" => "移动到下方行",
         "Close Agent column?" => "关闭 Agent 列？",
+        "Close subagent?" => "关闭子 Agent？",
         "Close Agent row?" => "关闭 Agent 行？",
         "Close Column" => "关闭列",
         "Close Row" => "关闭行",
         "This closes the column and deletes {count} agent(s) in it." => {
             "这会关闭该列，并删除其中 {count} 个 Agent。"
+        }
+        "This closes the subagent and deletes its session state." => {
+            "这会关闭该子 Agent，并删除它的会话状态。"
         }
         "This closes the row and deletes {count} agent(s) in it." => {
             "这会关闭该行，并删除其中 {count} 个 Agent。"
@@ -652,6 +662,7 @@ fn japanese_text(source: &'static str) -> &'static str {
         "Confirm Delete" => "削除の確認",
         "Close Workspace" => "ワークスペースを閉じる",
         "Add Subagent" => "サブ Agent を追加",
+        "Close Subagent" => "サブ Agent を閉じる",
         "Close Agent Column" => "Agent 列を閉じる",
         "Close Agent Row" => "Agent 行を閉じる",
         "Restart Agent" => "Agent を再起動",
@@ -759,16 +770,25 @@ fn japanese_text(source: &'static str) -> &'static str {
         "Add col" => "列を追加",
         "Close row" => "行を閉じる",
         "Close col" => "列を閉じる",
+        "Close subagent" => "サブ Agent を閉じる",
         "Collapse col" => "列を折りたたむ",
         "Collapse other cols" => "他の列を折りたたむ",
         "Collapse row" => "行を折りたたむ",
         "Collapse other rows" => "他の行を折りたたむ",
+        "Move to left col" => "左の列へ移動",
+        "Move to right col" => "右の列へ移動",
+        "Move to upper row" => "上の行へ移動",
+        "Move to lower row" => "下の行へ移動",
         "Close Agent column?" => "Agent 列を閉じますか？",
+        "Close subagent?" => "サブ Agent を閉じますか？",
         "Close Agent row?" => "Agent 行を閉じますか？",
         "Close Column" => "列を閉じる",
         "Close Row" => "行を閉じる",
         "This closes the column and deletes {count} agent(s) in it." => {
             "この列を閉じ、中の Agent {count} 件を削除します。"
+        }
+        "This closes the subagent and deletes its session state." => {
+            "このサブ Agent を閉じ、セッション状態を削除します。"
         }
         "This closes the row and deletes {count} agent(s) in it." => {
             "この行を閉じ、中の Agent {count} 件を削除します。"

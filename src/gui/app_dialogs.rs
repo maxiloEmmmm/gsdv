@@ -112,6 +112,7 @@ impl GsdvGuiApp {
         let mut delete_markdown = None;
         let mut close_workspace = None;
         let mut close_agent_column = None;
+        let mut close_agent_subagent = None;
         let mut close_agent_row = None;
         let mut add_subagent = None;
         let mut restart_agent = None;
@@ -142,9 +143,9 @@ impl GsdvGuiApp {
                 | AppDialog::CreateFolder { .. }
                 | AppDialog::RenamePath { .. } => Vec2::new(460.0, 300.0),
                 AppDialog::CloseWorkspace { .. } => Vec2::new(500.0, 280.0),
-                AppDialog::CloseAgentColumn { .. } | AppDialog::CloseAgentRow { .. } => {
-                    Vec2::new(500.0, 260.0)
-                }
+                AppDialog::CloseAgentColumn { .. }
+                | AppDialog::CloseAgentSubagent { .. }
+                | AppDialog::CloseAgentRow { .. } => Vec2::new(500.0, 260.0),
                 AppDialog::WorkflowUnsavedSwitch { .. } => Vec2::new(500.0, 260.0),
                 AppDialog::WorkflowAddProject { .. }
                 | AppDialog::WorkflowAddTask { .. } => Vec2::new(500.0, 260.0),
@@ -972,6 +973,61 @@ impl GsdvGuiApp {
                                 .clicked()
                         {
                             close_agent_column = Some((index, column_id.clone()));
+                            next_dialog = None;
+                        }
+                        if secondary_action(ui, i18n::text(self.app_language, "Cancel")).clicked() {
+                            next_dialog = None;
+                        }
+                    });
+                }
+                AppDialog::CloseAgentSubagent { index, id } => {
+                    let workspace = self.workspaces.get(index);
+                    let subagent_name = workspace
+                        .and_then(|workspace| {
+                            workspace
+                                .subagents
+                                .iter()
+                                .find(|subagent| subagent.id == id)
+                        })
+                        .map(|subagent| subagent.name.as_str());
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("!").size(30.0).color(theme::danger()));
+                        ui.vertical(|ui| {
+                            ui.label(
+                                RichText::new(i18n::text(
+                                    self.app_language,
+                                    "Close subagent?",
+                                ))
+                                .strong(),
+                            );
+                            if let Some(name) = subagent_name {
+                                ui.label(muted(name));
+                            } else if let Some(workspace) = workspace {
+                                ui.label(muted(&workspace.name));
+                            } else {
+                                ui.label(muted(i18n::text(
+                                    self.app_language,
+                                    "This workspace no longer exists.",
+                                )));
+                            }
+                        });
+                    });
+                    ui.add_space(12.0);
+                    ui.label(
+                        RichText::new(i18n::text(
+                            self.app_language,
+                            "This closes the subagent and deletes its session state.",
+                        ))
+                        .size(12.0)
+                        .color(theme::warning()),
+                    );
+                    ui.add_space(14.0);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if subagent_name.is_some()
+                            && primary_action(ui, i18n::text(self.app_language, "Close Subagent"))
+                                .clicked()
+                        {
+                            close_agent_subagent = Some((index, id.clone()));
                             next_dialog = None;
                         }
                         if secondary_action(ui, i18n::text(self.app_language, "Cancel")).clicked() {
@@ -2042,6 +2098,9 @@ impl GsdvGuiApp {
         if let Some((index, column_id)) = close_agent_column {
             self.remove_agent_column(ctx, index, &column_id);
         }
+        if let Some((index, id)) = close_agent_subagent {
+            self.remove_subagent(ctx, index, &id);
+        }
         if let Some((index, row_index)) = close_agent_row {
             self.remove_agent_row(ctx, index, row_index);
         }
@@ -2431,6 +2490,7 @@ fn app_dialog_title(dialog: &AppDialog, language: AppLanguage) -> &str {
         AppDialog::DeleteMarkdown { .. } => "Confirm Delete",
         AppDialog::CloseWorkspace { .. } => "Close Workspace",
         AppDialog::CloseAgentColumn { .. } => "Close Agent Column",
+        AppDialog::CloseAgentSubagent { .. } => "Close Subagent",
         AppDialog::CloseAgentRow { .. } => "Close Agent Row",
         AppDialog::AddSubagent { .. } => "Add Subagent",
         AppDialog::RestartAgent { .. } => "Restart Agent",

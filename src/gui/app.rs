@@ -2095,6 +2095,10 @@ enum AppDialog {
         index: usize,
         column_id: String,
     },
+    CloseAgentSubagent {
+        index: usize,
+        id: String,
+    },
     CloseAgentRow {
         index: usize,
         row_index: usize,
@@ -2206,6 +2210,9 @@ enum AgentTabAction {
         row_index: usize,
         column_index: usize,
     },
+    CloseSubagent {
+        id: String,
+    },
     CollapseRow {
         row_index: usize,
     },
@@ -2265,6 +2272,26 @@ enum AgentTabAction {
     MoveSubagentToTail {
         row_index: usize,
         column_id: String,
+        id: String,
+    },
+    MoveSubagentToLeftColumn {
+        row_index: usize,
+        column_index: usize,
+        id: String,
+    },
+    MoveSubagentToRightColumn {
+        row_index: usize,
+        column_index: usize,
+        id: String,
+    },
+    MoveSubagentToUpperRow {
+        row_index: usize,
+        column_index: usize,
+        id: String,
+    },
+    MoveSubagentToLowerRow {
+        row_index: usize,
+        column_index: usize,
         id: String,
     },
     MoveSubagentToWorkspace {

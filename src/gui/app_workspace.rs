@@ -618,6 +618,58 @@ impl GsdvGuiApp {
         self.move_subagent_to_position(ctx, index, column_id, id, target);
     }
 
+    /// Moves one subagent to a neighboring column in the same Agent row.
+    ///
+    /// Example: row 0 col 1 with `direction = -1` -> append to row 0 col 0.
+    pub(super) fn move_subagent_to_adjacent_column(
+        &mut self,
+        ctx: &egui::Context,
+        index: usize,
+        row_index: usize,
+        column_index: usize,
+        id: &str,
+        direction: isize,
+    ) {
+        let Some(target_column_index) = column_index.checked_add_signed(direction) else {
+            return;
+        };
+        self.move_subagent_to_grid_cell(
+            ctx,
+            index,
+            row_index,
+            column_index,
+            row_index,
+            target_column_index,
+            id,
+        );
+    }
+
+    /// Moves one subagent to the first column of a neighboring Agent row.
+    ///
+    /// Example: row 2 col 3 with `direction = -1` -> append to row 1 col 0.
+    pub(super) fn move_subagent_to_adjacent_row(
+        &mut self,
+        ctx: &egui::Context,
+        index: usize,
+        row_index: usize,
+        column_index: usize,
+        id: &str,
+        direction: isize,
+    ) {
+        let Some(target_row_index) = row_index.checked_add_signed(direction) else {
+            return;
+        };
+        self.move_subagent_to_grid_cell(
+            ctx,
+            index,
+            row_index,
+            column_index,
+            target_row_index,
+            0,
+            id,
+        );
+    }
+
     /// Moves one subagent from the source workspace to another workspace.
     pub(super) fn move_subagent_to_workspace(
         &mut self,
@@ -710,6 +762,76 @@ impl GsdvGuiApp {
 
         self.persist_workspaces();
         self.request_app_repaint();
+    }
+
+    /// Moves one subagent tab between two Agent grid cells.
+    ///
+    /// Example: source row 0 col 0 and target row 1 col 0 -> target gets the
+    /// subagent as its last tab and active slot.
+    fn move_subagent_to_grid_cell(
+        &mut self,
+        ctx: &egui::Context,
+        index: usize,
+        source_row_index: usize,
+        source_column_index: usize,
+        target_row_index: usize,
+        target_column_index: usize,
+        id: &str,
+    ) {
+        if source_row_index == target_row_index && source_column_index == target_column_index {
+            return;
+        }
+        let slot = data::AgentColumnSlot::Subagent(id.to_string());
+        let Some(workspace) = self.workspaces.get_mut(index) else {
+            return;
+        };
+        if workspace
+            .agent_rows
+            .get(target_row_index)
+            .and_then(|row| row.columns.get(target_column_index))
+            .is_none()
+        {
+            return;
+        }
+        let Some(source_column) = workspace
+            .agent_rows
+            .get_mut(source_row_index)
+            .and_then(|row| row.columns.get_mut(source_column_index))
+        else {
+            return;
+        };
+        let Some(source_tab_index) = source_column.tabs.iter().position(|tab| tab == &slot) else {
+            return;
+        };
+        source_column.tabs.remove(source_tab_index);
+        if source_column.active_slot == slot {
+            source_column.active_slot = source_column
+                .tabs
+                .first()
+                .cloned()
+                .unwrap_or(data::AgentColumnSlot::Main);
+        }
+
+        let Some(target_column) = workspace
+            .agent_rows
+            .get_mut(target_row_index)
+            .and_then(|row| row.columns.get_mut(target_column_index))
+        else {
+            return;
+        };
+        target_column.tabs.retain(|tab| tab != &slot);
+        target_column.tabs.push(slot.clone());
+        target_column.active_slot = slot.clone();
+        workspace.agent_focus = Some(data::AgentFocusViewData {
+            row_index: target_row_index,
+            column_index: target_column_index,
+        });
+        if let Some(active) = self.active_agent_slots.get_mut(index) {
+            *active = AgentSlotId::from_column_slot(&slot);
+        }
+        self.persist_workspaces();
+        self.request_app_repaint();
+        ctx.request_repaint();
     }
 
     /// Returns the current subagent index inside one workspace.

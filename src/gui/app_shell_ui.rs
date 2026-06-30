@@ -1583,6 +1583,77 @@ impl GsdvGuiApp {
             if include_structure {
                 ui.separator();
             }
+            if ui
+                .button(i18n::text(self.app_language, "Close subagent"))
+                .clicked()
+            {
+                *agent_tab_action = Some(AgentTabAction::CloseSubagent { id: id.clone() });
+                ui.close_menu();
+            }
+            ui.separator();
+            let row_count = workspace.agent_rows.len();
+            let column_count = workspace
+                .agent_rows
+                .get(row_index)
+                .map(|row| row.columns.len())
+                .unwrap_or_default();
+            if column_index > 0
+                && ui
+                    .button(i18n::text(self.app_language, "Move to left col"))
+                    .clicked()
+            {
+                *agent_tab_action = Some(AgentTabAction::MoveSubagentToLeftColumn {
+                    row_index,
+                    column_index,
+                    id: id.clone(),
+                });
+                ui.close_menu();
+            }
+            if column_index + 1 < column_count
+                && ui
+                    .button(i18n::text(self.app_language, "Move to right col"))
+                    .clicked()
+            {
+                *agent_tab_action = Some(AgentTabAction::MoveSubagentToRightColumn {
+                    row_index,
+                    column_index,
+                    id: id.clone(),
+                });
+                ui.close_menu();
+            }
+            if row_index > 0
+                && workspace
+                    .agent_rows
+                    .get(row_index - 1)
+                    .is_some_and(|row| !row.columns.is_empty())
+                && ui
+                    .button(i18n::text(self.app_language, "Move to upper row"))
+                    .clicked()
+            {
+                *agent_tab_action = Some(AgentTabAction::MoveSubagentToUpperRow {
+                    row_index,
+                    column_index,
+                    id: id.clone(),
+                });
+                ui.close_menu();
+            }
+            if row_index + 1 < row_count
+                && workspace
+                    .agent_rows
+                    .get(row_index + 1)
+                    .is_some_and(|row| !row.columns.is_empty())
+                && ui
+                    .button(i18n::text(self.app_language, "Move to lower row"))
+                    .clicked()
+            {
+                *agent_tab_action = Some(AgentTabAction::MoveSubagentToLowerRow {
+                    row_index,
+                    column_index,
+                    id: id.clone(),
+                });
+                ui.close_menu();
+            }
+            ui.separator();
             ui.menu_button(i18n::text(self.app_language, "Move to workspace"), |ui| {
                 if workspace_targets.is_empty() {
                     ui.add_enabled(
