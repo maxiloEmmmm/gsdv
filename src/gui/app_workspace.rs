@@ -273,8 +273,69 @@ impl GsdvGuiApp {
         }
     }
 
-    /// Selects main or one of the first two subagents by shortcut index.
+    /// Selects an Agent tab by shortcut index, preferring the focused column.
+    ///
+    /// Example: focused column tabs `[main, a, b]` and `slot_index = 2`
+    /// selects subagent `b`; without a focused column it falls back to the
+    /// workspace-level legacy mapping.
     pub(super) fn select_agent_slot_by_index(&mut self, slot_index: usize) {
+        if self.select_focused_agent_column_slot_by_index(slot_index) {
+            return;
+        }
+        self.select_workspace_agent_slot_by_index(slot_index);
+    }
+
+    /// Selects a tab inside the currently focused Agent column.
+    ///
+    /// Example: focused column tabs `[a, b]` and `slot_index = 1` selects `b`.
+    fn select_focused_agent_column_slot_by_index(&mut self, slot_index: usize) -> bool {
+        let index = self.active_workspace;
+        let Some(workspace) = self.workspaces.get_mut(index) else {
+            return false;
+        };
+        let Some(focus) = workspace.agent_focus else {
+            return false;
+        };
+        let Some(row) = workspace.agent_rows.get_mut(focus.row_index) else {
+            return false;
+        };
+        if row.collapsed {
+            return false;
+        }
+        let Some(column) = row.columns.get_mut(focus.column_index) else {
+            return false;
+        };
+        if column.collapsed {
+            return false;
+        }
+        let Some(column_slot) = column.tabs.get(slot_index).cloned() else {
+            return false;
+        };
+        let slot = AgentSlotId::from_column_slot(&column_slot);
+        let slot_exists = match &slot {
+            AgentSlotId::Main => true,
+            AgentSlotId::Subagent(id) => workspace
+                .subagents
+                .iter()
+                .any(|subagent| &subagent.id == id),
+        };
+        if !slot_exists {
+            return false;
+        }
+        column.active_slot = column_slot;
+        if let Some(active) = self.active_agent_slots.get_mut(index) {
+            *active = slot;
+        }
+        self.persist_workspaces();
+        self.request_app_repaint();
+        true
+    }
+
+    /// Selects main or one of the first two subagents by legacy shortcut index.
+    ///
+    /// Example: no focused column and `slot_index = 1` selects the first
+    /// workspace subagent when it exists.
+    fn select_workspace_agent_slot_by_index(&mut self, slot_index: usize) {
         let Some(workspace) = self.workspaces.get(self.active_workspace) else {
             return;
         };
