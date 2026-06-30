@@ -636,6 +636,12 @@ impl GsdvGuiApp {
                     column_id,
                 }));
             }
+            AgentTabAction::CloseSubagent { id } => {
+                self.set_active_app_dialog(Some(AppDialog::CloseAgentSubagent {
+                    index: self.active_workspace,
+                    id,
+                }));
+            }
             AgentTabAction::CollapseRow { row_index } => {
                 self.set_agent_row_collapsed(self.active_workspace, row_index, true);
             }
@@ -735,6 +741,62 @@ impl GsdvGuiApp {
             }
             AgentTabAction::MoveSubagentToTail { column_id, id, .. } => {
                 self.move_subagent_to_tail(ctx, self.active_workspace, &column_id, &id);
+            }
+            AgentTabAction::MoveSubagentToLeftColumn {
+                row_index,
+                column_index,
+                id,
+            } => {
+                self.move_subagent_to_adjacent_column(
+                    ctx,
+                    self.active_workspace,
+                    row_index,
+                    column_index,
+                    &id,
+                    -1,
+                );
+            }
+            AgentTabAction::MoveSubagentToRightColumn {
+                row_index,
+                column_index,
+                id,
+            } => {
+                self.move_subagent_to_adjacent_column(
+                    ctx,
+                    self.active_workspace,
+                    row_index,
+                    column_index,
+                    &id,
+                    1,
+                );
+            }
+            AgentTabAction::MoveSubagentToUpperRow {
+                row_index,
+                column_index,
+                id,
+            } => {
+                self.move_subagent_to_adjacent_row(
+                    ctx,
+                    self.active_workspace,
+                    row_index,
+                    column_index,
+                    &id,
+                    -1,
+                );
+            }
+            AgentTabAction::MoveSubagentToLowerRow {
+                row_index,
+                column_index,
+                id,
+            } => {
+                self.move_subagent_to_adjacent_row(
+                    ctx,
+                    self.active_workspace,
+                    row_index,
+                    column_index,
+                    &id,
+                    1,
+                );
             }
             AgentTabAction::MoveSubagentToWorkspace { id, target_index } => {
                 self.move_subagent_to_workspace(ctx, self.active_workspace, &id, target_index);
