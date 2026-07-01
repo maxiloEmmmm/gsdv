@@ -151,6 +151,12 @@ fn input_runtime_keyboard_action(request: &InputRuntimeRequest) -> InputRuntimeK
     }
     if request.active_app_dialog_open || request.active_reviewer_dialog_open {
         if request.workflow_quick_dialog_open
+            && input.modifiers.command
+            && input.key_pressed(egui::Key::S)
+        {
+            return InputRuntimeKeyboardAction::Command(UiCommand::SaveDocument);
+        }
+        if request.workflow_quick_dialog_open
             && !request.wants_keyboard_input
             && workflow_quick_copy_shortcut_pressed(input)
         {
