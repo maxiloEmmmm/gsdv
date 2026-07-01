@@ -65,7 +65,11 @@ impl GsdvGuiApp {
             }
             UiCommand::OpenHelp => self.set_active_app_dialog(Some(AppDialog::Help)),
             UiCommand::SaveDocument => {
-                if self.workflow_task_surface_visible() {
+                if matches!(
+                    self.active_app_dialog(),
+                    Some(AppDialog::WorkflowQuickModal)
+                ) || self.workflow_task_surface_visible()
+                {
                     self.save_active_workflow_step(ctx, None);
                 } else {
                     self.save_active_document();
