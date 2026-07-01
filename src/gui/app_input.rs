@@ -164,6 +164,12 @@ fn input_runtime_keyboard_action(request: &InputRuntimeRequest) -> InputRuntimeK
         }
         if request.workflow_quick_dialog_open
             && command_or_alt_shortcut_modifier(input.modifiers)
+            && input.key_pressed(egui::Key::W)
+        {
+            return InputRuntimeKeyboardAction::Command(UiCommand::CloseTopLayer);
+        }
+        if request.workflow_quick_dialog_open
+            && command_or_alt_shortcut_modifier(input.modifiers)
             && shortcut_key_pressed(input, egui::Key::Z)
         {
             return InputRuntimeKeyboardAction::Command(UiCommand::ToggleWorkflowQuickModal);
