@@ -1,6 +1,6 @@
 import Button from "ant-design-vue/es/button";
 import Drawer from "ant-design-vue/es/drawer";
-import { defineComponent, onBeforeUnmount, onMounted, ref } from "vue";
+import { defineComponent, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 
 /**
  * Limits browser-held terminal output to the agreed scrollback window.
@@ -8,6 +8,7 @@ import { defineComponent, onBeforeUnmount, onMounted, ref } from "vue";
 const MAX_TERMINAL_ROWS = 500;
 const MAX_TERMINAL_COLS = 500;
 const MAX_TERMINAL_VISIBLE_ROWS = 200;
+const REMOTE_SHELL_VIEWPORT_HEIGHT_VAR = "--remote-shell-viewport-height";
 
 /**
  * Renders the remote terminal page layout.
@@ -27,21 +28,15 @@ export default defineComponent({
     const workspaceError = ref("");
     const workspaces = ref([]);
     const expandedTreeNodes = ref(new Set());
-    const selectedAgent = ref(null);
-    const terminalCols = ref(0);
-    const terminalCursor = ref(null);
-    const terminalSequence = ref(null);
-    const terminalStatus = ref("Select an agent from the workspace drawer.");
-    const terminalError = ref("");
+    const tabs = ref([]);
+    const activeTabId = ref(null);
     const draftInputElement = ref(null);
     const terminalOutputElement = ref(null);
     const imageInputElement = ref(null);
-    const agentSocket = ref(null);
-    const reconnectTimer = ref(0);
     const scrollFrame = ref(0);
-    const lastTerminalResizeKey = ref("");
-    let terminalRows = [];
     let terminalResizeHandler = null;
+    let visualViewportHandler = null;
+    let visualViewportSyncTimers = [];
 
     /**
      * Loads workspace metadata from the documented remote HTTP route.
@@ -160,31 +155,111 @@ export default defineComponent({
     }
 
     /**
-     * Clears terminal state before a fresh agent snapshot arrives.
+     * Returns a stable browser tab id for one agent binding.
      */
-    function clearTerminal(message) {
-      terminalRows = [];
-      terminalCols.value = 0;
-      terminalCursor.value = null;
-      terminalSequence.value = null;
-      terminalError.value = "";
-      terminalStatus.value = message;
-      renderTerminalEmpty(message);
+    function agentTabId(workspace, row, col, agent) {
+      return [
+        workspace.workspace_id,
+        row.row_index,
+        col.col_index,
+        agent.agent_id,
+      ].join(":");
     }
 
     /**
-     * Closes the current WebSocket and cancels delayed reconnect work.
+     * Returns the currently visible remote agent tab.
      */
-    function closeAgentSocket() {
-      if (reconnectTimer.value !== 0) {
-        window.clearTimeout(reconnectTimer.value);
-        reconnectTimer.value = 0;
+    function activeTab() {
+      return tabs.value.find((tab) => tab.id === activeTabId.value) ?? null;
+    }
+
+    /**
+     * Returns the currently visible agent binding.
+     */
+    function activeBinding() {
+      return activeTab()?.binding ?? null;
+    }
+
+    /**
+     * Forces Vue to re-render after mutating tab fields in place.
+     */
+    function refreshTabs() {
+      tabs.value = tabs.value.slice();
+    }
+
+    /**
+     * Creates a browser tab state for one remote agent binding.
+     */
+    function createAgentTab(workspace, row, col, agent) {
+      const binding = { workspace, row, col, agent };
+      return {
+        id: agentTabId(workspace, row, col, agent),
+        binding,
+        title: agent.title,
+        rows: [],
+        cols: 0,
+        cursor: null,
+        sequence: null,
+        status: "Connecting to agent terminal...",
+        error: "",
+        draft: "",
+        socket: null,
+        reconnectTimer: 0,
+        lastResizeKey: "",
+        closing: false,
+      };
+    }
+
+    /**
+     * Checks whether a tab object is still present in the tab strip.
+     */
+    function tabStillOpen(tab) {
+      return tabs.value.some((candidate) => candidate.id === tab.id);
+    }
+
+    /**
+     * Clears terminal state before a fresh agent snapshot arrives.
+     */
+    function clearTerminal(tab, message) {
+      tab.rows = [];
+      tab.cols = 0;
+      tab.cursor = null;
+      tab.sequence = null;
+      tab.error = "";
+      tab.status = message;
+      if (activeTabId.value === tab.id) {
+        renderTerminalEmpty(message);
       }
-      if (agentSocket.value) {
-        agentSocket.value.close();
-        agentSocket.value = null;
+      refreshTabs();
+    }
+
+    /**
+     * Closes one WebSocket and cancels delayed reconnect work.
+     */
+    function closeAgentSocket(tab, closing = false) {
+      if (!tab) {
+        return;
       }
-      lastTerminalResizeKey.value = "";
+      if (tab.reconnectTimer !== 0) {
+        window.clearTimeout(tab.reconnectTimer);
+        tab.reconnectTimer = 0;
+      }
+      tab.closing = closing;
+      if (tab.socket) {
+        tab.socket.close();
+        tab.socket = null;
+      }
+      tab.lastResizeKey = "";
+      refreshTabs();
+    }
+
+    /**
+     * Closes every open agent tab during component teardown.
+     */
+    function closeAllAgentSockets() {
+      for (const tab of tabs.value) {
+        closeAgentSocket(tab, true);
+      }
     }
 
     /**
@@ -214,6 +289,79 @@ export default defineComponent({
         window.removeEventListener("resize", terminalResizeHandler);
         terminalResizeHandler = null;
       }
+    }
+
+    /**
+     * Syncs the shell height with the browser visual viewport.
+     */
+    function syncVisualViewportHeight() {
+      const viewport = window.visualViewport;
+      const height = viewport ? viewport.height : window.innerHeight;
+      document.documentElement.style.setProperty(
+        REMOTE_SHELL_VIEWPORT_HEIGHT_VAR,
+        `${Math.max(1, Math.floor(height))}px`,
+      );
+      window.scrollTo(0, 0);
+    }
+
+    /**
+     * Clears delayed visual viewport sync work.
+     */
+    function clearVisualViewportSyncTimers() {
+      for (const timer of visualViewportSyncTimers) {
+        window.clearTimeout(timer);
+      }
+      visualViewportSyncTimers = [];
+    }
+
+    /**
+     * Re-syncs mobile viewport height across iOS keyboard animation frames.
+     */
+    function scheduleVisualViewportSync() {
+      clearVisualViewportSyncTimers();
+      syncVisualViewportHeight();
+      window.requestAnimationFrame(syncVisualViewportHeight);
+      visualViewportSyncTimers = [80, 220, 480].map((delay) =>
+        window.setTimeout(() => {
+          syncVisualViewportHeight();
+          sendTerminalResize();
+        }, delay),
+      );
+    }
+
+    /**
+     * Watches mobile keyboard viewport changes for fixed shell layout.
+     */
+    function observeVisualViewportSize() {
+      visualViewportHandler = () => {
+        scheduleVisualViewportSync();
+        sendTerminalResize();
+      };
+      scheduleVisualViewportSync();
+      window.addEventListener("resize", visualViewportHandler);
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener("resize", visualViewportHandler);
+        window.visualViewport.addEventListener("scroll", visualViewportHandler);
+      }
+    }
+
+    /**
+     * Stops watching mobile visual viewport changes during teardown.
+     */
+    function disconnectVisualViewportObserver() {
+      if (!visualViewportHandler) {
+        return;
+      }
+      window.removeEventListener("resize", visualViewportHandler);
+      if (window.visualViewport) {
+        window.visualViewport.removeEventListener("resize", visualViewportHandler);
+        window.visualViewport.removeEventListener("scroll", visualViewportHandler);
+      }
+      document.documentElement.style.removeProperty(
+        REMOTE_SHELL_VIEWPORT_HEIGHT_VAR,
+      );
+      clearVisualViewportSyncTimers();
+      visualViewportHandler = null;
     }
 
     /**
@@ -268,7 +416,7 @@ export default defineComponent({
     /**
      * Sends browser terminal dimensions to the remote agent WebSocket.
      */
-    function sendTerminalResize(socket = agentSocket.value) {
+    function sendTerminalResize(tab = activeTab(), socket = tab?.socket) {
       if (!socket || socket.readyState !== WebSocket.OPEN) {
         return;
       }
@@ -279,10 +427,10 @@ export default defineComponent({
       }
 
       const key = `${size.cols}x${size.rows}`;
-      if (key === lastTerminalResizeKey.value) {
+      if (key === tab.lastResizeKey) {
         return;
       }
-      lastTerminalResizeKey.value = key;
+      tab.lastResizeKey = key;
       socket.send(JSON.stringify({ type: "resize", ...size }));
     }
 
@@ -315,38 +463,63 @@ export default defineComponent({
     }
 
     /**
+     * Checks whether new terminal output should stay pinned to the bottom.
+     */
+    function terminalShouldFollowOutput() {
+      const output = terminalOutputElement.value;
+      if (!output) {
+        return true;
+      }
+      if (output.scrollHeight <= output.clientHeight) {
+        return true;
+      }
+      return output.scrollTop + output.clientHeight >= output.scrollHeight;
+    }
+
+    /**
      * Connects the browser to the selected agent output WebSocket.
      */
-    function connectAgentSocket(binding) {
-      closeAgentSocket();
-      clearTerminal("Connecting to agent terminal...");
+    function connectAgentSocket(tab) {
+      closeAgentSocket(tab);
+      tab.closing = false;
+      clearTerminal(tab, "Connecting to agent terminal...");
 
-      const socket = new WebSocket(agentOutputUrl(binding));
-      agentSocket.value = socket;
+      const socket = new WebSocket(agentOutputUrl(tab.binding));
+      tab.socket = socket;
+      refreshTabs();
 
       socket.onopen = () => {
-        if (agentSocket.value === socket) {
-          terminalStatus.value = "Waiting for terminal snapshot...";
-          sendTerminalResize(socket);
+        if (tab.socket === socket && tabStillOpen(tab)) {
+          tab.status = "Waiting for terminal snapshot...";
+          sendTerminalResize(tab, socket);
+          refreshTabs();
         }
       };
 
       socket.onmessage = (event) => {
-        if (agentSocket.value !== socket) {
+        if (tab.socket !== socket || !tabStillOpen(tab)) {
           return;
         }
-        handleSocketMessage(socket, binding, event.data);
+        handleSocketMessage(tab, socket, event.data);
       };
 
       socket.onerror = () => {
-        if (agentSocket.value === socket) {
-          terminalError.value = "Agent terminal connection failed.";
+        if (tab.socket === socket && tabStillOpen(tab)) {
+          tab.error = "Agent terminal connection failed.";
+          refreshTabs();
         }
       };
 
       socket.onclose = () => {
-        if (agentSocket.value === socket) {
-          terminalStatus.value = "Agent terminal disconnected.";
+        if (tab.socket === socket && tabStillOpen(tab)) {
+          tab.socket = null;
+          tab.status = "dis";
+          tab.error = "dis";
+          tab.lastResizeKey = "";
+          if (activeTabId.value === tab.id) {
+            renderActiveTerminal();
+          }
+          refreshTabs();
         }
       };
     }
@@ -354,22 +527,23 @@ export default defineComponent({
     /**
      * Handles one JSON message from the documented agent output stream.
      */
-    function handleSocketMessage(socket, binding, rawMessage) {
+    function handleSocketMessage(tab, socket, rawMessage) {
       let message;
       try {
         message = JSON.parse(rawMessage);
       } catch (_error) {
-        terminalError.value = "Received invalid terminal message.";
+        tab.error = "Received invalid terminal message.";
+        refreshTabs();
         return;
       }
 
       if (message.type === "snapshot") {
-        applySnapshotMessage(message);
+        applySnapshotMessage(tab, message);
         return;
       }
 
       if (message.type === "append") {
-        applyAppendMessage(binding, message);
+        applyAppendMessage(tab, message);
         return;
       }
 
@@ -381,68 +555,89 @@ export default defineComponent({
     /**
      * Applies a full terminal snapshot from a newly opened connection.
      */
-    function applySnapshotMessage(message) {
+    function applySnapshotMessage(tab, message) {
       const rows = Array.isArray(message.rows) ? message.rows : [];
-      terminalRows = trimTerminalRows(rows);
-      terminalCols.value = Number.isFinite(message.cols) ? message.cols : 0;
-      terminalCursor.value = message.cursor ?? null;
-      terminalSequence.value = Number.isFinite(message.sequence)
-        ? message.sequence
-        : null;
-      terminalStatus.value = "Agent terminal connected.";
-      terminalError.value = "";
-      renderTerminalRows(terminalRows);
-      scrollTerminalToBottom();
+      const isActive = activeTabId.value === tab.id;
+      const followOutput = isActive ? terminalShouldFollowOutput() : false;
+      tab.rows = trimTerminalRows(rows);
+      tab.cols = Number.isFinite(message.cols) ? message.cols : 0;
+      tab.cursor = message.cursor ?? null;
+      tab.sequence = Number.isFinite(message.sequence) ? message.sequence : null;
+      tab.status = "Agent terminal connected.";
+      tab.error = "";
+      if (isActive) {
+        renderTerminalRows(tab.rows);
+        if (followOutput) {
+          scrollTerminalToBottom();
+        }
+      }
+      refreshTabs();
     }
 
     /**
      * Appends new terminal rows when the sequence is contiguous.
      */
-    function applyAppendMessage(binding, message) {
+    function applyAppendMessage(tab, message) {
       const nextSequence = message.sequence;
-      const currentSequence = terminalSequence.value;
+      const currentSequence = tab.sequence;
       if (
         !Number.isFinite(nextSequence) ||
         !Number.isFinite(currentSequence) ||
         nextSequence !== currentSequence + 1
       ) {
-        reconnectCurrentAgent(binding);
+        reconnectCurrentAgent(tab);
         return;
       }
 
       const rows = Array.isArray(message.rows) ? message.rows : [];
-      terminalRows = trimTerminalRows(terminalRows.concat(rows));
-      terminalSequence.value = nextSequence;
-      terminalCursor.value = message.cursor ?? terminalCursor.value;
-      renderTerminalRows(terminalRows);
-      scrollTerminalToBottom();
+      const isActive = activeTabId.value === tab.id;
+      const followOutput = isActive ? terminalShouldFollowOutput() : false;
+      tab.rows = trimTerminalRows(tab.rows.concat(rows));
+      tab.sequence = nextSequence;
+      tab.cursor = message.cursor ?? tab.cursor;
+      if (isActive) {
+        renderTerminalRows(tab.rows);
+        if (followOutput) {
+          scrollTerminalToBottom();
+        }
+      }
+      refreshTabs();
     }
 
     /**
      * Reconnects after a sequence gap so the server can send a fresh snapshot.
      */
-    function reconnectCurrentAgent(binding) {
-      terminalError.value = "Terminal stream sequence changed; reconnecting.";
-      closeAgentSocket();
+    function reconnectCurrentAgent(tab) {
+      tab.error = "Terminal stream sequence changed; reconnecting.";
+      closeAgentSocket(tab);
       // 触发条件：append sequence 不是当前 sequence + 1。
       // 不能直接继续 append：缺失的行无法从 append-only 协议恢复。
       // 防止回归：输出丢包后页面仍显示为貌似正常的半截日志。
-      reconnectTimer.value = window.setTimeout(() => {
-        reconnectTimer.value = 0;
-        if (selectedAgent.value === binding) {
-          connectAgentSocket(binding);
+      tab.reconnectTimer = window.setTimeout(() => {
+        tab.reconnectTimer = 0;
+        if (tabStillOpen(tab)) {
+          connectAgentSocket(tab);
         }
       }, 300);
+      refreshTabs();
     }
 
     /**
      * Selects an agent from the drawer and binds terminal output to it.
      */
     function selectAgent(workspace, row, col, agent) {
-      const binding = { workspace, row, col, agent };
-      selectedAgent.value = binding;
+      const tabId = agentTabId(workspace, row, col, agent);
+      const existing = tabs.value.find((tab) => tab.id === tabId);
       drawerOpen.value = false;
-      connectAgentSocket(binding);
+      if (existing) {
+        activateAgentTab(existing.id);
+        return;
+      }
+
+      const tab = createAgentTab(workspace, row, col, agent);
+      tabs.value = tabs.value.concat(tab);
+      activateAgentTab(tab.id);
+      connectAgentSocket(tab);
     }
 
     /**
@@ -470,10 +665,21 @@ export default defineComponent({
     }
 
     /**
+     * Stores the current composer draft on the active browser tab.
+     */
+    function handleDraftInput(event) {
+      const tab = activeTab();
+      if (tab) {
+        tab.draft = event.target.value;
+      }
+    }
+
+    /**
      * Sends the current input text through the documented agent input route.
      */
     async function submitDraft() {
-      const binding = selectedAgent.value;
+      const tab = activeTab();
+      const binding = tab?.binding ?? null;
       const input = draftInputElement.value;
       const text = input?.value.trim() ?? "";
 
@@ -496,9 +702,10 @@ export default defineComponent({
           throw new Error(`input api failed: ${response.status}`);
         }
         input.value = "";
+        tab.draft = "";
       } catch (error) {
-        terminalError.value =
-          error instanceof Error ? error.message : String(error);
+        tab.error = error instanceof Error ? error.message : String(error);
+        refreshTabs();
       }
     }
 
@@ -506,7 +713,8 @@ export default defineComponent({
      * Sends an interrupt request to the selected agent.
      */
     async function interruptAgent() {
-      const binding = selectedAgent.value;
+      const tab = activeTab();
+      const binding = tab?.binding ?? null;
       if (!binding) {
         return;
       }
@@ -521,8 +729,8 @@ export default defineComponent({
           throw new Error(`esc api failed: ${response.status}`);
         }
       } catch (error) {
-        terminalError.value =
-          error instanceof Error ? error.message : String(error);
+        tab.error = error instanceof Error ? error.message : String(error);
+        refreshTabs();
       }
     }
 
@@ -530,7 +738,7 @@ export default defineComponent({
      * Opens the local image picker for the selected agent.
      */
     function openImagePicker() {
-      if (!selectedAgent.value || !imageInputElement.value) {
+      if (!activeTab() || !imageInputElement.value) {
         return;
       }
 
@@ -541,7 +749,8 @@ export default defineComponent({
      * Sends the selected image file through the remote image route.
      */
     async function submitImageFile(file) {
-      const binding = selectedAgent.value;
+      const tab = activeTab();
+      const binding = tab?.binding ?? null;
       if (!binding || !file) {
         return;
       }
@@ -561,8 +770,8 @@ export default defineComponent({
           throw new Error(`image api failed: ${response.status}`);
         }
       } catch (error) {
-        terminalError.value =
-          error instanceof Error ? error.message : String(error);
+        tab.error = error instanceof Error ? error.message : String(error);
+        refreshTabs();
       }
     }
 
@@ -773,6 +982,59 @@ export default defineComponent({
     }
 
     /**
+     * Renders the currently active tab into the shared terminal output node.
+     */
+    function renderActiveTerminal() {
+      const tab = activeTab();
+      if (!tab) {
+        renderTerminalEmpty("Select an agent from the workspace drawer.");
+        return;
+      }
+      if (tab.rows.length === 0) {
+        renderTerminalEmpty(tab.status);
+        return;
+      }
+      renderTerminalRows(tab.rows);
+    }
+
+    /**
+     * Activates one open browser tab without opening duplicate sockets.
+     */
+    function activateAgentTab(tabId) {
+      activeTabId.value = tabId;
+      const tab = activeTab();
+      nextTick(() => {
+        renderActiveTerminal();
+        sendTerminalResize(tab);
+        if (draftInputElement.value && tab) {
+          draftInputElement.value.value = tab.draft;
+        }
+      });
+    }
+
+    /**
+     * Closes one browser tab and selects a neighboring tab when needed.
+     */
+    function closeAgentTab(tab, event) {
+      event?.stopPropagation();
+      const index = tabs.value.findIndex((candidate) => candidate.id === tab.id);
+      if (index < 0) {
+        return;
+      }
+      closeAgentSocket(tab, true);
+      const nextTabs = tabs.value.filter((candidate) => candidate.id !== tab.id);
+      tabs.value = nextTabs;
+      if (activeTabId.value === tab.id) {
+        const next = nextTabs[Math.max(0, index - 1)] ?? nextTabs[index] ?? null;
+        activeTabId.value = next?.id ?? null;
+        nextTick(() => {
+          renderActiveTerminal();
+          sendTerminalResize(activeTab());
+        });
+      }
+    }
+
+    /**
      * Returns the CSS underline line value for one terminal cell.
      */
     function terminalTextDecoration(cell) {
@@ -806,13 +1068,7 @@ export default defineComponent({
      * Checks whether a drawer agent row matches the active binding.
      */
     function agentSelected(workspace, row, col, agent) {
-      const binding = selectedAgent.value;
-      return (
-        binding?.workspace.workspace_id === workspace.workspace_id &&
-        binding?.row.row_index === row.row_index &&
-        binding?.col.col_index === col.col_index &&
-        binding?.agent.agent_id === agent.agent_id
-      );
+      return activeTabId.value === agentTabId(workspace, row, col, agent);
     }
 
     /**
@@ -940,14 +1196,16 @@ export default defineComponent({
      * Releases browser resources owned by the remote shell.
      */
     function cleanupRemoteShell() {
-      closeAgentSocket();
+      closeAllAgentSockets();
       cancelTerminalScroll();
       disconnectTerminalResizeObserver();
+      disconnectVisualViewportObserver();
     }
 
     onMounted(() => {
+      observeVisualViewportSize();
       loadWorkspaceTree();
-      renderTerminalEmpty(terminalStatus.value);
+      renderActiveTerminal();
       observeTerminalOutputSize();
     });
     onBeforeUnmount(cleanupRemoteShell);
@@ -955,7 +1213,11 @@ export default defineComponent({
     /**
      * Renders the remote shell with drawer, terminal, and composer.
      */
-    return () => (
+    return () => {
+      const tab = activeTab();
+      const binding = tab?.binding ?? null;
+      const terminalBanner = tab?.error || (tab?.status === "dis" ? "dis" : "");
+      return (
       <div class="remote-shell">
         <header class="remote-shell__header">
           <Button
@@ -972,18 +1234,48 @@ export default defineComponent({
           <div class="remote-shell__heading">
             <div class="remote-shell__title">GSDV Remote</div>
             <div class="remote-shell__subtitle">
-              {selectedAgent.value
-                ? `${selectedAgent.value.workspace.name} / ${selectedAgent.value.agent.title}`
+              {binding
+                ? `${binding.workspace.name} / ${binding.agent.title}`
                 : "No agent selected"}
             </div>
           </div>
         </header>
 
+        {tabs.value.length > 0 ? (
+          <div class="remote-shell__tabs" aria-label="Open agents">
+            {tabs.value.map((item) => (
+              <button
+                class={{
+                  "remote-shell__tab": true,
+                  "remote-shell__tab--active": item.id === activeTabId.value,
+                  "remote-shell__tab--disconnected": item.status === "dis",
+                }}
+                type="button"
+                key={item.id}
+                onClick={() => activateAgentTab(item.id)}
+              >
+                <span class="remote-shell__tab-label">{item.title}</span>
+                {item.status === "dis" ? (
+                  <span class="remote-shell__tab-state">dis</span>
+                ) : null}
+                <span
+                  class="remote-shell__tab-close"
+                  role="button"
+                  aria-label={`Close ${item.title}`}
+                  onClick={(event) => closeAgentTab(item, event)}
+                >
+                  x
+                </span>
+              </button>
+            ))}
+          </div>
+        ) : null}
+
         <main class="remote-shell__terminal" aria-label="Agent terminal output">
           <div class="remote-shell__terminal-output" ref={terminalOutputElement} />
-          {terminalError.value ? (
+          {terminalBanner ? (
             <div class="remote-shell__terminal-banner">
-              {terminalError.value}
+              {terminalBanner}
             </div>
           ) : null}
         </main>
@@ -992,7 +1284,7 @@ export default defineComponent({
           <Button
             class="remote-shell__action-button"
             aria-label="Interrupt agent"
-            disabled={!selectedAgent.value}
+            disabled={!binding}
             onClick={interruptAgent}
           >
             ESC
@@ -1000,7 +1292,7 @@ export default defineComponent({
           <Button
             class="remote-shell__action-button"
             aria-label="Select image"
-            disabled={!selectedAgent.value}
+            disabled={!binding}
             onClick={openImagePicker}
           >
             IMG
@@ -1009,16 +1301,20 @@ export default defineComponent({
             class="remote-shell__input"
             aria-label="Agent input"
             ref={draftInputElement}
-            disabled={!selectedAgent.value}
+            disabled={!binding}
             placeholder="Send input to the selected agent"
             rows="1"
+            value={tab?.draft ?? ""}
+            onInput={handleDraftInput}
+            onFocus={scheduleVisualViewportSync}
+            onBlur={scheduleVisualViewportSync}
             onKeydown={handleDraftKeydown}
           />
           <Button
             class="remote-shell__send-button"
             aria-label="Send input"
             type="primary"
-            disabled={!selectedAgent.value}
+            disabled={!binding}
             onClick={submitDraft}
           >
             &gt;
@@ -1058,6 +1354,7 @@ export default defineComponent({
           </nav>
         </Drawer>
       </div>
-    );
+      );
+    };
   },
 });

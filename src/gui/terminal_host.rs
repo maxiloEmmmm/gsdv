@@ -33,6 +33,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::watch;
 
 static TERMINAL_ID: AtomicU64 = AtomicU64::new(1);
+static TERMINAL_REMOTE_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 static TERMINAL_SPAWN_ENV_LOCK: Mutex<()> = Mutex::new(());
 const TERMINAL_SCROLLBACK_HISTORY_LINES: usize = 2_000;
 const TERMINAL_BELL_FLASH_DURATION: Duration = Duration::from_millis(180);
@@ -250,6 +251,22 @@ pub struct TerminalRemoteOutputSource {
     output_rx: watch::Receiver<u64>,
 }
 
+/// Remote WebSocket 对一个 Agent terminal 的独占控制句柄。
+pub struct TerminalRemoteSessionControl {
+    /// 本次 remote 连接的递增 id，用于忽略旧连接退出事件。
+    pub session_id: u64,
+    /// egui 抢占 terminal 时通知 WebSocket 退出。
+    pub disconnect_rx: watch::Receiver<bool>,
+}
+
+/// Agent terminal 当前被 remote WebSocket 占用的状态。
+struct TerminalRemoteSession {
+    /// 本次 remote 连接的递增 id。
+    session_id: u64,
+    /// egui 抢占 terminal 时写入的断开信号。
+    disconnect_tx: watch::Sender<bool>,
+}
+
 /// Remote 输出订阅端保存的行比较状态。
 #[derive(Debug, Clone)]
 pub struct TerminalRemoteOutputState {
@@ -366,6 +383,8 @@ pub struct GuiTerminalHost {
     runtime_theme_mode: Arc<Mutex<gui_theme::ThemeMode>>,
     /// Agent remote 输出订阅的轻量变化信号。
     remote_output_tx: watch::Sender<u64>,
+    /// Agent terminal 被 remote WebSocket 独占时的连接状态。
+    remote_session: Option<TerminalRemoteSession>,
     font: FontId,
 }
 
@@ -979,6 +998,7 @@ impl GuiTerminalHost {
             runtime_state,
             runtime_theme_mode,
             remote_output_tx,
+            remote_session: None,
             font: FontId::monospace(14.0),
         })
     }
@@ -1044,6 +1064,7 @@ impl GuiTerminalHost {
             runtime_state,
             runtime_theme_mode,
             remote_output_tx,
+            remote_session: None,
             font: FontId::monospace(14.0),
         })
     }
@@ -1083,6 +1104,54 @@ impl GuiTerminalHost {
             term: self.backend.term.clone(),
             theme_mode: self.runtime_theme_mode.clone(),
             output_rx: self.remote_output_tx.subscribe(),
+        }
+    }
+
+    /// 开始 remote 独占输出订阅。
+    ///
+    /// 适用场景：WebSocket 首次连接某个 Agent terminal。例：空闲 -> Some。
+    pub fn begin_remote_output_session(&mut self) -> Option<TerminalRemoteSessionControl> {
+        if self.remote_session.is_some() {
+            return None;
+        }
+        let session_id = TERMINAL_REMOTE_SESSION_ID.fetch_add(1, Ordering::Relaxed);
+        let (disconnect_tx, disconnect_rx) = watch::channel(false);
+        self.remote_session = Some(TerminalRemoteSession {
+            session_id,
+            disconnect_tx,
+        });
+        Some(TerminalRemoteSessionControl {
+            session_id,
+            disconnect_rx,
+        })
+    }
+
+    /// 判断当前 terminal 是否被 remote WebSocket 独占。
+    ///
+    /// 适用场景：egui 绘制 Agent tab 前决定是否显示占位。例：占用 -> true。
+    pub fn remote_output_connected(&self) -> bool {
+        self.remote_session.is_some()
+    }
+
+    /// 从 egui 抢占 remote WebSocket，并恢复本地 terminal 绘制。
+    ///
+    /// 适用场景：用户点击占位里的抢占按钮。例：占用 -> 发送断开并清空。
+    pub fn disconnect_remote_output_session(&mut self) {
+        if let Some(session) = self.remote_session.take() {
+            let _ = session.disconnect_tx.send(true);
+        }
+    }
+
+    /// 清理已结束的 remote WebSocket 占用状态。
+    ///
+    /// 适用场景：WebSocket 自然断开后回到 AppEvent。例：同 id -> 清空。
+    pub fn finish_remote_output_session(&mut self, session_id: u64) {
+        if self
+            .remote_session
+            .as_ref()
+            .is_some_and(|session| session.session_id == session_id)
+        {
+            self.remote_session = None;
         }
     }
 

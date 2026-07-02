@@ -1058,6 +1058,9 @@ impl GsdvGuiApp {
             AppEvent::RemoteApiRequest(envelope) => {
                 self.handle_remote_api_envelope(ctx, envelope);
             }
+            AppEvent::RemoteAgentOutputClosed { target, session_id } => {
+                self.apply_remote_agent_output_closed(target, session_id);
+            }
             AppEvent::FsWatch(event) => {
                 self.apply_fs_watch_event(event);
             }
