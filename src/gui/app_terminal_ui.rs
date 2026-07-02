@@ -31,6 +31,23 @@ fn terminal_pending_panel(ui: &mut Ui, message: &str) {
     });
 }
 
+/// 绘制 remote WebSocket 占用 Agent terminal 时的本地占位。
+fn terminal_remote_connected_panel(ui: &mut Ui) -> bool {
+    let mut reclaim = false;
+    ui.centered_and_justified(|ui| {
+        ui.vertical_centered(|ui| {
+            ui.label(muted("web连线中..."));
+            let response = ui
+                .add(Button::new(RichText::new("↩").size(18.0)))
+                .on_hover_text("抢占");
+            if response.clicked() {
+                reclaim = true;
+            }
+        });
+    });
+    reclaim
+}
+
 /// 判断 Helix 打开请求是否需要启动新进程。
 pub(super) fn helix_spec_needs_spawn(
     current: Option<&HelixLaunchSpec>,
@@ -268,6 +285,19 @@ impl GsdvGuiApp {
             return;
         };
         let terminal_size = Vec2::new(ui.available_width(), ui.available_height().max(1.0));
+        if host.remote_output_connected() {
+            if slot_accepts_input {
+                self.active_agent_terminal_rect = None;
+            }
+            let reclaim = ui
+                .allocate_ui(terminal_size, terminal_remote_connected_panel)
+                .inner;
+            if reclaim {
+                host.disconnect_remote_output_session();
+                ui.ctx().request_repaint();
+            }
+            return;
+        }
         let theme_mode = self.theme_mode;
         let terminal_font_size =
             terminal_font_size_for_kind(&self.font_settings, TerminalSurfaceKind::Agent);

@@ -1713,6 +1713,11 @@ enum AppEvent {
     RemoteServerFailed { generation: u64, error: String },
     /// remote HTTP API 通过唯一队列请求 GUI 状态或 agent 侧效果。
     RemoteApiRequest(app_remote_server::RemoteApiEnvelope),
+    /// remote Agent 输出 WebSocket 关闭后清理占用状态。
+    RemoteAgentOutputClosed {
+        target: app_remote_server::RemoteAgentTarget,
+        session_id: u64,
+    },
     /// 文件系统 watcher 发出一个原始 notify 事件。
     FsWatch(notify::Result<notify::Event>),
     /// Reviewer script 产生一行通知。

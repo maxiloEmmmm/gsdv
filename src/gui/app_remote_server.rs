@@ -115,7 +115,7 @@ struct RemoteApiError {
 
 /// Agent 操作目标位置。
 #[derive(Debug, Clone, Deserialize)]
-struct RemoteAgentTarget {
+pub(super) struct RemoteAgentTarget {
     /// 对外稳定 workspace id。
     workspace_id: String,
     /// Agent row 数组下标。
@@ -176,6 +176,10 @@ struct RemoteAgentOutputQuery {
 
 /// Agent 输出 WebSocket 订阅数据。
 struct RemoteAgentOutputSubscription {
+    /// 本次 remote 连接的独占 session id。
+    session_id: u64,
+    /// egui 抢占时通知 WebSocket 主动关闭。
+    disconnect_rx: tokio::sync::watch::Receiver<bool>,
     /// 可跨任务读取的 terminal 输出源。
     source: TerminalRemoteOutputSource,
     /// 连接成功后立即发送的完整快照。
@@ -528,10 +532,15 @@ impl GsdvGuiApp {
             }
             return RemoteApiResult::Err(remote_not_found());
         };
+        let Some(remote_session) = host.begin_remote_output_session() else {
+            return RemoteApiResult::Err(remote_agent_already_connected());
+        };
         let source = host.remote_output_source();
         let (snapshot, state) = source.snapshot();
         RemoteApiResult::Ok(RemoteApiPayload::AgentOutputSubscription(
             RemoteAgentOutputSubscription {
+                session_id: remote_session.session_id,
+                disconnect_rx: remote_session.disconnect_rx,
                 source,
                 snapshot,
                 state,
@@ -614,6 +623,21 @@ impl GsdvGuiApp {
             kind: TerminalSurfaceKind::Agent,
             agent_slot: slot_id.clone(),
         })
+    }
+
+    /// 清理 remote WebSocket 退出后的 Agent terminal 占用状态。
+    pub(super) fn apply_remote_agent_output_closed(
+        &mut self,
+        target: RemoteAgentTarget,
+        session_id: u64,
+    ) {
+        let Some((workspace_index, slot_id)) = self.remote_agent_slot(&target) else {
+            return;
+        };
+        let Some(host) = self.remote_agent_host_mut(workspace_index, &slot_id) else {
+            return;
+        };
+        host.finish_remote_output_session(session_id);
     }
 }
 
@@ -925,14 +949,24 @@ fn remote_api_result_response(result: RemoteApiResult) -> axum::response::Respon
 /// Runs one upgraded agent output WebSocket connection.
 async fn handle_remote_agent_output_socket(
     mut socket: WebSocket,
+    subscription: RemoteAgentOutputSubscription,
+    state: RemoteApiState,
+    target: RemoteAgentTarget,
+) {
+    let session_id = subscription.session_id;
+    run_remote_agent_output_socket(&mut socket, subscription, state.clone(), target.clone()).await;
+    dispatch_remote_agent_output_closed(&state, target, session_id).await;
+}
+
+/// Runs one upgraded agent output WebSocket connection until it should close.
+async fn run_remote_agent_output_socket(
+    socket: &mut WebSocket,
     mut subscription: RemoteAgentOutputSubscription,
     state: RemoteApiState,
     target: RemoteAgentTarget,
 ) {
     let mut sequence = 1_u64;
-    if !send_remote_agent_output_snapshot(&mut socket, sequence, subscription.snapshot.clone())
-        .await
-    {
+    if !send_remote_agent_output_snapshot(socket, sequence, subscription.snapshot.clone()).await {
         return;
     }
     let mut poll_interval = tokio::time::interval(REMOTE_AGENT_OUTPUT_POLL_INTERVAL);
@@ -946,12 +980,12 @@ async fn handle_remote_agent_output_socket(
                 if !changed {
                     return;
                 }
-                if !send_remote_agent_output_update(&mut socket, &mut subscription, &mut sequence).await {
+                if !send_remote_agent_output_update(socket, &mut subscription, &mut sequence).await {
                     return;
                 }
             }
             _ = poll_interval.tick() => {
-                if !send_remote_agent_output_update(&mut socket, &mut subscription, &mut sequence).await {
+                if !send_remote_agent_output_update(socket, &mut subscription, &mut sequence).await {
                     return;
                 }
             }
@@ -962,7 +996,13 @@ async fn handle_remote_agent_output_socket(
                     return;
                 }
                 sequence = sequence.wrapping_add(1);
-                if !send_remote_agent_output_ping(&mut socket, sequence).await {
+                if !send_remote_agent_output_ping(socket, sequence).await {
+                    return;
+                }
+            }
+            disconnect = subscription.disconnect_rx.changed() => {
+                if disconnect.is_err() || *subscription.disconnect_rx.borrow() {
+                    let _ = socket.send(Message::Close(None)).await;
                     return;
                 }
             }
@@ -984,6 +1024,22 @@ async fn handle_remote_agent_output_socket(
             }
         }
     }
+}
+
+/// Dispatches a remote output close event back through AppEvent.
+async fn dispatch_remote_agent_output_closed(
+    state: &RemoteApiState,
+    target: RemoteAgentTarget,
+    session_id: u64,
+) {
+    if state
+        .event_tx
+        .send(AppEvent::RemoteAgentOutputClosed { target, session_id })
+        .is_err()
+    {
+        return;
+    }
+    state.repaint_controller.request_repaint(&state.repaint_ctx);
 }
 
 /// Sends a terminal output update when the subscribed grid changed.
@@ -1123,6 +1179,15 @@ fn remote_agent_starting() -> RemoteApiError {
         status: StatusCode::SERVICE_UNAVAILABLE,
         code: "agent_starting",
         message: "agent terminal is still starting".to_string(),
+    }
+}
+
+/// Builds a 409 remote API error for an already-connected agent output stream.
+fn remote_agent_already_connected() -> RemoteApiError {
+    RemoteApiError {
+        status: StatusCode::CONFLICT,
+        code: "agent_output_already_connected",
+        message: "agent output is already connected from remote web".to_string(),
     }
 }
 
