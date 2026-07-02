@@ -645,6 +645,17 @@ impl GsdvGuiApp {
             .get(index)
             .cloned()
             .unwrap_or(AgentSlotId::Main);
+        self.restart_agent_slot(ctx, index, slot, resume);
+    }
+
+    /// Restarts a specific workspace agent slot, optionally keeping its session id.
+    pub(super) fn restart_agent_slot(
+        &mut self,
+        ctx: &egui::Context,
+        index: usize,
+        slot: AgentSlotId,
+        resume: bool,
+    ) {
         self.clear_agent_slot_session(index, &slot, resume);
         self.persist_workspaces();
 
@@ -674,6 +685,17 @@ impl GsdvGuiApp {
             .get(index)
             .cloned()
             .unwrap_or(AgentSlotId::Main);
+        self.switch_agent_slot_kind(ctx, index, slot, next_kind);
+    }
+
+    /// Switches a specific agent slot kind and starts a fresh session for it.
+    pub(super) fn switch_agent_slot_kind(
+        &mut self,
+        ctx: &egui::Context,
+        index: usize,
+        slot: AgentSlotId,
+        next_kind: AgentKind,
+    ) {
         if self.agent_slot_kind(index, &slot) == Some(next_kind) {
             return;
         }

@@ -1421,9 +1421,8 @@ impl GsdvGuiApp {
                         next_dialog = None;
                     }
                 }
-                AppDialog::RestartAgent { index } => {
-                    let workspace =
-                        self.agent_workspace_for_slot(index, &self.active_agent_slot());
+                AppDialog::RestartAgent { index, slot } => {
+                    let workspace = self.agent_workspace_for_slot(index, &slot);
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("!").size(30.0).color(theme::warning()));
                         ui.vertical(|ui| {
@@ -1457,7 +1456,7 @@ impl GsdvGuiApp {
                             )
                             .clicked()
                         {
-                            restart_agent = Some((index, false));
+                            restart_agent = Some((index, slot.clone(), false));
                             next_dialog = None;
                         }
                         if workspace.is_some()
@@ -1467,14 +1466,17 @@ impl GsdvGuiApp {
                             )
                             .clicked()
                         {
-                            restart_agent = Some((index, true));
+                            restart_agent = Some((index, slot.clone(), true));
                             next_dialog = None;
                         }
                     });
                 }
-                AppDialog::SwitchAgent { index, next_kind } => {
-                    let workspace =
-                        self.agent_workspace_for_slot(index, &self.active_agent_slot());
+                AppDialog::SwitchAgent {
+                    index,
+                    slot,
+                    next_kind,
+                } => {
+                    let workspace = self.agent_workspace_for_slot(index, &slot);
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("!").size(30.0).color(theme::danger()));
                         ui.vertical(|ui| {
@@ -1508,7 +1510,7 @@ impl GsdvGuiApp {
                         if workspace.is_some()
                             && primary_action(ui, i18n::text(self.app_language, "Switch")).clicked()
                         {
-                            switch_agent = Some((index, next_kind));
+                            switch_agent = Some((index, slot.clone(), next_kind));
                             next_dialog = None;
                         }
                         if secondary_action(ui, i18n::text(self.app_language, "Cancel")).clicked() {
@@ -2131,11 +2133,11 @@ impl GsdvGuiApp {
                 session_id,
             );
         }
-        if let Some((index, resume)) = restart_agent {
-            self.restart_agent(ctx, index, resume);
+        if let Some((index, slot, resume)) = restart_agent {
+            self.restart_agent_slot(ctx, index, slot, resume);
         }
-        if let Some((index, next_kind)) = switch_agent {
-            self.switch_agent_kind(ctx, index, next_kind);
+        if let Some((index, slot, next_kind)) = switch_agent {
+            self.switch_agent_slot_kind(ctx, index, slot, next_kind);
         }
         if let Some((index, slot, model)) = set_agent_model {
             self.set_agent_slot_model(ctx, index, slot, model);

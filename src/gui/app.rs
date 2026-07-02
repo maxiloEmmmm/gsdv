@@ -2123,9 +2123,11 @@ enum AppDialog {
     },
     RestartAgent {
         index: usize,
+        slot: AgentSlotId,
     },
     SwitchAgent {
         index: usize,
+        slot: AgentSlotId,
         next_kind: AgentKind,
     },
     SetAgentModel {

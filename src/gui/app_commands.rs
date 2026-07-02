@@ -670,15 +670,15 @@ impl GsdvGuiApp {
                 self.collapse_other_agent_columns(self.active_workspace, row_index, column_index);
             }
             AgentTabAction::Restart(slot) => {
-                self.set_active_agent_slot(self.active_workspace, slot);
                 self.set_active_app_dialog(Some(AppDialog::RestartAgent {
                     index: self.active_workspace,
+                    slot,
                 }));
             }
             AgentTabAction::Switch { slot, next_kind } => {
-                self.set_active_agent_slot(self.active_workspace, slot);
                 self.set_active_app_dialog(Some(AppDialog::SwitchAgent {
                     index: self.active_workspace,
+                    slot,
                     next_kind,
                 }));
             }
