@@ -1083,6 +1083,24 @@ impl GsdvGuiApp {
         self.request_app_repaint();
     }
 
+    /// Equalizes Agent column width weights inside one row.
+    ///
+    /// 适用场景：用户从 Agent 右键菜单恢复当前 row 的列宽。例：3 列 -> 1:1:1。
+    pub(super) fn equalize_agent_columns(&mut self, index: usize, row_index: usize) {
+        if let Some(row) = self
+            .workspaces
+            .get_mut(index)
+            .and_then(|workspace| workspace.agent_rows.get_mut(row_index))
+        {
+            for column in &mut row.columns {
+                column.width_weight = 1.0;
+            }
+            data::normalize_agent_column_widths(&mut row.columns);
+        }
+        self.persist_workspaces();
+        self.request_app_repaint();
+    }
+
     /// Updates one Agent row folded state and repairs focus.
     pub(super) fn set_agent_row_collapsed(
         &mut self,
@@ -1112,6 +1130,20 @@ impl GsdvGuiApp {
             }
         }
         self.normalize_agent_focus(index);
+        self.persist_workspaces();
+        self.request_app_repaint();
+    }
+
+    /// Equalizes Agent row height weights inside one workspace.
+    ///
+    /// 适用场景：用户从 Agent 右键菜单恢复多 row 高度。例：2 行 -> 1:1。
+    pub(super) fn equalize_agent_rows(&mut self, index: usize) {
+        if let Some(workspace) = self.workspaces.get_mut(index) {
+            for row in &mut workspace.agent_rows {
+                row.height_weight = 1.0;
+            }
+            data::normalize_agent_row_heights(&mut workspace.agent_rows);
+        }
         self.persist_workspaces();
         self.request_app_repaint();
     }

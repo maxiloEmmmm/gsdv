@@ -2234,6 +2234,10 @@ enum AgentTabAction {
         row_index: usize,
         column_index: usize,
     },
+    EqualizeColumns {
+        row_index: usize,
+    },
+    EqualizeRows,
     Restart(AgentSlotId),
     Switch {
         slot: AgentSlotId,

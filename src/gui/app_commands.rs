@@ -669,6 +669,12 @@ impl GsdvGuiApp {
             } => {
                 self.collapse_other_agent_columns(self.active_workspace, row_index, column_index);
             }
+            AgentTabAction::EqualizeColumns { row_index } => {
+                self.equalize_agent_columns(self.active_workspace, row_index);
+            }
+            AgentTabAction::EqualizeRows => {
+                self.equalize_agent_rows(self.active_workspace);
+            }
             AgentTabAction::Restart(slot) => {
                 self.set_active_app_dialog(Some(AppDialog::RestartAgent {
                     index: self.active_workspace,
