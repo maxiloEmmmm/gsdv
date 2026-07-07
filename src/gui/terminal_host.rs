@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::watch;
+use unicode_width::UnicodeWidthStr;
 
 static TERMINAL_ID: AtomicU64 = AtomicU64::new(1);
 static TERMINAL_REMOTE_SESSION_ID: AtomicU64 = AtomicU64::new(1);
@@ -385,7 +386,27 @@ pub struct GuiTerminalHost {
     remote_output_tx: watch::Sender<u64>,
     /// Agent terminal 被 remote WebSocket 独占时的连接状态。
     remote_session: Option<TerminalRemoteSession>,
+    /// Agent terminal 的 IME 组合态，用于 Windows 输入法按键过滤。
+    ime_state: TerminalImeState,
     font: FontId,
+}
+
+/// Agent terminal IME 状态。
+#[derive(Debug, Clone, Copy, Default)]
+struct TerminalImeState {
+    /// 是否处于输入法组合态。
+    composing: bool,
+}
+
+/// 当前 egui frame 中 IME 事件推导出的状态。
+#[derive(Debug, Clone, Copy, Default)]
+struct TerminalImeFrameState {
+    /// 本帧按键是否应该优先交给输入法处理。
+    composing_for_keys: bool,
+    /// 本帧结束后保存到 terminal host 的组合态。
+    composing_after: bool,
+    /// 候选栏锚点需要向右临时推进的 terminal cell 数。
+    anchor_extra_cells: usize,
 }
 
 /// terminal runtime 写入、UI 绘制读取的共享状态。
@@ -999,6 +1020,7 @@ impl GuiTerminalHost {
             runtime_theme_mode,
             remote_output_tx,
             remote_session: None,
+            ime_state: TerminalImeState::default(),
             font: FontId::monospace(14.0),
         })
     }
@@ -1065,6 +1087,7 @@ impl GuiTerminalHost {
             runtime_theme_mode,
             remote_output_tx,
             remote_session: None,
+            ime_state: TerminalImeState::default(),
             font: FontId::monospace(14.0),
         })
     }
@@ -1271,7 +1294,10 @@ impl GuiTerminalHost {
             let kitty_keyboard_protocol = self
                 .terminal_mode()
                 .intersects(TermMode::KITTY_KEYBOARD_PROTOCOL);
-            let bytes = ui.ctx().input(|input| {
+            let previous_ime_composing = self.ime_state.composing;
+            let (ime_frame_state, bytes) = ui.ctx().input(|input| {
+                let ime_frame_state =
+                    terminal_ime_frame_state(&input.events, previous_ime_composing);
                 terminal_input_info_events(
                     self.kind,
                     &input.events,
@@ -1279,14 +1305,19 @@ impl GuiTerminalHost {
                     kitty_keyboard_protocol,
                     shortcut_scope,
                 );
-                agent_input_bytes_from_events_with_kitty_protocol(
-                    &input.events,
-                    input.modifiers,
-                    !copy_has_terminal_selection,
-                    kitty_keyboard_protocol,
-                    Some(shortcut_scope),
+                (
+                    ime_frame_state,
+                    agent_input_bytes_from_events_with_kitty_protocol(
+                        &input.events,
+                        input.modifiers,
+                        !copy_has_terminal_selection,
+                        kitty_keyboard_protocol,
+                        Some(shortcut_scope),
+                        cfg!(windows) && ime_frame_state.composing_for_keys,
+                    ),
                 )
             });
+            self.ime_state.composing = ime_frame_state.composing_after;
             if self.kind == TerminalSurfaceKind::Agent
                 && bytes.contains(&0x1b)
                 && std::env::var_os("GSDV_AGENT_ESC_DEBUG").is_some()
@@ -1309,8 +1340,15 @@ impl GuiTerminalHost {
                 crate::gui::perf_log::count("terminal.input_submitted");
             }
             self.write_bytes(&bytes);
-            enable_terminal_ime(ui, &self.backend, response.rect);
+            enable_terminal_ime(
+                ui,
+                &self.backend,
+                response.rect,
+                ime_frame_state.anchor_extra_cells,
+            );
             self.write_ime_commits(ui);
+        } else {
+            self.ime_state.composing = false;
         }
         let input_rect = (include_input_rect && self.kind == TerminalSurfaceKind::Agent)
             .then(|| terminal_agent_input_rect(&self.backend, response.rect))
@@ -1820,6 +1858,7 @@ pub fn agent_input_bytes_from_events(
         copy_event_can_interrupt,
         false,
         None,
+        false,
     )
 }
 
@@ -1830,6 +1869,7 @@ pub(super) fn agent_input_bytes_from_events_with_kitty_protocol(
     copy_event_can_interrupt: bool,
     kitty_keyboard_protocol: bool,
     app_shortcut_scope: Option<TerminalInputShortcutScope>,
+    suppress_ime_editing_keys: bool,
 ) -> Vec<u8> {
     let suppress_shortcut_text =
         active_modifiers.mac_cmd || active_modifiers.alt || active_modifiers.ctrl;
@@ -1855,6 +1895,10 @@ pub(super) fn agent_input_bytes_from_events_with_kitty_protocol(
                 modifiers,
                 ..
             } => {
+                if suppress_ime_editing_keys && ime_composition_control_key_event(*key, *modifiers)
+                {
+                    continue;
+                }
                 if copy_key_event_should_interrupt(*key, *modifiers, copy_event_can_interrupt) {
                     bytes.push(0x03);
                 } else if terminal_copy_key_event(*key, *modifiers) {
@@ -1891,6 +1935,33 @@ pub(super) fn agent_input_bytes_from_events_with_kitty_protocol(
         }
     }
     bytes
+}
+
+/// 判断按键是否应在 IME 组合态交给输入法消费。
+///
+/// 适用场景：Windows 中文输入候选态按 Backspace/Enter/方向键。
+/// 示例：`Backspace` -> true，`Ctrl+C` -> false。
+fn ime_composition_control_key_event(key: Key, modifiers: Modifiers) -> bool {
+    if modifiers.ctrl || modifiers.alt || modifiers.mac_cmd || modifiers.command {
+        return false;
+    }
+    matches!(
+        key,
+        Key::Backspace
+            | Key::Delete
+            | Key::ArrowLeft
+            | Key::ArrowRight
+            | Key::ArrowUp
+            | Key::ArrowDown
+            | Key::Home
+            | Key::End
+            | Key::PageUp
+            | Key::PageDown
+            | Key::Enter
+            | Key::Escape
+            | Key::Tab
+            | Key::Space
+    )
 }
 
 /// 编码 kitty keyboard protocol 下带 Alt/Ctrl 的可打印键。
@@ -2367,10 +2438,16 @@ fn control_key_byte(key: Key, modifiers: Modifiers) -> Option<u8> {
     Some(offset)
 }
 
-fn enable_terminal_ime(ui: &Ui, backend: &TerminalBackend, rect: egui::Rect) {
-    let cursor_rect = terminal_ime_cursor_rect(backend, rect).unwrap_or_else(|| {
-        egui::Rect::from_min_size(rect.left_top(), Vec2::new(1.0, backend.size.cell_height))
-    });
+fn enable_terminal_ime(
+    ui: &Ui,
+    backend: &TerminalBackend,
+    rect: egui::Rect,
+    anchor_extra_cells: usize,
+) {
+    let cursor_rect =
+        terminal_ime_cursor_rect(backend, rect, anchor_extra_cells).unwrap_or_else(|| {
+            egui::Rect::from_min_size(rect.left_top(), Vec2::new(1.0, backend.size.cell_height))
+        });
     ui.ctx().output_mut(|output| {
         output.ime = Some(egui::output::IMEOutput {
             rect: cursor_rect,
@@ -2431,7 +2508,11 @@ fn trim_trailing_spaces(text: &mut String) {
 }
 
 /// 返回当前 terminal 光标对应的 IME 候选窗锚点。
-fn terminal_ime_cursor_rect(backend: &TerminalBackend, terminal_rect: egui::Rect) -> Option<Rect> {
+fn terminal_ime_cursor_rect(
+    backend: &TerminalBackend,
+    terminal_rect: egui::Rect,
+    anchor_extra_cells: usize,
+) -> Option<Rect> {
     let term = backend.term.lock();
     let content = term.renderable_content();
     let display_offset = content.display_offset as i32;
@@ -2439,18 +2520,74 @@ fn terminal_ime_cursor_rect(backend: &TerminalBackend, terminal_rect: egui::Rect
     if line < 0 || line >= backend.size.lines as i32 {
         return None;
     }
-    let column = content
+    let mut line = line;
+    let mut column = content
         .cursor
         .point
         .column
         .0
         .min(backend.size.cols as usize);
+    if anchor_extra_cells > 0 {
+        let cols = backend.size.cols.max(1) as usize;
+        let shifted = column.saturating_add(anchor_extra_cells);
+        line = (line + (shifted / cols) as i32).min(backend.size.lines as i32 - 1);
+        column = shifted % cols;
+    }
     let x = terminal_rect.left() + backend.size.cell_width * column as f32;
     let y = terminal_rect.top() + backend.size.cell_height * line as f32;
     Some(Rect::from_min_size(
         Pos2::new(x, y),
         Vec2::new(1.0, backend.size.cell_height.max(1.0)),
     ))
+}
+
+/// 根据 egui IME 事件推导 Agent terminal 当前帧组合态。
+///
+/// 适用场景：Windows winit 会在 Commit 前后发 Enable/Disabled，
+/// 需要跨事件保留“这一帧仍由 IME 接管按键”的语义。例：`Commit("你")` -> 2 cells。
+fn terminal_ime_frame_state(
+    events: &[egui::Event],
+    previous_composing: bool,
+) -> TerminalImeFrameState {
+    let mut state = TerminalImeFrameState {
+        composing_for_keys: previous_composing,
+        composing_after: previous_composing,
+        anchor_extra_cells: 0,
+    };
+    for event in events {
+        match event {
+            egui::Event::Ime(egui::ImeEvent::Enabled) => {
+                state.composing_for_keys = true;
+                state.composing_after = true;
+            }
+            egui::Event::Ime(egui::ImeEvent::Preedit(text)) => {
+                state.composing_for_keys = true;
+                state.composing_after = true;
+                if cfg!(windows) {
+                    state.anchor_extra_cells = terminal_text_width(text);
+                }
+            }
+            egui::Event::Ime(egui::ImeEvent::Commit(text)) => {
+                state.composing_for_keys = true;
+                state.composing_after = false;
+                if cfg!(windows) && state.anchor_extra_cells == 0 {
+                    state.anchor_extra_cells = terminal_text_width(text);
+                }
+            }
+            egui::Event::Ime(egui::ImeEvent::Disabled) => {
+                state.composing_after = false;
+            }
+            _ => {}
+        }
+    }
+    state
+}
+
+/// 返回文本在终端里的显示 cell 宽度。
+///
+/// 适用场景：Windows IME 候选锚点需要临时跟随中文宽字符。例：`你好` -> 4。
+fn terminal_text_width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
 }
 
 fn ime_commit_texts(events: &[egui::Event]) -> impl Iterator<Item = String> + '_ {

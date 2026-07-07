@@ -96,6 +96,7 @@ pub(super) fn process_input_runtime_request(request: InputRuntimeRequest) -> Vec
             /*copy_event_can_interrupt*/ true,
             request.terminal_kitty_keyboard_protocol,
             None,
+            false,
         );
         if !bytes.is_empty() {
             if target == TerminalSurfaceKind::Agent
