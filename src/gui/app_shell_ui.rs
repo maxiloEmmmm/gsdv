@@ -1578,6 +1578,27 @@ impl GsdvGuiApp {
                 *agent_tab_action = Some(AgentTabAction::CollapseOtherRows { row_index });
                 ui.close_menu();
             }
+            let row_col_count = workspace
+                .agent_rows
+                .get(row_index)
+                .map(|row| row.columns.len())
+                .unwrap_or_default();
+            if row_col_count > 1
+                && ui
+                    .button(i18n::text(self.app_language, "Equalize cols"))
+                    .clicked()
+            {
+                *agent_tab_action = Some(AgentTabAction::EqualizeColumns { row_index });
+                ui.close_menu();
+            }
+            if workspace.agent_rows.len() > 1
+                && ui
+                    .button(i18n::text(self.app_language, "Equalize rows"))
+                    .clicked()
+            {
+                *agent_tab_action = Some(AgentTabAction::EqualizeRows);
+                ui.close_menu();
+            }
         }
         if let Some((id, tab_index)) = subagent {
             if include_structure {
