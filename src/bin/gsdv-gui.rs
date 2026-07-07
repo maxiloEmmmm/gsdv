@@ -91,7 +91,7 @@ fn install_agent_status_hook(gsdv_exe: &Path) -> Result<()> {
 }
 
 fn agent_status_hook_script(gsdv_exe: &Path) -> String {
-    let gsdv_exe = shell_quote(&gsdv_exe.to_string_lossy());
+    let gsdv_exe = shell_quote(&agent_hook_shell_path(gsdv_exe));
     format!("#!/bin/sh\nexec {gsdv_exe} agent-status-hook\n")
 }
 
@@ -194,7 +194,7 @@ fn toml_line_assigns_key(trimmed: &str, key: &str) -> bool {
 /// 写入 Codex hooks.json，并返回这些 hook 对应的信任状态条目。
 fn install_codex_hooks_json(hooks_path: &Path) -> Result<Vec<CodexHookTrustEntry>> {
     let hook_path = gsdv_home_dir()?.join("hooks").join("agent-status-hook");
-    let command = shell_quote(&hook_path.to_string_lossy());
+    let command = agent_status_hook_command(&hook_path);
     let content = fs::read_to_string(hooks_path).unwrap_or_default();
     let mut root = serde_json::from_str::<Value>(&content).unwrap_or_else(|_| {
         serde_json::json!({
@@ -502,7 +502,7 @@ fn ensure_trailing_newline(content: &str) -> String {
 /// Updates ~/.claude/settings.json without disturbing unrelated settings.
 fn install_claude_settings_hooks(settings_path: &Path) -> Result<()> {
     let hook_path = gsdv_home_dir()?.join("hooks").join("agent-status-hook");
-    let command = shell_quote(&hook_path.to_string_lossy());
+    let command = agent_status_hook_command(&hook_path);
     let content = fs::read_to_string(settings_path).unwrap_or_default();
     let mut root =
         serde_json::from_str::<Value>(&content).unwrap_or_else(|_| serde_json::json!({}));
@@ -654,6 +654,50 @@ fn gsdv_home_dir() -> Result<PathBuf> {
 
 fn home_dir() -> Option<PathBuf> {
     home::home_dir()
+}
+
+/// 生成 agent 状态 hook 在 Codex/Claude 配置里的命令。
+///
+/// 适用场景：hook runner 通过 sh/bash 执行 command。
+/// 示例：`C:\Users\a\.gsdv\hooks\agent-status-hook` -> `sh '/c/Users/a/.gsdv/hooks/agent-status-hook'`。
+fn agent_status_hook_command(hook_path: &Path) -> String {
+    let hook_path = shell_quote(&agent_hook_shell_path(hook_path));
+    if cfg!(windows) {
+        format!("sh {hook_path}")
+    } else {
+        hook_path
+    }
+}
+
+/// 返回 sh/bash 能识别的 agent hook 路径。
+///
+/// 适用场景：把 gsdv 生成的 hook 脚本或可执行文件写进 shell 命令。
+/// 示例：`C:\tools\gsdv.exe` -> `/c/tools/gsdv.exe`。
+fn agent_hook_shell_path(path: &Path) -> String {
+    #[cfg(windows)]
+    {
+        windows_path_for_msys_shell(path)
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_string_lossy().into_owned()
+    }
+}
+
+/// 把 Windows 本机路径转换成 Git Bash/MSYS sh 可执行的路径。
+///
+/// 适用场景：Codex/Claude 在 Windows 上用 `/usr/bin/bash` 执行 hook。
+/// 示例：`C:\Users\a\b` -> `/c/Users/a/b`。
+#[cfg(windows)]
+fn windows_path_for_msys_shell(path: &Path) -> String {
+    let raw = path.to_string_lossy().replace('\\', "/");
+    let bytes = raw.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        let drive = (bytes[0] as char).to_ascii_lowercase();
+        let rest = raw[2..].trim_start_matches('/');
+        return format!("/{drive}/{rest}");
+    }
+    raw
 }
 
 fn shell_quote(value: &str) -> String {
