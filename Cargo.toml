@@ -31,6 +31,7 @@ thiserror = "2.0"
 tokio = { version = "1.48", features = ["fs", "io-util", "net", "process", "rt-multi-thread", "sync", "time"] }
 tokio-socks = "0.5.2"
 tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-native-roots"] }
+unicode-width = "0.2"
 gix = { version = "0.82.0", default-features = false, features = [
     "max-performance-safe",
     "revision",
