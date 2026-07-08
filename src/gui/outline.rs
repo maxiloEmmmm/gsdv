@@ -223,11 +223,8 @@ pub(crate) fn render_outline_node(
             ui.push_id(key.as_path(), |ui| {
                 let response = tree_row(ui, depth, *expanded, true, label, false);
                 if response.clicked() {
-                    let was_expanded = *expanded;
                     *expanded = !*expanded;
-                    if !was_expanded {
-                        *action = Some(OutlineAction::Refresh);
-                    }
+                    *action = Some(OutlineAction::Refresh);
                 }
                 if response.hovered() {
                     *tree_hovered = true;
@@ -261,11 +258,8 @@ pub(crate) fn render_outline_node(
             ui.push_id(key.as_path(), |ui| {
                 let response = tree_row(ui, depth, *expanded, true, label, false);
                 if response.clicked() {
-                    let was_expanded = *expanded;
                     *expanded = !*expanded;
-                    if !was_expanded {
-                        *action = Some(OutlineAction::Refresh);
-                    }
+                    *action = Some(OutlineAction::Refresh);
                 }
                 if response.hovered() {
                     *tree_hovered = true;
@@ -330,6 +324,7 @@ pub(crate) fn render_favorite_outline_node(
                 let response = tree_row(ui, depth, *expanded, true, label, false);
                 if response.clicked() {
                     *expanded = !*expanded;
+                    *action = Some(OutlineAction::Refresh);
                 }
                 if response.hovered() {
                     *tree_hovered = true;
@@ -364,6 +359,7 @@ pub(crate) fn render_favorite_outline_node(
                 let response = tree_row(ui, depth, *expanded, true, label, false);
                 if response.clicked() {
                     *expanded = !*expanded;
+                    *action = Some(OutlineAction::Refresh);
                 }
                 if response.hovered() {
                     *tree_hovered = true;

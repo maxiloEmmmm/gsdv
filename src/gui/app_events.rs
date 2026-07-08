@@ -594,6 +594,7 @@ impl GsdvGuiApp {
                     current.outline = outline;
                     current.selected_file = selected_file;
                 }
+                self.sync_fs_watches();
                 if self.pending_outline_refreshes.remove(&index) {
                     self.spawn_outline_refresh_tasks(ctx, BTreeSet::from([index]));
                 }

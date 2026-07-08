@@ -11,4 +11,4 @@ run: web-build
 	cargo run --release --bin gsdv
 
 pprof-run: web-build
-	cargo run --release --features pprof-run --bin gsdv
+	RUSTFLAGS="-C force-frame-pointers=yes" cargo run --release --features pprof-run --bin gsdv

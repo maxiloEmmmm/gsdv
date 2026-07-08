@@ -1313,14 +1313,29 @@ struct FsWatcherService {
     repaint_ctx: Arc<Mutex<Option<egui::Context>>>,
     /// watcher callback 唤醒 UI 时使用的 FPS 控制器。
     repaint_controller: repaint_gate::RepaintController,
-    /// 递归注册的 workspace root。
+    /// Workspace roots used only for event routing.
     workspace_roots: Vec<PathBuf>,
+    /// Actual workspace directories registered with notify.
+    watched_workspace_dirs: BTreeSet<PathBuf>,
+    /// Per-workspace opened directories used to route external outline roots.
+    workspace_watch_specs: Vec<WorkspaceWatchSpec>,
     /// 变化后需要触发重载的 reviewer script 目录。
     reviewer_script_dir: Option<PathBuf>,
     /// reviewer script 实际被 watch 的路径。
     reviewer_script_watch_path: Option<PathBuf>,
     /// 最近一次 watcher 配置错误。
     last_error: Option<String>,
+}
+
+/// Filesystem watch scope for one workspace.
+///
+/// Example: root `/repo` plus opened `src` -> both are watched non-recursively.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceWatchSpec {
+    /// Workspace root used to route repository-local events.
+    root: PathBuf,
+    /// Directories that are currently opened by visible UI state.
+    opened_dirs: BTreeSet<PathBuf>,
 }
 
 impl FsWatcherService {
@@ -1336,6 +1351,8 @@ impl FsWatcherService {
             repaint_ctx,
             repaint_controller,
             workspace_roots: Vec::new(),
+            watched_workspace_dirs: BTreeSet::new(),
+            workspace_watch_specs: Vec::new(),
             reviewer_script_dir: None,
             reviewer_script_watch_path: None,
             last_error: None,
@@ -1377,24 +1394,43 @@ impl FsWatcherService {
         }
     }
 
-    /// Registers the current workspace roots on the shared watcher.
-    fn sync_workspace_roots(&mut self, workspace_paths: &[PathBuf]) {
-        let next_roots = workspace_paths
+    /// Registers currently opened workspace directories on the shared watcher.
+    ///
+    /// Example: collapsed `target` dir -> no watch is registered for it.
+    fn sync_workspace_watches(&mut self, specs: &[WorkspaceWatchSpec]) {
+        let next_specs = specs
             .iter()
-            .map(|path| comparable_watch_path(path))
+            .map(normalize_workspace_watch_spec)
             .collect::<Vec<_>>();
-        if self.workspace_roots == next_roots {
+        let next_roots = next_specs
+            .iter()
+            .map(|spec| spec.root.clone())
+            .collect::<Vec<_>>();
+        let next_dirs = next_specs
+            .iter()
+            .flat_map(|spec| spec.opened_dirs.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        if self.workspace_roots == next_roots && self.watched_workspace_dirs == next_dirs {
             return;
         }
-        for root in self.workspace_roots.clone() {
-            self.unwatch_path(&root);
-        }
-        self.workspace_roots.clear();
-        for root in next_roots {
-            if self.watch_path(&root, RecursiveMode::Recursive) {
-                self.workspace_roots.push(root);
+
+        let reviewer_watch_path = self.reviewer_script_watch_path.clone();
+        for path in self.watched_workspace_dirs.clone() {
+            if !next_dirs.contains(&path) && reviewer_watch_path.as_ref() != Some(&path) {
+                self.unwatch_path(&path);
             }
         }
+        for path in &next_dirs {
+            if !self.watched_workspace_dirs.contains(path)
+                && reviewer_watch_path.as_ref() != Some(path)
+            {
+                self.watch_path(path, RecursiveMode::NonRecursive);
+            }
+        }
+
+        self.workspace_roots = next_roots;
+        self.watched_workspace_dirs = next_dirs;
+        self.workspace_watch_specs = next_specs;
     }
 
     /// 注册 reviewer script 路径。
@@ -1416,17 +1452,17 @@ impl FsWatcherService {
             {
                 scripts_changed = true;
             }
-            for (index, root) in self.workspace_roots.iter().enumerate() {
-                if path == *root || path.starts_with(root) {
-                    if path != *root && should_skip_workspace_watch_path(root, &path) {
+            for (index, spec) in self.workspace_watch_specs.iter().enumerate() {
+                if workspace_watch_spec_matches(spec, &path) {
+                    if path != spec.root && should_skip_workspace_watch_path(&spec.root, &path) {
                         continue;
                     }
-                    let outline = path_is_outline_refresh_path(root, &path, event.kind);
+                    let outline = path_is_outline_refresh_path(&spec.root, &path, event.kind);
                     workspace_indexes
                         .entry(index)
                         .and_modify(|existing| *existing |= outline)
                         .or_insert(outline);
-                    if path_is_workflow_spec_path(root, &path) {
+                    if path_is_workflow_spec_path(&spec.root, &path) {
                         workflow_indexes.insert(index);
                     }
                 }
@@ -1486,6 +1522,38 @@ impl FsWatcherService {
             let _ = watcher.unwatch(path);
         }
     }
+}
+
+/// Normalizes one workspace watch spec and drops ignored or missing directories.
+///
+/// Example: `target` under a workspace -> excluded before notify sees it.
+fn normalize_workspace_watch_spec(spec: &WorkspaceWatchSpec) -> WorkspaceWatchSpec {
+    let root = comparable_watch_path(&spec.root);
+    let opened_dirs = spec
+        .opened_dirs
+        .iter()
+        .map(|path| comparable_watch_path(path))
+        .filter(|path| path.is_dir())
+        .filter(|path| {
+            // 触发条件：workspace root 很大且含 target/node_modules。
+            // 不能交给 notify recursive: 它没有业务 ignore 规则。
+            // 防止回归：隐藏目录重新占用大量 inotify watch 内存。
+            path == &root || !should_skip_workspace_watch_path(&root, path)
+        })
+        .collect::<BTreeSet<_>>();
+    WorkspaceWatchSpec { root, opened_dirs }
+}
+
+/// Returns whether a filesystem event belongs to one workspace watch scope.
+///
+/// Example: attached opened dir event -> routes to the owning workspace.
+fn workspace_watch_spec_matches(spec: &WorkspaceWatchSpec, path: &Path) -> bool {
+    path == spec.root
+        || path.starts_with(&spec.root)
+        || spec
+            .opened_dirs
+            .iter()
+            .any(|dir| path == dir || path.starts_with(dir))
 }
 
 /// Returns whether a notify path can affect the visible Markdown outline.

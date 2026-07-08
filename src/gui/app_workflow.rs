@@ -300,6 +300,7 @@ impl GsdvGuiApp {
         if let Some(target) = pending_target {
             self.open_workflow_target_now_with_mode(ctx, target, pending_target_mode);
         }
+        self.sync_fs_watches();
     }
 
     /// 请求打开 workflow 目标，必要时先弹出未保存片段确认。
@@ -447,6 +448,7 @@ impl GsdvGuiApp {
                 self.request_app_repaint();
             }
         }
+        self.sync_fs_watches();
     }
 
     /// 判断切换目标是否会丢弃当前 workflow 未保存内容。
