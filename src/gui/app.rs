@@ -22,8 +22,8 @@ use crate::gui::terminal_host::{
     TerminalInputShortcutScope, TerminalOutputClick, TerminalRemoteOutputSource,
     TerminalRemoteOutputState, TerminalRemoteSnapshot, TerminalRemoteUpdate, TerminalRuntimeEvent,
     TerminalRuntimeEventKind, TerminalRuntimeEventSink, TerminalSurfaceKind,
-    agent_input_bytes_from_events_with_kitty_protocol, classify_terminal_output_path_click,
-    terminal_agent_input_submit_bytes,
+    TerminalWorkspaceMetadata, agent_input_bytes_from_events_with_kitty_protocol,
+    classify_terminal_output_path_click, terminal_agent_input_submit_bytes,
 };
 use crate::gui::theme;
 use crate::gui::workflow::{
@@ -39,6 +39,7 @@ use eframe::egui::{
     RichText, ScrollArea, Sense, SidePanel, Stroke, TopBottomPanel, Ui, Vec2,
 };
 use egui_extras::{Size, StripBuilder};
+use notify::event::{CreateKind, EventKind, ModifyKind, RemoveKind};
 use notify::{RecursiveMode, Watcher};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, BufRead, BufReader, Read};
@@ -500,6 +501,10 @@ struct GsdvGuiApp {
     repaint_controller: repaint_gate::RepaintController,
     /// 正在 UI 路径之外创建的 terminal host。
     pending_terminal_spawns: BTreeSet<TerminalSpawnKey>,
+    /// 正在后台刷新 outline 的 workspace。
+    outline_refreshes_in_flight: BTreeSet<usize>,
+    /// 刷新期间再次收到 outline 请求的 workspace。
+    pending_outline_refreshes: BTreeSet<usize>,
     /// 当前是否正在检查 `hx --version`。
     helix_binary_check_in_flight: bool,
     /// 等待 Helix binary 可用性结果的打开请求。
@@ -961,6 +966,8 @@ impl GsdvGuiApp {
             app_repaint_ctx: None,
             repaint_controller,
             pending_terminal_spawns: BTreeSet::new(),
+            outline_refreshes_in_flight: BTreeSet::new(),
+            pending_outline_refreshes: BTreeSet::new(),
             helix_binary_check_in_flight: false,
             pending_helix_open_request: None,
             pending_reviewer_loads: BTreeSet::new(),
@@ -1261,19 +1268,19 @@ impl FsWatchDirtyState {
     /// Marks one workspace outline dirty from a filesystem event.
     fn mark_outline_dirty(&mut self, index: usize) {
         self.outline_workspaces.insert(index);
-        self.outline_dirty_at.get_or_insert_with(Instant::now);
+        self.outline_dirty_at = Some(Instant::now());
     }
 
     /// Marks one workspace workflow tree dirty from a spec file event.
     fn mark_workflow_dirty(&mut self, index: usize) {
         self.workflow_workspaces.insert(index);
-        self.outline_dirty_at.get_or_insert_with(Instant::now);
+        self.outline_dirty_at = Some(Instant::now());
     }
 
     /// Marks one workspace reviewer dirty from a filesystem event.
     fn mark_reviewer_dirty(&mut self, index: usize) {
         self.reviewer_workspaces.insert(index);
-        self.reviewer_dirty_at.get_or_insert_with(Instant::now);
+        self.reviewer_dirty_at = Some(Instant::now());
     }
 
     /// Marks reviewer scripts dirty from a filesystem event.
@@ -1398,7 +1405,7 @@ impl FsWatcherService {
     /// 将单个 notify 事件映射到受影响的 app 资源。
     fn map_notify_event(&self, event: notify::Event, events: &mut Vec<FsWatchAppEvent>) {
         let mut scripts_changed = false;
-        let mut workspace_indexes = BTreeSet::new();
+        let mut workspace_indexes = BTreeMap::new();
         let mut workflow_indexes = BTreeSet::new();
         for path in event.paths {
             let path = comparable_watch_path(&path);
@@ -1414,7 +1421,11 @@ impl FsWatcherService {
                     if path != *root && should_skip_workspace_watch_path(root, &path) {
                         continue;
                     }
-                    workspace_indexes.insert(index);
+                    let outline = path_is_outline_refresh_path(root, &path, event.kind);
+                    workspace_indexes
+                        .entry(index)
+                        .and_modify(|existing| *existing |= outline)
+                        .or_insert(outline);
                     if path_is_workflow_spec_path(root, &path) {
                         workflow_indexes.insert(index);
                     }
@@ -1424,9 +1435,10 @@ impl FsWatcherService {
         if scripts_changed {
             events.push(FsWatchAppEvent::ReviewerScriptsChanged);
         }
-        for index in workspace_indexes {
+        for (index, outline) in workspace_indexes {
             events.push(FsWatchAppEvent::WorkspaceChanged {
                 index,
+                outline,
                 workflow: workflow_indexes.contains(&index),
             });
         }
@@ -1476,12 +1488,40 @@ impl FsWatcherService {
     }
 }
 
+/// Returns whether a notify path can affect the visible Markdown outline.
+///
+/// Example: `README.md` content change -> `true`; `target/app.o` change -> `false`.
+fn path_is_outline_refresh_path(root: &Path, path: &Path, kind: EventKind) -> bool {
+    if path == root {
+        return true;
+    }
+    if path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+    {
+        return true;
+    }
+    // 触发条件：notify 上报目录级结构变化，路径可能没有扩展名。
+    // 不能只看 .md：目录新增/删除/重命名会改变可展开节点。
+    // 防止回归：新建目录后 outline 不显示，或删除目录后残留。
+    matches!(
+        kind,
+        EventKind::Create(CreateKind::Folder | CreateKind::Any | CreateKind::Other)
+            | EventKind::Remove(RemoveKind::Folder | RemoveKind::Any | RemoveKind::Other)
+            | EventKind::Modify(ModifyKind::Name(_))
+            | EventKind::Any
+            | EventKind::Other
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FsWatchAppEvent {
     /// A workspace file tree changed.
     WorkspaceChanged {
         /// Workspace index affected by the event.
         index: usize,
+        /// Whether the changed path can affect the Markdown outline tree.
+        outline: bool,
         /// Whether the changed path is under the workflow spec directory.
         workflow: bool,
     },
@@ -1545,7 +1585,7 @@ enum AppEvent {
     /// 单个 workspace 文档的 Markdown 解析完成。
     MarkdownParsed {
         index: usize,
-        source_text: String,
+        source_hash: u64,
         outline_entries: Vec<MarkdownOutlineEntry>,
         preview_blocks: Vec<markdown_preview::MarkdownBlock>,
     },
@@ -1553,8 +1593,14 @@ enum AppEvent {
     MemoSaved { index: usize, error: Option<String> },
     /// 单个 workspace 的 outline 刷新完成。
     WorkspaceOutlineRefreshed {
+        /// Workspace index captured when the refresh was scheduled.
         index: usize,
-        workspace: WorkspaceViewData,
+        /// Workspace path used to discard stale refresh results.
+        workspace_path: PathBuf,
+        /// Newly built visible outline tree.
+        outline: Vec<OutlineNode>,
+        /// Selected Markdown file after fallback selection.
+        selected_file: Option<PathBuf>,
     },
     /// 单个 workspace 的 workflow tree 刷新完成。
     WorkflowTreeLoaded {
@@ -1850,6 +1896,13 @@ struct TerminalSpawnKey {
     agent_slot: AgentSlotId,
 }
 
+/// Returns a fast content hash for stale Markdown parse detection.
+///
+/// Example: `"abc"` and `"abcd"` -> different hash values.
+fn markdown_text_hash(text: &str) -> u64 {
+    xxhash_rust::xxh3::xxh3_64(text.as_bytes())
+}
+
 /// Agent grid location used by the terminal context menu.
 #[derive(Clone, Copy)]
 struct AgentGridMenuContext<'a> {
@@ -1859,10 +1912,58 @@ struct AgentGridMenuContext<'a> {
     column_index: usize,
     /// Stable column id used by tab move actions.
     column_id: &'a str,
-    /// Current workspace snapshot used by menu state.
-    workspace: &'a WorkspaceViewData,
+    /// Current Agent grid snapshot used by menu state.
+    workspace: &'a AgentSurfaceSnapshot,
     /// Other workspaces available as subagent move targets.
     workspace_targets: &'a [(usize, String)],
+}
+
+/// Lightweight Agent surface state copied for one UI frame.
+#[derive(Debug, Clone)]
+struct AgentSurfaceSnapshot {
+    /// Workspace Agent rows rendered in the center surface.
+    agent_rows: Vec<data::AgentRowViewData>,
+    /// Focused Agent grid cell used for keyboard routing.
+    agent_focus: Option<data::AgentFocusViewData>,
+    /// Subagents available as tabs in the Agent grid.
+    subagents: Vec<data::SubagentViewData>,
+    /// Main Agent implementation shown by the main tab.
+    agent_kind: AgentKind,
+    /// Optional main Agent model override.
+    agent_model: Option<String>,
+    /// Optional main Agent model provider override.
+    agent_model_provider: Option<String>,
+    /// Optional main Agent effort override.
+    agent_effort: Option<String>,
+    /// Optional main Agent fast-mode override.
+    agent_fast_mode: Option<bool>,
+    /// Optional main Agent working directory override.
+    agent_work_dir: Option<PathBuf>,
+    /// Main Agent session id shown in the tab menu.
+    session_id: Option<String>,
+    /// Main Agent activity shown by tab chrome.
+    activity: WorkspaceActivity,
+}
+
+impl AgentSurfaceSnapshot {
+    /// Copies only Agent surface fields out of a workspace.
+    ///
+    /// Example: workspace with large outline -> snapshot does not copy outline.
+    fn from_workspace(workspace: &WorkspaceViewData) -> Self {
+        Self {
+            agent_rows: workspace.agent_rows.clone(),
+            agent_focus: workspace.agent_focus,
+            subagents: workspace.subagents.clone(),
+            agent_kind: workspace.agent_kind,
+            agent_model: workspace.agent_model.clone(),
+            agent_model_provider: workspace.agent_model_provider.clone(),
+            agent_effort: workspace.agent_effort.clone(),
+            agent_fast_mode: workspace.agent_fast_mode,
+            agent_work_dir: workspace.agent_work_dir.clone(),
+            session_id: workspace.session_id.clone(),
+            activity: workspace.activity,
+        }
+    }
 }
 
 /// Identifies the main agent or one named subagent.

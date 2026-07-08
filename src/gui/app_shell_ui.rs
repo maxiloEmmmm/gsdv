@@ -1055,7 +1055,10 @@ impl GsdvGuiApp {
 
     /// Renders all visible Agent rows and columns for the active workspace.
     pub(super) fn agent_columns_surface(&mut self, ui: &mut Ui) {
-        let Some(workspace) = self.current_workspace().cloned() else {
+        let Some(workspace) = self
+            .current_workspace()
+            .map(AgentSurfaceSnapshot::from_workspace)
+        else {
             return;
         };
         let rows = workspace.agent_rows.clone();
@@ -1162,7 +1165,7 @@ impl GsdvGuiApp {
     fn agent_row_surface(
         &mut self,
         ui: &mut Ui,
-        workspace: &WorkspaceViewData,
+        workspace: &AgentSurfaceSnapshot,
         row: &data::AgentRowViewData,
         row_index: usize,
         workspace_targets: &[(usize, String)],
@@ -1268,7 +1271,7 @@ impl GsdvGuiApp {
     fn agent_column_surface(
         &mut self,
         ui: &mut Ui,
-        workspace: &WorkspaceViewData,
+        workspace: &AgentSurfaceSnapshot,
         column: &data::AgentColumnViewData,
         row_index: usize,
         column_index: usize,
@@ -1406,7 +1409,7 @@ impl GsdvGuiApp {
     fn agent_column_tab(
         &mut self,
         ui: &mut Ui,
-        workspace: &WorkspaceViewData,
+        workspace: &AgentSurfaceSnapshot,
         column_id: &str,
         row_index: usize,
         column_index: usize,
@@ -1506,7 +1509,7 @@ impl GsdvGuiApp {
         include_structure: bool,
         subagent: Option<(String, usize)>,
         agent_tab_action: &mut Option<AgentTabAction>,
-        workspace: &WorkspaceViewData,
+        workspace: &AgentSurfaceSnapshot,
         workspace_targets: &[(usize, String)],
     ) {
         if include_structure {

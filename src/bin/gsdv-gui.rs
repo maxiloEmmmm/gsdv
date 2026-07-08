@@ -2,11 +2,17 @@
 #[path = "../ai/mod.rs"]
 mod ai;
 #[allow(dead_code, unused_imports, unused_variables)]
+#[path = "../common/mod.rs"]
+mod common;
+#[allow(dead_code, unused_imports, unused_variables)]
 #[path = "../gui/mod.rs"]
 mod gui;
 #[allow(dead_code, unused_imports, unused_variables)]
 #[path = "../home.rs"]
 mod home;
+#[allow(dead_code, unused_imports, unused_variables)]
+#[path = "../internal.rs"]
+mod internal;
 #[allow(dead_code, unused_imports, unused_variables)]
 #[path = "../reviewer/mod.rs"]
 mod reviewer;
@@ -20,6 +26,12 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+#[cfg(feature = "pprof-run")]
+#[global_allocator]
+static GLOBAL_ALLOCATOR: pprof_alloc::PprofAlloc = pprof_alloc::PprofAlloc::new()
+    .with_pprof_sample_rate_from_env(pprof_alloc::DEFAULT_PPROF_SAMPLE_RATE)
+    .with_stats();
 
 const GSDV_WF_SKILL: &str = include_str!("../../assets/skills/gsdv-wf/SKILL.md");
 const CODEX_AGENT_STATUS_HOOK_EVENTS: [&str; 3] = ["SessionStart", "UserPromptSubmit", "Stop"];
@@ -61,6 +73,7 @@ fn main() -> eframe::Result<()> {
         eprintln!("failed to install gsdv integration: {error:#}");
         std::process::exit(1);
     }
+    internal::spawn_internal_server();
     gui::run()
 }
 

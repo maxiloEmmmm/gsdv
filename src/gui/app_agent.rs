@@ -558,13 +558,16 @@ impl GsdvGuiApp {
                 .map(|(slot_id, _)| slot_id.clone())
                 .collect::<Vec<_>>();
             for slot_id in agent_slots {
-                if let Some(workspace) = self.agent_workspace_for_slot(index, &slot_id) {
+                if let Some(workspace) = self.agent_metadata_for_slot(index, &slot_id) {
                     agent_requests.push((index, slot_id, workspace));
                 }
             }
 
             if self.terminal_hosts[index].workspace.is_some()
-                && let Some(workspace) = self.workspaces.get(index).cloned()
+                && let Some(workspace) = self
+                    .workspaces
+                    .get(index)
+                    .map(TerminalWorkspaceMetadata::from_workspace)
             {
                 workspace_requests.push((index, workspace));
             }
@@ -574,7 +577,10 @@ impl GsdvGuiApp {
                 .as_ref()
                 .and_then(|host| host.helix_spec().cloned());
             if let Some(spec) = helix_spec
-                && let Some(workspace) = self.workspaces.get(index).cloned()
+                && let Some(workspace) = self
+                    .workspaces
+                    .get(index)
+                    .map(TerminalWorkspaceMetadata::from_workspace)
             {
                 helix_requests.push((index, workspace, spec));
             }

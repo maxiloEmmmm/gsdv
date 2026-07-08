@@ -1213,19 +1213,30 @@ fn sanitize_agent_custom_quick_replies(value: &str) -> String {
 }
 
 pub fn refresh_workspace_outline(workspace: &mut WorkspaceViewData) {
-    let selected = workspace.selected_file.clone();
-    let expanded = expanded_outline_dirs(&workspace.outline);
-    let collapsed = collapsed_outline_dirs(&workspace.outline);
+    let dir_states = outline_dir_states(&workspace.outline);
     workspace.outline = build_outline_with_state(
         &workspace.path,
         &workspace.attached_outline_dirs,
-        selected.as_deref(),
-        expanded,
-        collapsed,
+        dir_states,
     );
     if workspace.selected_file.is_none() {
         workspace.selected_file = first_markdown_file(&workspace.outline);
     }
+}
+
+/// Rebuilds outline data without cloning unrelated workspace UI state.
+///
+/// Example: large Agent rows plus outline -> returns only path, outline, selected file.
+pub fn refresh_workspace_outline_parts(
+    workspace_path: &Path,
+    attached_outline_dirs: &[PathBuf],
+    previous_outline: &[OutlineNode],
+    selected_file: Option<PathBuf>,
+) -> (PathBuf, Vec<OutlineNode>, Option<PathBuf>) {
+    let dir_states = outline_dir_states(previous_outline);
+    let outline = build_outline_with_state(workspace_path, attached_outline_dirs, dir_states);
+    let selected_file = selected_file.or_else(|| first_markdown_file(&outline));
+    (workspace_path.to_path_buf(), outline, selected_file)
 }
 
 pub fn refresh_workspace_agent_statuses(workspaces: &mut [WorkspaceViewData]) -> bool {
@@ -1826,13 +1837,8 @@ fn build_workspace(
         .map(PathBuf::from)
         .filter(|selected| selected_file_exists(&path, selected));
     let attached_outline_dirs = normalize_attached_outline_dirs(stored.attached_outline_dirs);
-    let mut outline = build_outline(
-        &path,
-        &attached_outline_dirs,
-        stored_selected_file.as_deref(),
-    );
+    let outline = build_outline(&path, &attached_outline_dirs);
     let selected_file = stored_selected_file.or_else(|| first_markdown_file(&outline));
-    outline = build_outline(&path, &attached_outline_dirs, selected_file.as_deref());
     let status_by_id = statuses_by_id
         .get(&agent_kind)
         .and_then(|statuses| statuses.get(&agent_id));
@@ -1901,52 +1907,52 @@ fn selected_file_exists(project_root: &Path, selected: &Path) -> bool {
     project_root.join(selected).is_file()
 }
 
-fn build_outline(
-    project_root: &Path,
-    attached_outline_dirs: &[PathBuf],
-    selected_file: Option<&Path>,
-) -> Vec<OutlineNode> {
+/// Builds the initial visible outline tree for one workspace.
+///
+/// Example: root with `README.md` -> workspace root containing that file.
+fn build_outline(project_root: &Path, attached_outline_dirs: &[PathBuf]) -> Vec<OutlineNode> {
     build_outline_with_state(
         project_root,
         attached_outline_dirs,
-        selected_file,
-        default_expanded_dirs(project_root, attached_outline_dirs),
-        HashSet::new(),
+        default_outline_dir_states(project_root, attached_outline_dirs),
     )
 }
 
-/// Builds an outline while preserving explicit user tree state.
+/// Builds an outline while preserving visible directory expansion state.
+///
+/// Example: `{ "src": false }` -> `src` is kept visible with empty children.
 fn build_outline_with_state(
     project_root: &Path,
     attached_outline_dirs: &[PathBuf],
-    selected_file: Option<&Path>,
-    expanded: HashSet<PathBuf>,
-    collapsed: HashSet<PathBuf>,
+    dir_states: BTreeMap<PathBuf, bool>,
 ) -> Vec<OutlineNode> {
     let mut nodes = Vec::new();
-    let workspace_children = build_workspace_children(
-        project_root,
-        project_root,
-        PathBuf::new(),
-        &expanded,
-        &collapsed,
-        selected_file,
-    );
+    let workspace_expanded = outline_dir_expanded(&dir_states, Path::new(""));
+    let workspace_children = if workspace_expanded {
+        build_workspace_children(project_root, project_root, PathBuf::new(), &dir_states)
+    } else {
+        Vec::new()
+    };
     nodes.push(OutlineNode::Root {
         root_kind: OutlineRootKind::Workspace,
         key: PathBuf::new(),
         label: format!("{} (Workspace Root)", workspace_name(project_root)),
-        expanded: !collapsed.contains(Path::new("")),
+        expanded: workspace_expanded,
         children: workspace_children,
     });
 
     if let Some(home) = home_dir() {
-        let home_children = build_home_children(&home, selected_file, &expanded, &collapsed);
-        if !home_children.is_empty() {
-            let home_key = PathBuf::from(HOME_OUTLINE_ROOT);
+        let home_key = PathBuf::from(HOME_OUTLINE_ROOT);
+        let home_expanded = outline_dir_expanded(&dir_states, &home_key);
+        let home_children = if home_expanded {
+            build_home_children(&home, &dir_states)
+        } else {
+            Vec::new()
+        };
+        if dir_states.contains_key(&home_key) || !home_children.is_empty() {
             nodes.push(OutlineNode::Root {
                 root_kind: OutlineRootKind::Home,
-                expanded: !collapsed.contains(&home_key),
+                expanded: home_expanded,
                 key: home_key,
                 label: "~ (Home Root)".to_string(),
                 children: home_children,
@@ -1958,9 +1964,9 @@ fn build_outline_with_state(
         if !dir.is_dir() {
             continue;
         }
-        let root_expanded = !collapsed.contains(dir);
+        let root_expanded = outline_dir_expanded(&dir_states, dir);
         let children = if root_expanded {
-            build_attached_dir_children(dir, &expanded, &collapsed, selected_file)
+            build_attached_dir_children(dir, &dir_states)
         } else {
             Vec::new()
         };
@@ -1976,15 +1982,19 @@ fn build_outline_with_state(
     nodes
 }
 
-/// Returns directory keys that are currently open in the outline tree.
-fn expanded_outline_dirs(nodes: &[OutlineNode]) -> HashSet<PathBuf> {
-    let mut expanded = HashSet::new();
-    collect_expanded_outline_dirs(nodes, &mut expanded);
-    expanded
+/// Returns visible directory keys and their current expanded state.
+///
+/// Example: expanded `src` -> map entry `src: true`.
+fn outline_dir_states(nodes: &[OutlineNode]) -> BTreeMap<PathBuf, bool> {
+    let mut states = BTreeMap::new();
+    collect_outline_dir_states(nodes, &mut states);
+    states
 }
 
-/// Recursively collects expanded directory keys for refresh preservation.
-fn collect_expanded_outline_dirs(nodes: &[OutlineNode], expanded: &mut HashSet<PathBuf>) {
+/// Recursively collects only nodes already visible in the outline tree.
+///
+/// Example: hidden child nodes -> no entries are inserted for them.
+fn collect_outline_dir_states(nodes: &[OutlineNode], states: &mut BTreeMap<PathBuf, bool>) {
     for node in nodes {
         match node {
             OutlineNode::Root {
@@ -1999,56 +2009,29 @@ fn collect_expanded_outline_dirs(nodes: &[OutlineNode], expanded: &mut HashSet<P
                 children,
                 ..
             } => {
-                if *is_expanded {
-                    expanded.insert(key.clone());
-                }
-                collect_expanded_outline_dirs(children, expanded);
+                states.insert(key.clone(), *is_expanded);
+                collect_outline_dir_states(children, states);
             }
             OutlineNode::File { .. } => {}
         }
     }
 }
 
-/// Returns directory keys that are currently closed in the outline tree.
-fn collapsed_outline_dirs(nodes: &[OutlineNode]) -> HashSet<PathBuf> {
-    let mut collapsed = HashSet::new();
-    collect_collapsed_outline_dirs(nodes, &mut collapsed);
-    collapsed
+/// Returns a visible directory's stored expansion flag.
+///
+/// Example: missing key -> `false`.
+fn outline_dir_expanded(states: &BTreeMap<PathBuf, bool>, key: &Path) -> bool {
+    states.get(key).copied().unwrap_or(false)
 }
 
-/// Recursively collects collapsed directory keys for refresh preservation.
-fn collect_collapsed_outline_dirs(nodes: &[OutlineNode], collapsed: &mut HashSet<PathBuf>) {
-    for node in nodes {
-        match node {
-            OutlineNode::Root {
-                key,
-                expanded: is_expanded,
-                children,
-                ..
-            }
-            | OutlineNode::Dir {
-                key,
-                expanded: is_expanded,
-                children,
-                ..
-            } => {
-                if !*is_expanded {
-                    collapsed.insert(key.clone());
-                }
-                collect_collapsed_outline_dirs(children, collapsed);
-            }
-            OutlineNode::File { .. } => {}
-        }
-    }
-}
-
+/// Builds visible Markdown nodes directly under one workspace directory.
+///
+/// Example: collapsed `src` -> `src` node with no scanned descendants.
 fn build_workspace_children(
     project_root: &Path,
     current_dir: &Path,
     relative_dir: PathBuf,
-    expanded: &HashSet<PathBuf>,
-    collapsed: &HashSet<PathBuf>,
-    selected_file: Option<&Path>,
+    dir_states: &BTreeMap<PathBuf, bool>,
 ) -> Vec<OutlineNode> {
     let Ok(entries) = fs::read_dir(current_dir) else {
         return Vec::new();
@@ -2068,23 +2051,15 @@ fn build_workspace_children(
                 continue;
             }
             let child_relative = relative_dir.join(&name);
-            // 触发条件：当前选中文件位于被用户手动折叠的目录下。
-            // 不能只按 selected_file 自动展开：文件监听刷新会重建树。
-            // 防止用户刚折叠的目录在下一帧或下一次刷新中弹开。
-            let is_expanded = expanded.contains(&child_relative)
-                || outline_workspace_dir_contains_selected(
-                    project_root,
-                    &child_relative,
-                    selected_file,
-                ) && !collapsed.contains(&child_relative);
-            let children = build_workspace_children(
-                project_root,
-                &path,
-                child_relative.clone(),
-                expanded,
-                collapsed,
-                selected_file,
-            );
+            let is_expanded = outline_dir_expanded(dir_states, &child_relative);
+            // 触发条件：文件监听刷新 outline 时遇到折叠目录。
+            // 不能递归探测：大仓库会把不可见路径也装进 tree。
+            // 防止刷新后残留途径目录和不可见文件节点。
+            let children = if is_expanded {
+                build_workspace_children(project_root, &path, child_relative.clone(), dir_states)
+            } else {
+                Vec::new()
+            };
             nodes.push(OutlineNode::Dir {
                 key: child_relative,
                 label: name,
@@ -2100,7 +2075,6 @@ fn build_workspace_children(
                 .strip_prefix(project_root)
                 .map(Path::to_path_buf)
                 .unwrap_or(path.clone());
-            let _selected = selected_file.is_some_and(|selected| selected == path);
             nodes.push(OutlineNode::File {
                 path: relative,
                 label: name,
@@ -2110,12 +2084,10 @@ fn build_workspace_children(
     nodes
 }
 
-fn build_home_children(
-    home: &Path,
-    selected_file: Option<&Path>,
-    expanded: &HashSet<PathBuf>,
-    collapsed: &HashSet<PathBuf>,
-) -> Vec<OutlineNode> {
+/// Builds visible Markdown nodes under the configured home outline root.
+///
+/// Example: collapsed `~/.codex` -> `~/.codex` node with empty children.
+fn build_home_children(home: &Path, dir_states: &BTreeMap<PathBuf, bool>) -> Vec<OutlineNode> {
     let mut children = Vec::new();
     let mut root_markdowns = fs::read_dir(home)
         .ok()
@@ -2138,7 +2110,6 @@ fn build_home_children(
             continue;
         };
         let label = label.to_string();
-        let _selected = selected_file.is_some_and(|selected| selected == path);
         children.push(OutlineNode::File { path, label });
     }
 
@@ -2148,12 +2119,12 @@ fn build_home_children(
             continue;
         }
         let key = PathBuf::from(HOME_OUTLINE_ROOT).join(dir_name);
-        let is_expanded = expanded.contains(&key) && !collapsed.contains(&key);
+        let is_expanded = outline_dir_expanded(dir_states, &key);
         // Trigger: status/outline refresh keeps home roots visible.
         // Why not probe recursively: ~/.codex and peers can be very large.
         // Prevents: a closed home outline section from scanning all sessions.
         let dir_children = if is_expanded {
-            build_home_dir_children(&dir, key.clone(), expanded)
+            build_home_dir_children(&dir, key.clone(), dir_states)
         } else {
             Vec::new()
         };
@@ -2168,10 +2139,13 @@ fn build_home_children(
     children
 }
 
+/// Builds visible Markdown nodes inside an expanded home outline directory.
+///
+/// Example: collapsed nested dir -> nested dir is listed without descendants.
 fn build_home_dir_children(
     current_dir: &Path,
     key_dir: PathBuf,
-    expanded: &HashSet<PathBuf>,
+    dir_states: &BTreeMap<PathBuf, bool>,
 ) -> Vec<OutlineNode> {
     let Ok(entries) = fs::read_dir(current_dir) else {
         return Vec::new();
@@ -2191,12 +2165,12 @@ fn build_home_dir_children(
                 continue;
             }
             let child_key = key_dir.join(&name);
-            let is_expanded = expanded.contains(&child_key);
+            let is_expanded = outline_dir_expanded(dir_states, &child_key);
             // Trigger: home outline directories are refreshed periodically.
             // Why not recurse collapsed dirs: agent session folders fan out.
             // Prevents: closed outline branches from dominating allocations.
             let children = if is_expanded {
-                build_home_dir_children(&path, child_key.clone(), expanded)
+                build_home_dir_children(&path, child_key.clone(), dir_states)
             } else {
                 Vec::new()
             };
@@ -2217,11 +2191,12 @@ fn build_home_dir_children(
     nodes
 }
 
+/// Builds visible Markdown nodes under an attached absolute directory.
+///
+/// Example: collapsed attached child -> child node with no scanned descendants.
 fn build_attached_dir_children(
     current_dir: &Path,
-    expanded: &HashSet<PathBuf>,
-    collapsed: &HashSet<PathBuf>,
-    selected_file: Option<&Path>,
+    dir_states: &BTreeMap<PathBuf, bool>,
 ) -> Vec<OutlineNode> {
     let Ok(entries) = fs::read_dir(current_dir) else {
         return Vec::new();
@@ -2240,11 +2215,9 @@ fn build_attached_dir_children(
             if should_skip_outline_dir(current_dir, &name) {
                 continue;
             }
-            let is_expanded = (expanded.contains(&path)
-                || outline_attached_dir_contains_selected(&path, selected_file))
-                && !collapsed.contains(&path);
+            let is_expanded = outline_dir_expanded(dir_states, &path);
             let children = if is_expanded {
-                build_attached_dir_children(&path, expanded, collapsed, selected_file)
+                build_attached_dir_children(&path, dir_states)
             } else {
                 Vec::new()
             };
@@ -2279,9 +2252,15 @@ fn first_markdown_file(nodes: &[OutlineNode]) -> Option<PathBuf> {
     None
 }
 
-fn default_expanded_dirs(root: &Path, attached_outline_dirs: &[PathBuf]) -> HashSet<PathBuf> {
-    let mut expanded = HashSet::new();
-    expanded.insert(PathBuf::new());
+/// Returns the startup expansion map used before the user changes outline state.
+///
+/// Example: workspace first-level dirs -> inserted as expanded.
+fn default_outline_dir_states(
+    root: &Path,
+    attached_outline_dirs: &[PathBuf],
+) -> BTreeMap<PathBuf, bool> {
+    let mut states = BTreeMap::new();
+    states.insert(PathBuf::new(), true);
     if let Ok(entries) = fs::read_dir(root) {
         for entry in entries.filter_map(|entry| entry.ok()) {
             let name = entry.file_name().to_string_lossy().to_string();
@@ -2291,37 +2270,21 @@ fn default_expanded_dirs(root: &Path, attached_outline_dirs: &[PathBuf]) -> Hash
                 .unwrap_or(false)
                 && !should_skip_outline_dir(root, &name)
             {
-                expanded.insert(PathBuf::from(name));
+                states.insert(PathBuf::from(name), true);
             }
         }
     }
-    expanded.insert(PathBuf::from(HOME_OUTLINE_ROOT));
+    states.insert(PathBuf::from(HOME_OUTLINE_ROOT), true);
     for dir_name in HOME_OUTLINE_DIRS {
-        expanded.insert(PathBuf::from(HOME_OUTLINE_ROOT).join(dir_name));
+        states.insert(PathBuf::from(HOME_OUTLINE_ROOT).join(dir_name), true);
     }
-    expanded.extend(attached_outline_dirs.iter().cloned());
-    expanded
+    for dir in attached_outline_dirs {
+        states.insert(dir.clone(), true);
+    }
+    states
 }
 
-/// Returns whether a workspace directory contains the selected file.
-fn outline_workspace_dir_contains_selected(
-    project_root: &Path,
-    dir_relative: &Path,
-    selected_file: Option<&Path>,
-) -> bool {
-    let Some(selected_file) = selected_file else {
-        return false;
-    };
-    let selected_relative = selected_file
-        .strip_prefix(project_root)
-        .unwrap_or(selected_file);
-    selected_relative.starts_with(dir_relative)
-}
-
-fn outline_attached_dir_contains_selected(dir: &Path, selected_file: Option<&Path>) -> bool {
-    selected_file.is_some_and(|selected| selected.is_absolute() && selected.starts_with(dir))
-}
-
+/// Returns a compact label for an attached outline root.
 fn attached_outline_label(dir: &Path) -> String {
     dir.file_name()
         .and_then(|name| name.to_str())

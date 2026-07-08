@@ -1422,7 +1422,7 @@ impl GsdvGuiApp {
                     }
                 }
                 AppDialog::RestartAgent { index, slot } => {
-                    let workspace = self.agent_workspace_for_slot(index, &slot);
+                    let workspace = self.agent_metadata_for_slot(index, &slot);
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("!").size(30.0).color(theme::warning()));
                         ui.vertical(|ui| {
@@ -1476,7 +1476,7 @@ impl GsdvGuiApp {
                     slot,
                     next_kind,
                 } => {
-                    let workspace = self.agent_workspace_for_slot(index, &slot);
+                    let workspace = self.agent_metadata_for_slot(index, &slot);
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("!").size(30.0).color(theme::danger()));
                         ui.vertical(|ui| {
@@ -1523,7 +1523,7 @@ impl GsdvGuiApp {
                     slot,
                     mut model,
                 } => {
-                    let workspace = self.agent_workspace_for_slot(index, &slot);
+                    let workspace = self.agent_metadata_for_slot(index, &slot);
                     ui.label(RichText::new(i18n::text(self.app_language, "Agent model")).strong());
                     if let Some(workspace) = workspace.as_ref() {
                         ui.label(muted(&format!(
@@ -1575,7 +1575,7 @@ impl GsdvGuiApp {
                     mut model_provider,
                     model_providers,
                 } => {
-                    let workspace = self.agent_workspace_for_slot(index, &slot);
+                    let workspace = self.agent_metadata_for_slot(index, &slot);
                     ui.label(
                         RichText::new(i18n::text(self.app_language, "Agent model provider"))
                             .strong(),
@@ -1630,7 +1630,7 @@ impl GsdvGuiApp {
                     slot,
                     mut work_dir,
                 } => {
-                    let workspace = self.agent_workspace_for_slot(index, &slot);
+                    let workspace = self.agent_metadata_for_slot(index, &slot);
                     ui.label(
                         RichText::new(i18n::text(self.app_language, "Agent work-dir")).strong(),
                     );

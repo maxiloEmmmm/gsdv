@@ -77,21 +77,38 @@ impl GsdvGuiApp {
         dirty_workspaces: BTreeSet<usize>,
     ) {
         for index in dirty_workspaces {
-            let Some(workspace) = self.workspaces.get(index).cloned() else {
+            if !self.outline_refreshes_in_flight.insert(index) {
+                self.pending_outline_refreshes.insert(index);
+                continue;
+            }
+            let Some(workspace) = self.workspaces.get(index) else {
+                self.outline_refreshes_in_flight.remove(&index);
                 continue;
             };
+            let workspace_path = workspace.path.clone();
+            let attached_outline_dirs = workspace.attached_outline_dirs.clone();
+            let selected_file = workspace.selected_file.clone();
+            let outline = workspace.outline.clone();
             let tx = self.app_event_tx.clone();
             let repaint_ctx = ctx.clone();
             let repaint_controller = self.repaint_controller.clone();
             self.background_runtime.spawn(async move {
                 let result = tokio::task::spawn_blocking(move || {
-                    let mut workspace = workspace;
-                    data::refresh_workspace_outline(&mut workspace);
-                    workspace
+                    data::refresh_workspace_outline_parts(
+                        &workspace_path,
+                        &attached_outline_dirs,
+                        &outline,
+                        selected_file,
+                    )
                 })
                 .await;
-                if let Ok(workspace) = result {
-                    let _ = tx.send(AppEvent::WorkspaceOutlineRefreshed { index, workspace });
+                if let Ok((workspace_path, outline, selected_file)) = result {
+                    let _ = tx.send(AppEvent::WorkspaceOutlineRefreshed {
+                        index,
+                        workspace_path,
+                        outline,
+                        selected_file,
+                    });
                 }
                 repaint_controller.request_repaint(&repaint_ctx);
             });
@@ -278,15 +295,16 @@ impl GsdvGuiApp {
         let repaint_controller = self.repaint_controller.clone();
         self.background_runtime.spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
+                let source_hash = markdown_text_hash(&text);
                 let outline_entries = markdown_outline_entries(&text);
                 let preview_blocks = markdown_preview::parse(&text);
-                (text, outline_entries, preview_blocks)
+                (source_hash, outline_entries, preview_blocks)
             })
             .await;
-            if let Ok((source_text, outline_entries, preview_blocks)) = result {
+            if let Ok((source_hash, outline_entries, preview_blocks)) = result {
                 let _ = tx.send(AppEvent::MarkdownParsed {
                     index,
-                    source_text,
+                    source_hash,
                     outline_entries,
                     preview_blocks,
                 });
@@ -667,7 +685,7 @@ impl GsdvGuiApp {
         &mut self,
         ctx: &egui::Context,
         key: TerminalSpawnKey,
-        workspace: WorkspaceViewData,
+        workspace: TerminalWorkspaceMetadata,
     ) {
         if !self.pending_terminal_spawns.insert(key.clone()) {
             return;
@@ -744,7 +762,7 @@ impl GsdvGuiApp {
         &mut self,
         ctx: &egui::Context,
         key: TerminalSpawnKey,
-        workspace: WorkspaceViewData,
+        workspace: TerminalWorkspaceMetadata,
         spec: HelixLaunchSpec,
     ) {
         if !self.pending_terminal_spawns.insert(key.clone()) {

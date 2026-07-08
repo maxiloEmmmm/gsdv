@@ -1,4 +1,4 @@
-.PHONY: web-build build run
+.PHONY: web-build build run pprof-run
 
 web-build:
 	cd web && pnpm install --frozen-lockfile
@@ -9,3 +9,6 @@ build: web-build
 
 run: web-build
 	cargo run --release --bin gsdv
+
+pprof-run: web-build
+	cargo run --release --features pprof-run --bin gsdv

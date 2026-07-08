@@ -833,7 +833,7 @@ impl GsdvGuiApp {
         if workspace_index >= self.terminal_hosts.len() {
             return;
         }
-        let Some(workspace) = self.agent_workspace_for_slot(workspace_index, slot_id) else {
+        let Some(workspace) = self.agent_metadata_for_slot(workspace_index, slot_id) else {
             return;
         };
         let exited = self
@@ -866,29 +866,21 @@ impl GsdvGuiApp {
     }
 
     /// Builds terminal launch metadata for an agent slot.
-    pub(super) fn agent_workspace_for_slot(
+    pub(super) fn agent_metadata_for_slot(
         &self,
         workspace_index: usize,
         slot: &AgentSlotId,
-    ) -> Option<WorkspaceViewData> {
-        let mut workspace = self.workspaces.get(workspace_index)?.clone();
+    ) -> Option<TerminalWorkspaceMetadata> {
+        let workspace = self.workspaces.get(workspace_index)?;
+        let metadata = TerminalWorkspaceMetadata::from_workspace(workspace);
         if let AgentSlotId::Subagent(id) = slot {
             let subagent = workspace
                 .subagents
                 .iter()
                 .find(|subagent| &subagent.id == id)?;
-            workspace.name = format!("{} · {}", workspace.name, subagent.name);
-            workspace.agent_kind = subagent.agent_kind;
-            workspace.agent_model = subagent.agent_model.clone();
-            workspace.agent_model_provider = subagent.agent_model_provider.clone();
-            workspace.agent_effort = subagent.agent_effort.clone();
-            workspace.agent_fast_mode = subagent.agent_fast_mode;
-            workspace.agent_work_dir = subagent.agent_work_dir.clone();
-            workspace.agent_id = subagent.agent_id.clone();
-            workspace.session_id = subagent.session_id.clone();
-            workspace.activity = subagent.activity;
+            return Some(metadata.for_subagent(subagent));
         }
-        Some(workspace)
+        Some(metadata)
     }
 
     /// Returns the last known activity for an agent slot.
@@ -1042,7 +1034,7 @@ impl GsdvGuiApp {
                     .get(workspace_index)
                     .cloned()
                     .unwrap_or(AgentSlotId::Main);
-                let Some(workspace) = self.agent_workspace_for_slot(workspace_index, &slot_id)
+                let Some(workspace) = self.agent_metadata_for_slot(workspace_index, &slot_id)
                 else {
                     return;
                 };
@@ -1085,7 +1077,11 @@ impl GsdvGuiApp {
                 {
                     hosts.workspace = None;
                 }
-                let Some(workspace) = self.workspaces.get(workspace_index).cloned() else {
+                let Some(workspace) = self
+                    .workspaces
+                    .get(workspace_index)
+                    .map(TerminalWorkspaceMetadata::from_workspace)
+                else {
                     return;
                 };
                 match hosts.workspace.as_mut() {
@@ -1185,7 +1181,11 @@ impl GsdvGuiApp {
             return;
         }
         let workspace_index = self.active_workspace;
-        let Some(workspace) = self.workspaces.get(workspace_index).cloned() else {
+        let Some(workspace) = self
+            .workspaces
+            .get(workspace_index)
+            .map(TerminalWorkspaceMetadata::from_workspace)
+        else {
             return;
         };
         let Some(hosts) = self.terminal_hosts.get_mut(workspace_index) else {
