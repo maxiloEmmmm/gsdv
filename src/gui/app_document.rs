@@ -33,6 +33,7 @@ impl GsdvGuiApp {
         }
         self.record_recent_markdown_access(index, path.clone());
         self.mark_workspace_store_dirty();
+        self.sync_fs_watches();
         if self.active_document().is_some_and(|document| {
             document.path.as_ref() == Some(&path)
                 && document.loading_path.is_none()
@@ -185,6 +186,7 @@ impl GsdvGuiApp {
             }
             OutlineAction::Refresh => {
                 self.spawn_outline_refresh_tasks(ctx, BTreeSet::from([self.active_workspace]));
+                self.sync_fs_watches();
             }
         }
     }
@@ -223,6 +225,7 @@ impl GsdvGuiApp {
         self.mark_workspace_store_dirty();
         self.persist_workspaces();
         self.spawn_outline_refresh_tasks(ctx, BTreeSet::from([self.active_workspace]));
+        self.sync_fs_watches();
     }
 
     /// 从当前 workspace outline 移除附加目录记录，不删除目录本身。
@@ -250,6 +253,7 @@ impl GsdvGuiApp {
         self.mark_workspace_store_dirty();
         self.persist_workspaces();
         self.spawn_outline_refresh_tasks(ctx, BTreeSet::from([self.active_workspace]));
+        self.sync_fs_watches();
     }
 
     /// 切换当前 workspace 的 outline 收藏过滤状态。

@@ -110,6 +110,7 @@ fn bind_internal_listener(socket_path: &PathBuf) -> std::io::Result<tokio::net::
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    remove_stale_internal_socket(socket_path)?;
 
     // 为什么需要它:
     // - 触发条件: axum 需要 tokio listener，但 std 支持直接绑定 pathname UDS。
@@ -119,6 +120,42 @@ fn bind_internal_listener(socket_path: &PathBuf) -> std::io::Result<tokio::net::
     let listener = std::os::unix::net::UnixListener::bind(socket_path)?;
     listener.set_nonblocking(true)?;
     tokio::net::UnixListener::from_std(listener)
+}
+
+/// 删除没有监听者的旧 internal socket 文件。
+///
+/// 适用于上次 gsdv 异常退出后留下的 pathname UDS。
+/// Example: `connect -> ConnectionRefused` -> 删除后重新 bind。
+#[cfg(all(feature = "pprof-run", unix))]
+fn remove_stale_internal_socket(socket_path: &PathBuf) -> std::io::Result<()> {
+    if !socket_path.exists() {
+        return Ok(());
+    }
+    match std::os::unix::net::UnixStream::connect(socket_path) {
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "internal pprof socket is already served",
+        )),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+            ) =>
+        {
+            // 为什么需要它:
+            // - 触发条件: 旧进程退出后 pathname socket 文件仍留在 ~/.gsdv。
+            // - 不能直接忽略已有路径: stale socket 会让 pprof-run 没有入口。
+            // - 防止什么副作用或回归: 只在 connect 失败时删除，不抢占活进程。
+            std::fs::remove_file(socket_path).or_else(|remove_error| {
+                if remove_error.kind() == std::io::ErrorKind::NotFound {
+                    Ok(())
+                } else {
+                    Err(remove_error)
+                }
+            })
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// 返回 internal socket 路径。

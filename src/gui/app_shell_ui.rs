@@ -422,6 +422,7 @@ impl GsdvGuiApp {
                 let mut action = None;
                 let mut tree_hovered = false;
                 let mut rendered_any = false;
+                let mut collapsed_tree = false;
                 if let Some(workspace) = self.current_workspace_mut() {
                     for node in &mut workspace.outline {
                         rendered_any |= if favorites_only {
@@ -456,11 +457,15 @@ impl GsdvGuiApp {
                     }
                     if tree_hovered && collapse_tree {
                         collapse_outline_to_first_level(&mut workspace.outline);
+                        collapsed_tree = true;
                     }
                 }
 
                 if tree_hovered && collapse_tree {
                     self.suppress_default_agent_input = true;
+                    if collapsed_tree {
+                        self.sync_fs_watches();
+                    }
                 }
                 if (tree_hovered || tree_panel_hovered) && toggle_favorites_only {
                     self.toggle_outline_favorites_only(ui.ctx());
