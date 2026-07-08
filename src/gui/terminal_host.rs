@@ -1,5 +1,7 @@
-use crate::gui::agent::AgentLaunchConfig;
-use crate::gui::data::{self, NetworkSettings, WorkspaceActivity, WorkspaceViewData};
+use crate::gui::agent::{AgentKind, AgentLaunchConfig};
+use crate::gui::data::{
+    self, NetworkSettings, SubagentViewData, WorkspaceActivity, WorkspaceViewData,
+};
 use crate::gui::hook;
 use crate::gui::repaint_gate::RepaintController;
 use crate::gui::theme as gui_theme;
@@ -56,6 +58,74 @@ pub enum TerminalSurfaceKind {
     Agent,
     Workspace,
     Helix,
+}
+
+/// Terminal spawn/sync 所需的 workspace 轻量元数据。
+///
+/// Example: workspace with large outline -> terminal receives only launch fields.
+#[derive(Debug, Clone)]
+pub struct TerminalWorkspaceMetadata {
+    /// Workspace display name used by terminal chrome.
+    pub name: String,
+    /// Workspace root used for cwd, env, and history lookup.
+    pub path: PathBuf,
+    /// Agent implementation used when spawning an Agent terminal.
+    pub agent_kind: AgentKind,
+    /// Optional per-agent model override.
+    pub agent_model: Option<String>,
+    /// Optional per-agent model provider override.
+    pub agent_model_provider: Option<String>,
+    /// Optional per-agent effort override.
+    pub agent_effort: Option<String>,
+    /// Optional per-agent fast-mode override.
+    pub agent_fast_mode: Option<bool>,
+    /// Optional per-agent working directory override.
+    pub agent_work_dir: Option<PathBuf>,
+    /// Stable hook id exported to Agent child processes.
+    pub agent_id: String,
+    /// Last known resumable Agent session id.
+    pub session_id: Option<String>,
+    /// Last known Agent activity shown by terminal chrome.
+    pub activity: WorkspaceActivity,
+}
+
+impl TerminalWorkspaceMetadata {
+    /// Builds terminal metadata from a full workspace without cloning UI trees.
+    ///
+    /// Example: workspace outline with 10k nodes -> metadata has no outline field.
+    pub fn from_workspace(workspace: &WorkspaceViewData) -> Self {
+        Self {
+            name: workspace.name.clone(),
+            path: workspace.path.clone(),
+            agent_kind: workspace.agent_kind,
+            agent_model: workspace.agent_model.clone(),
+            agent_model_provider: workspace.agent_model_provider.clone(),
+            agent_effort: workspace.agent_effort.clone(),
+            agent_fast_mode: workspace.agent_fast_mode,
+            agent_work_dir: workspace.agent_work_dir.clone(),
+            agent_id: workspace.agent_id.clone(),
+            session_id: workspace.session_id.clone(),
+            activity: workspace.activity,
+        }
+    }
+
+    /// Returns metadata adjusted for one subagent slot.
+    ///
+    /// Example: main workspace + `lint` subagent -> title becomes `workspace · lint`.
+    pub fn for_subagent(&self, subagent: &SubagentViewData) -> Self {
+        let mut metadata = self.clone();
+        metadata.name = format!("{} · {}", metadata.name, subagent.name);
+        metadata.agent_kind = subagent.agent_kind;
+        metadata.agent_model = subagent.agent_model.clone();
+        metadata.agent_model_provider = subagent.agent_model_provider.clone();
+        metadata.agent_effort = subagent.agent_effort.clone();
+        metadata.agent_fast_mode = subagent.agent_fast_mode;
+        metadata.agent_work_dir = subagent.agent_work_dir.clone();
+        metadata.agent_id = subagent.agent_id.clone();
+        metadata.session_id = subagent.session_id.clone();
+        metadata.activity = subagent.activity;
+        metadata
+    }
 }
 
 /// 返回 terminal host UI 计数标签，适用于区分当前可见 surface 类型。
@@ -899,7 +969,7 @@ impl Dimensions for AlacrittyTermSize {
 impl GuiTerminalHost {
     pub fn spawn(
         egui_ctx: &egui::Context,
-        workspace: &WorkspaceViewData,
+        workspace: &TerminalWorkspaceMetadata,
         kind: TerminalSurfaceKind,
         agent_launch: &AgentLaunchConfig,
         network_settings: &NetworkSettings,
@@ -924,7 +994,7 @@ impl GuiTerminalHost {
 
     pub fn spawn_without_resume(
         egui_ctx: &egui::Context,
-        workspace: &WorkspaceViewData,
+        workspace: &TerminalWorkspaceMetadata,
         agent_launch: &AgentLaunchConfig,
         network_settings: &NetworkSettings,
         repaint_controller: RepaintController,
@@ -948,7 +1018,7 @@ impl GuiTerminalHost {
 
     fn spawn_with_agent_session(
         egui_ctx: &egui::Context,
-        workspace: &WorkspaceViewData,
+        workspace: &TerminalWorkspaceMetadata,
         kind: TerminalSurfaceKind,
         agent_launch: &AgentLaunchConfig,
         network_settings: &NetworkSettings,
@@ -1027,7 +1097,7 @@ impl GuiTerminalHost {
 
     pub fn spawn_helix(
         egui_ctx: &egui::Context,
-        workspace: &WorkspaceViewData,
+        workspace: &TerminalWorkspaceMetadata,
         spec: HelixLaunchSpec,
         network_settings: &NetworkSettings,
         repaint_controller: RepaintController,
@@ -1093,7 +1163,7 @@ impl GuiTerminalHost {
     }
 
     /// Updates cheap workspace metadata shown around an existing terminal.
-    pub fn sync_workspace_metadata(&mut self, workspace: &WorkspaceViewData) {
+    pub fn sync_workspace_metadata(&mut self, workspace: &TerminalWorkspaceMetadata) {
         // Trigger: the UI calls this while an already-spawned terminal is drawn.
         // Why not always clone: draw paths run frequently and status rarely changes.
         // Prevents: per-frame String clones from dominating allocation profiles.
@@ -4389,7 +4459,7 @@ impl TerminalHost for GuiTerminalHost {
     }
 }
 
-fn terminal_command(workspace: &WorkspaceViewData, kind: TerminalSurfaceKind) -> String {
+fn terminal_command(workspace: &TerminalWorkspaceMetadata, kind: TerminalSurfaceKind) -> String {
     match kind {
         TerminalSurfaceKind::Agent => workspace.agent_kind.command().to_string(),
         TerminalSurfaceKind::Workspace => workspace_terminal_command(),
@@ -4419,7 +4489,7 @@ fn non_empty_os_string(value: Option<OsString>) -> Option<OsString> {
 }
 
 fn terminal_args(
-    workspace: &WorkspaceViewData,
+    workspace: &TerminalWorkspaceMetadata,
     kind: TerminalSurfaceKind,
     _id: u64,
     agent_launch: &AgentLaunchConfig,
@@ -4445,7 +4515,10 @@ fn terminal_args(
     }
 }
 
-fn terminal_working_directory(workspace: &WorkspaceViewData, kind: TerminalSurfaceKind) -> PathBuf {
+fn terminal_working_directory(
+    workspace: &TerminalWorkspaceMetadata,
+    kind: TerminalSurfaceKind,
+) -> PathBuf {
     if kind == TerminalSurfaceKind::Agent
         && let Some(work_dir) = workspace
             .agent_work_dir
@@ -4458,7 +4531,7 @@ fn terminal_working_directory(workspace: &WorkspaceViewData, kind: TerminalSurfa
 }
 
 fn terminal_env(
-    workspace: &WorkspaceViewData,
+    workspace: &TerminalWorkspaceMetadata,
     kind: TerminalSurfaceKind,
     network_settings: &NetworkSettings,
 ) -> HashMap<String, String> {

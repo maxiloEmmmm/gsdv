@@ -561,12 +561,12 @@ impl GsdvGuiApp {
         match event {
             AppEvent::MarkdownParsed {
                 index,
-                source_text,
+                source_hash,
                 outline_entries,
                 preview_blocks,
             } => {
                 if let Some(document) = self.documents.get_mut(index)
-                    && document.text == source_text
+                    && markdown_text_hash(&document.text) == source_hash
                 {
                     document.markdown_outline_entries = outline_entries;
                     document.markdown_preview_blocks = preview_blocks;
@@ -581,12 +581,21 @@ impl GsdvGuiApp {
                     *slot = error;
                 }
             }
-            AppEvent::WorkspaceOutlineRefreshed { index, workspace } => {
+            AppEvent::WorkspaceOutlineRefreshed {
+                index,
+                workspace_path,
+                outline,
+                selected_file,
+            } => {
+                self.outline_refreshes_in_flight.remove(&index);
                 if let Some(current) = self.workspaces.get_mut(index)
-                    && current.path == workspace.path
+                    && current.path == workspace_path
                 {
-                    current.outline = workspace.outline;
-                    current.selected_file = workspace.selected_file;
+                    current.outline = outline;
+                    current.selected_file = selected_file;
+                }
+                if self.pending_outline_refreshes.remove(&index) {
+                    self.spawn_outline_refresh_tasks(ctx, BTreeSet::from([index]));
                 }
             }
             AppEvent::WorkflowTreeLoaded {
@@ -907,6 +916,8 @@ impl GsdvGuiApp {
                 let mut next_reviewer_task = None;
                 match result {
                     Ok(adapter) => {
+                        // TODO: reviewer adapter 不是热路径，但这里同时保存
+                        // adapter 和 snapshot。后续确认两者是否重复持有大数据。
                         if let Some(snapshot_slot) = self.reviewer_snapshots.get_mut(index) {
                             *snapshot_slot = Some(adapter.snapshot().clone());
                         }
@@ -947,6 +958,8 @@ impl GsdvGuiApp {
                 let mut next_reviewer_task = None;
                 match result {
                     Ok(adapter) => {
+                        // TODO: reviewer adapter 不是热路径，但这里同时保存
+                        // adapter 和 snapshot。后续确认两者是否重复持有大数据。
                         if let Some(snapshot_slot) = self.reviewer_snapshots.get_mut(index) {
                             *snapshot_slot = Some(adapter.snapshot().clone());
                         }
@@ -1150,8 +1163,14 @@ impl GsdvGuiApp {
         }
         for event in events {
             match event {
-                FsWatchAppEvent::WorkspaceChanged { index, workflow } => {
-                    self.fs_watch_dirty.mark_outline_dirty(index);
+                FsWatchAppEvent::WorkspaceChanged {
+                    index,
+                    outline,
+                    workflow,
+                } => {
+                    if outline {
+                        self.fs_watch_dirty.mark_outline_dirty(index);
+                    }
                     if workflow {
                         self.fs_watch_dirty.mark_workflow_dirty(index);
                     }
@@ -1191,7 +1210,7 @@ impl GsdvGuiApp {
         for (index, workspace) in self.workspaces.iter().enumerate() {
             let slots = agent_slots_for_workspace(workspace);
             for slot_id in slots {
-                let Some(slot_workspace) = self.agent_workspace_for_slot(index, &slot_id) else {
+                let Some(slot_workspace) = self.agent_metadata_for_slot(index, &slot_id) else {
                     continue;
                 };
                 if let Some(hosts) = self.terminal_hosts.get_mut(index)
