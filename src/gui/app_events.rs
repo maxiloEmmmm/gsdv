@@ -609,6 +609,27 @@ impl GsdvGuiApp {
             AppEvent::WorkspaceAddPrepared { result } => {
                 self.apply_workspace_add_result(ctx, result);
             }
+            AppEvent::RemoteWorkspaceAddPrepared {
+                mode,
+                config,
+                result,
+            } => {
+                self.apply_remote_workspace_add_result(ctx, mode, config, result);
+            }
+            AppEvent::RemoteWorkspaceConnected {
+                id,
+                shell,
+                snapshot,
+            } => self.apply_remote_workspace_connected(ctx, id, shell, snapshot),
+            AppEvent::RemoteWorkspaceConnectionLost { id, error } => {
+                self.apply_remote_workspace_connection_lost(id, error);
+            }
+            AppEvent::RemoteWorkspaceRefreshed { id, result } => {
+                self.apply_remote_workspace_refresh(ctx, id, result);
+            }
+            AppEvent::RemoteWorkspaceSaved { id, result } => {
+                self.apply_remote_workspace_saved(id, result);
+            }
             AppEvent::ReviewerScriptsLoaded { result } => match result {
                 Ok(scripts) => {
                     self.reviewer_scripts.scripts = scripts;

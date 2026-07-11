@@ -99,9 +99,20 @@ impl GsdvGuiApp {
         self.workspaces
             .iter()
             .enumerate()
-            .map(|(index, workspace)| WorkspaceWatchSpec {
-                root: workspace.path.clone(),
-                opened_dirs: self.opened_workspace_watch_dirs(index, workspace),
+            .map(|(index, workspace)| {
+                if workspace.remote.is_some() {
+                    // 触发条件：Remote 项目路径可能在本机恰好存在。
+                    // 不能走常规路径：notify 会把本机同名目录误当远端变更。
+                    // 防止副作用：保留数组下标同时确保不会注册真实 watch。
+                    return WorkspaceWatchSpec {
+                        root: std::env::temp_dir().join(format!("gsdv-remote-unwatched-{index}")),
+                        opened_dirs: BTreeSet::new(),
+                    };
+                }
+                WorkspaceWatchSpec {
+                    root: workspace.path.clone(),
+                    opened_dirs: self.opened_workspace_watch_dirs(index, workspace),
+                }
             })
             .collect()
     }

@@ -54,6 +54,13 @@ pub enum BranchCheckout {
 pub(crate) fn debug_log(_args: std::fmt::Arguments<'_>) {}
 
 fn main() -> eframe::Result<()> {
+    if std::env::var_os("GSDV_SSH_ASKPASS").is_some() {
+        if let Err(error) = gui::remote_workspace::run_askpass_from_env() {
+            eprintln!("{error:#}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     let first_arg = std::env::args().nth(1);
     if first_arg.as_deref() == Some("agent-status-hook") {
         if let Err(error) = gui::agent_status_hook::run_from_stdin() {
@@ -79,11 +86,28 @@ fn main() -> eframe::Result<()> {
 
 fn install_self() -> Result<()> {
     let current = std::env::current_exe().context("failed to resolve current executable")?;
+    remove_legacy_remote_workspace_helper()?;
     install_agent_status_hook(&current)?;
     install_codex_hooks()?;
     install_claude_hooks()?;
     install_agent_skills()?;
     Ok(())
+}
+
+/// 删除错误版本曾安装的 Remote Workspace helper 脚本。
+///
+/// 适用场景：升级到纯 SSH 文件访问实现。例：旧 helper 存在 -> 本机启动时移除。
+fn remove_legacy_remote_workspace_helper() -> Result<()> {
+    let path = gsdv_home_dir()?
+        .join("hooks")
+        .join("remote-workspace-helper");
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            Err(error).with_context(|| format!("failed to remove obsolete {}", path.display()))
+        }
+    }
 }
 
 fn install_agent_status_hook(gsdv_exe: &Path) -> Result<()> {
@@ -93,12 +117,19 @@ fn install_agent_status_hook(gsdv_exe: &Path) -> Result<()> {
     let hook_path = hook_dir.join("agent-status-hook");
     fs::write(&hook_path, agent_status_hook_script(gsdv_exe))
         .with_context(|| format!("failed to write {}", hook_path.display()))?;
+    set_hook_executable(&hook_path)
+}
+
+/// 在 Unix 上给 hook 脚本增加执行权限，其他平台保持文件原样。
+///
+/// 适用场景：安装 shell hook。例：0644 -> 0755。
+fn set_hook_executable(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(&hook_path)?.permissions();
+        let mut permissions = fs::metadata(path)?.permissions();
         permissions.set_mode(0o755);
-        fs::set_permissions(&hook_path, permissions)?;
+        fs::set_permissions(path, permissions)?;
     }
     Ok(())
 }

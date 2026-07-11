@@ -620,6 +620,11 @@ impl GsdvGuiApp {
     fn remote_agent_spawn_pending(&self, workspace_index: usize, slot_id: &AgentSlotId) -> bool {
         self.pending_terminal_spawns.contains(&TerminalSpawnKey {
             index: workspace_index,
+            workspace_path: self
+                .workspaces
+                .get(workspace_index)
+                .map(|workspace| workspace.path.clone())
+                .unwrap_or_default(),
             kind: TerminalSurfaceKind::Agent,
             agent_slot: slot_id.clone(),
         })

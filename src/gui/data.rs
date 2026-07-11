@@ -1,4 +1,5 @@
 use crate::gui::agent::AgentKind;
+use crate::gui::remote_workspace::RemoteWorkspaceConfig;
 use crate::gui::theme::ThemeMode;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -89,6 +90,8 @@ pub enum ReviewerMode {
 
 #[derive(Debug, Clone)]
 pub struct WorkspaceViewData {
+    /// Remote 连接配置；None 表示普通本地 workspace。
+    pub remote: Option<RemoteWorkspaceConfig>,
     pub name: String,
     pub path: PathBuf,
     pub agent_kind: AgentKind,
@@ -685,6 +688,8 @@ struct StoreFile {
 #[derive(Debug, Deserialize, Serialize)]
 struct StoredWorkspace {
     path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote: Option<RemoteWorkspaceConfig>,
     #[serde(default)]
     agent_kind: Option<AgentKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -808,6 +813,9 @@ pub fn load_initial_gui_data(default_agent_kind: AgentKind) -> InitialGuiData {
         .workspaces
         .into_iter()
         .filter_map(|workspace| {
+            if let Some(config) = workspace.remote.clone() {
+                return Some(new_remote_workspace(config, default_agent_kind));
+            }
             let path = PathBuf::from(&workspace.path);
             if path.is_dir() {
                 Some(build_workspace(
@@ -1317,6 +1325,7 @@ pub fn new_workspace(path: PathBuf, agent_kind: AgentKind) -> WorkspaceViewData 
         path.clone(),
         StoredWorkspace {
             path: path.to_string_lossy().to_string(),
+            remote: None,
             agent_kind: Some(agent_kind),
             agent_model: None,
             agent_model_provider: None,
@@ -1336,6 +1345,47 @@ pub fn new_workspace(path: PathBuf, agent_kind: AgentKind) -> WorkspaceViewData 
         &statuses.by_path,
         agent_kind,
     )
+}
+
+/// 构造尚未连接的 Remote Workspace 占位渲染状态。
+///
+/// 适用场景：从本地 store 恢复远端连接配置。例：启动时 -> 后台连接后替换 Agent 数据。
+pub fn new_remote_workspace(
+    mut config: RemoteWorkspaceConfig,
+    agent_kind: AgentKind,
+) -> WorkspaceViewData {
+    if config.workspace_key.trim().is_empty() {
+        config.workspace_key = crate::gui::remote_workspace::new_workspace_key();
+    }
+    let identity = PathBuf::from(format!("remote-{}", config.workspace_key));
+    WorkspaceViewData {
+        remote: Some(config.clone()),
+        name: config.name,
+        path: identity.clone(),
+        agent_kind,
+        agent_model: None,
+        agent_model_provider: None,
+        agent_effort: None,
+        agent_fast_mode: None,
+        agent_work_dir: None,
+        agent_id: new_agent_id(&identity),
+        session_id: None,
+        activity: WorkspaceActivity::Unknown,
+        subagents: Vec::new(),
+        agent_rows: default_agent_rows(&[]),
+        agent_focus: Some(default_agent_focus()),
+        center_mode: CenterMode::Agent,
+        previous_center_mode: CenterMode::Agent,
+        route: Route::Workspace,
+        reviewer_mode: ReviewerMode::Git,
+        selected_file: None,
+        outline: Vec::new(),
+        outline_favorites: BTreeSet::new(),
+        attached_outline_dirs: Vec::new(),
+        recent_markdowns: Vec::new(),
+        markdown_outline_collapsed: true,
+        memo: String::new(),
+    }
 }
 
 pub fn save_workspace_store(workspaces: &[WorkspaceViewData], active: usize, rail_collapsed: bool) {
@@ -1361,6 +1411,7 @@ pub fn save_workspace_store(workspaces: &[WorkspaceViewData], active: usize, rai
             .iter()
             .map(|workspace| StoredWorkspace {
                 path: workspace.path.to_string_lossy().to_string(),
+                remote: workspace.remote.clone(),
                 agent_kind: Some(workspace.agent_kind),
                 agent_model: workspace.agent_model.clone(),
                 agent_model_provider: normalize_stored_agent_model_provider(
@@ -1389,7 +1440,10 @@ pub fn save_workspace_store(workspaces: &[WorkspaceViewData], active: usize, rai
     if let Ok(content) = serde_json::to_string_pretty(&store) {
         let _ = fs::write(path, content);
     }
-    for workspace in workspaces {
+    for workspace in workspaces
+        .iter()
+        .filter(|workspace| workspace.remote.is_none())
+    {
         save_workspace_subagents(workspace);
         save_workspace_outline_favorites(&workspace.path, &workspace.outline_favorites);
         let _ = save_workspace_recent_markdowns(&workspace.path, &workspace.recent_markdowns);
@@ -1864,6 +1918,7 @@ fn build_workspace(
     (agent_rows, agent_focus) = normalize_agent_rows(agent_rows, agent_focus, &subagents);
 
     WorkspaceViewData {
+        remote: None,
         name: workspace_name(&path),
         path,
         agent_kind,
@@ -2357,7 +2412,10 @@ fn should_skip_outline_dir(parent: &Path, dir_name: &str) -> bool {
     }
 }
 
-fn workspace_name(project_dir: &Path) -> String {
+/// 返回 workspace 路径末尾最多两段作为紧凑名称。
+///
+/// 适用场景：Local Rail 与 Remote Outline 共享命名。例：`/a/b/c` -> `b/c`。
+pub fn workspace_name(project_dir: &Path) -> String {
     let mut segments = project_dir
         .components()
         .filter_map(|component| component.as_os_str().to_str())
