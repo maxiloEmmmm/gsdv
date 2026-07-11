@@ -98,6 +98,11 @@ impl GsdvGuiApp {
             .unwrap_or(AgentSlotId::Main);
         let spawn_key = TerminalSpawnKey {
             index: self.active_workspace,
+            workspace_path: self
+                .workspaces
+                .get(self.active_workspace)
+                .map(|workspace| workspace.path.clone())
+                .unwrap_or_default(),
             kind,
             agent_slot: agent_slot.clone(),
         };
@@ -252,6 +257,11 @@ impl GsdvGuiApp {
         self.respawn_exited_agent_terminal_host(ui.ctx(), &agent_slot);
         let spawn_key = TerminalSpawnKey {
             index: self.active_workspace,
+            workspace_path: self
+                .workspaces
+                .get(self.active_workspace)
+                .map(|workspace| workspace.path.clone())
+                .unwrap_or_default(),
             kind: TerminalSurfaceKind::Agent,
             agent_slot: agent_slot.clone(),
         };
@@ -857,6 +867,7 @@ impl GsdvGuiApp {
             None => {
                 let key = TerminalSpawnKey {
                     index: workspace_index,
+                    workspace_path: workspace.path.clone(),
                     kind: TerminalSurfaceKind::Agent,
                     agent_slot: slot_id.clone(),
                 };
@@ -872,13 +883,34 @@ impl GsdvGuiApp {
         slot: &AgentSlotId,
     ) -> Option<TerminalWorkspaceMetadata> {
         let workspace = self.workspaces.get(workspace_index)?;
-        let metadata = TerminalWorkspaceMetadata::from_workspace(workspace);
+        let metadata = self.terminal_metadata_for_workspace(workspace_index)?;
         if let AgentSlotId::Subagent(id) = slot {
             let subagent = workspace
                 .subagents
                 .iter()
                 .find(|subagent| &subagent.id == id)?;
             return Some(metadata.for_subagent(subagent));
+        }
+        Some(metadata)
+    }
+
+    /// 构造本地或 Remote terminal 的统一启动元数据。
+    ///
+    /// 适用场景：Agent 和 Workspace Terminal 共用。例：Remote -> 附加独立 SSH 参数与 shell。
+    pub(super) fn terminal_metadata_for_workspace(
+        &self,
+        workspace_index: usize,
+    ) -> Option<TerminalWorkspaceMetadata> {
+        let workspace = self.workspaces.get(workspace_index)?;
+        let mut metadata = TerminalWorkspaceMetadata::from_workspace(workspace);
+        if workspace.remote.is_some() {
+            let runtime = self.remote_workspaces.get(workspace_index)?.as_ref()?;
+            let shell = runtime.shell?;
+            metadata.remote = Some(RemoteTerminalMetadata {
+                config: workspace.remote.clone()?,
+                shell,
+                network_settings: runtime.network_settings.clone(),
+            });
         }
         Some(metadata)
     }
@@ -1059,6 +1091,7 @@ impl GsdvGuiApp {
                     None => {
                         let key = TerminalSpawnKey {
                             index: workspace_index,
+                            workspace_path: workspace.path.clone(),
                             kind,
                             agent_slot: slot_id,
                         };
@@ -1067,6 +1100,9 @@ impl GsdvGuiApp {
                 }
             }
             TerminalSurfaceKind::Workspace => {
+                let Some(workspace) = self.terminal_metadata_for_workspace(workspace_index) else {
+                    return;
+                };
                 let Some(hosts) = self.terminal_hosts.get_mut(workspace_index) else {
                     return;
                 };
@@ -1077,18 +1113,12 @@ impl GsdvGuiApp {
                 {
                     hosts.workspace = None;
                 }
-                let Some(workspace) = self
-                    .workspaces
-                    .get(workspace_index)
-                    .map(TerminalWorkspaceMetadata::from_workspace)
-                else {
-                    return;
-                };
                 match hosts.workspace.as_mut() {
                     Some(host) => host.sync_workspace_metadata(&workspace),
                     None => {
                         let key = TerminalSpawnKey {
                             index: workspace_index,
+                            workspace_path: workspace.path.clone(),
                             kind,
                             agent_slot: AgentSlotId::Main,
                         };
@@ -1115,6 +1145,11 @@ impl GsdvGuiApp {
         }
         let spawn_pending = self.pending_terminal_spawns.contains(&TerminalSpawnKey {
             index: self.active_workspace,
+            workspace_path: self
+                .workspaces
+                .get(self.active_workspace)
+                .map(|workspace| workspace.path.clone())
+                .unwrap_or_default(),
             kind: TerminalSurfaceKind::Helix,
             agent_slot: AgentSlotId::Main,
         });
@@ -1203,6 +1238,7 @@ impl GsdvGuiApp {
         hosts.helix = None;
         let key = TerminalSpawnKey {
             index: workspace_index,
+            workspace_path: workspace.path.clone(),
             kind: TerminalSurfaceKind::Helix,
             agent_slot: AgentSlotId::Main,
         };

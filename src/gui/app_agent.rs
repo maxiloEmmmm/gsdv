@@ -564,10 +564,7 @@ impl GsdvGuiApp {
             }
 
             if self.terminal_hosts[index].workspace.is_some()
-                && let Some(workspace) = self
-                    .workspaces
-                    .get(index)
-                    .map(TerminalWorkspaceMetadata::from_workspace)
+                && let Some(workspace) = self.terminal_metadata_for_workspace(index)
             {
                 workspace_requests.push((index, workspace));
             }
@@ -599,6 +596,7 @@ impl GsdvGuiApp {
             }
             let key = TerminalSpawnKey {
                 index,
+                workspace_path: workspace.path.clone(),
                 kind: TerminalSurfaceKind::Agent,
                 agent_slot: slot_id,
             };
@@ -612,6 +610,7 @@ impl GsdvGuiApp {
             }
             let key = TerminalSpawnKey {
                 index,
+                workspace_path: workspace.path.clone(),
                 kind: TerminalSurfaceKind::Workspace,
                 agent_slot: AgentSlotId::Main,
             };
@@ -625,6 +624,7 @@ impl GsdvGuiApp {
             }
             let key = TerminalSpawnKey {
                 index,
+                workspace_path: workspace.path.clone(),
                 kind: TerminalSurfaceKind::Helix,
                 agent_slot: AgentSlotId::Main,
             };

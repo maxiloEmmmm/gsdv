@@ -125,6 +125,9 @@ impl GsdvGuiApp {
         let mut start_codex_auth = false;
         let mut outline_action = None;
         let mut open_recent_helix_target = None;
+        let mut add_local_workspace = false;
+        let mut remote_connect = None;
+        let mut remote_name_edit = None;
         let screen = ctx.screen_rect();
 
         egui::Window::new(app_dialog_title(&dialog, self.app_language))
@@ -139,6 +142,8 @@ impl GsdvGuiApp {
                 ),
                 AppDialog::RecentMarkdownOutline { .. } => Vec2::new(620.0, 520.0),
                 AppDialog::RecentAgentHelixTargets => Vec2::new(620.0, 420.0),
+                AppDialog::AddWorkspaceKind => Vec2::new(440.0, 230.0),
+                AppDialog::RemoteWorkspace { .. } => Vec2::new(520.0, 520.0),
                 AppDialog::CreateMarkdown { .. }
                 | AppDialog::CreateFolder { .. }
                 | AppDialog::RenamePath { .. } => Vec2::new(460.0, 300.0),
@@ -177,6 +182,149 @@ impl GsdvGuiApp {
                     .inner_margin(Margin::same(18)),
             )
             .show(ctx, |ui| match dialog.clone() {
+                AppDialog::AddWorkspaceKind => {
+                    ui.label(RichText::new("Workspace type").strong().size(18.0));
+                    ui.add_space(12.0);
+                    ui.label(muted("Choose where this workspace runs."));
+                    ui.add_space(24.0);
+                    ui.horizontal(|ui| {
+                        if primary_action(ui, "Local").clicked() {
+                            add_local_workspace = true;
+                            next_dialog = None;
+                        }
+                        if secondary_action(ui, "Remote").clicked() {
+                            next_dialog = Some(AppDialog::RemoteWorkspace {
+                                mode: RemoteWorkspaceDialogMode::Create,
+                                form: RemoteWorkspaceForm::empty(),
+                                error: None,
+                                in_flight: false,
+                            });
+                        }
+                        if secondary_action(ui, i18n::text(self.app_language, "Cancel")).clicked()
+                        {
+                            next_dialog = None;
+                        }
+                    });
+                }
+                AppDialog::RemoteWorkspace {
+                    mode,
+                    mut form,
+                    mut error,
+                    in_flight,
+                } => {
+                    ui.label(RichText::new("SSH Remote Workspace").strong().size(18.0));
+                    ui.add_space(10.0);
+                    ui.add_enabled_ui(!in_flight, |ui| {
+                        ui.label("Name");
+                        ui.text_edit_singleline(&mut form.name);
+                        ui.label("Host / IP");
+                        ui.text_edit_singleline(&mut form.host);
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label("Port");
+                                ui.add(egui::TextEdit::singleline(&mut form.port).desired_width(90.0));
+                            });
+                            ui.vertical(|ui| {
+                                ui.label("Username");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut form.username)
+                                        .desired_width(240.0),
+                                );
+                            });
+                        });
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(
+                                &mut form.auth_kind,
+                                RemoteAuthKind::Password,
+                                "Password",
+                            );
+                            ui.selectable_value(
+                                &mut form.auth_kind,
+                                RemoteAuthKind::PrivateKey,
+                                "Private key",
+                            );
+                        });
+                        match form.auth_kind {
+                            RemoteAuthKind::Password => {
+                                ui.label("Password (stored as plaintext)");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut form.password)
+                                        .password(true),
+                                );
+                            }
+                            RemoteAuthKind::PrivateKey => {
+                                ui.label("Private key path");
+                                ui.text_edit_singleline(&mut form.private_key);
+                                ui.label(muted("Passphrase-protected keys are not supported."));
+                            }
+                        }
+                    });
+                    if let Some(message) = error.as_deref() {
+                        ui.add_space(8.0);
+                        ui.label(RichText::new(message).color(theme::danger()).size(12.0));
+                    }
+                    ui.with_layout(Layout::bottom_up(Align::RIGHT), |ui| {
+                        ui.horizontal(|ui| {
+                            if secondary_action(ui, i18n::text(self.app_language, "Cancel"))
+                                .clicked()
+                                && !in_flight
+                            {
+                                next_dialog = None;
+                            }
+                            if primary_action(
+                                ui,
+                                if in_flight { "Connecting..." } else { "Connect" },
+                            )
+                            .clicked()
+                                && !in_flight
+                            {
+                                match form.config() {
+                                    Ok(config) => {
+                                        let name_only = match mode {
+                                            RemoteWorkspaceDialogMode::Edit(index) => self
+                                                .workspaces
+                                                .get(index)
+                                                .and_then(|workspace| workspace.remote.as_ref())
+                                                .is_some_and(|current| {
+                                                    remote_workspace::same_connection(
+                                                        current, &config,
+                                                    )
+                                                }),
+                                            RemoteWorkspaceDialogMode::Create => false,
+                                        };
+                                        if name_only {
+                                            if let RemoteWorkspaceDialogMode::Edit(index) = mode {
+                                                remote_name_edit = Some((index, config));
+                                                next_dialog = None;
+                                            }
+                                        } else {
+                                            remote_connect = Some((mode.clone(), config));
+                                            next_dialog = Some(AppDialog::RemoteWorkspace {
+                                                mode: mode.clone(),
+                                                form: form.clone(),
+                                                error: None,
+                                                in_flight: true,
+                                            });
+                                        }
+                                    }
+                                    Err(message) => error = Some(message),
+                                }
+                            }
+                        });
+                    });
+                    if remote_connect.is_none()
+                        && !matches!(next_dialog, None)
+                        && !matches!(next_dialog, Some(AppDialog::RemoteWorkspace { in_flight: true, .. }))
+                    {
+                        next_dialog = Some(AppDialog::RemoteWorkspace {
+                            mode,
+                            form,
+                            error,
+                            in_flight,
+                        });
+                    }
+                }
                 AppDialog::WorkflowQuickModal => {
                     if quick_overlay_dialog.is_some() {
                         ui.add_enabled_ui(false, |ui| {
@@ -871,12 +1019,17 @@ impl GsdvGuiApp {
                 }
                 AppDialog::CloseWorkspace { index } => {
                     let workspace = self.workspaces.get(index);
+                    let remote = workspace.is_some_and(|workspace| workspace.remote.is_some());
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("!").size(30.0).color(theme::danger()));
                         ui.vertical(|ui| {
                             ui.label(
-                                RichText::new(i18n::text(self.app_language, "Close workspace?"))
-                                    .strong(),
+                                RichText::new(if remote {
+                                    "Delete remote workspace?"
+                                } else {
+                                    i18n::text(self.app_language, "Close workspace?")
+                                })
+                                .strong(),
                             );
                             if let Some(workspace) = workspace {
                                 ui.label(muted(&workspace.name));
@@ -890,13 +1043,14 @@ impl GsdvGuiApp {
                         });
                     });
                     ui.add_space(12.0);
-                    ui.label(
-                        RichText::new(
+                    ui.label(RichText::new(if remote {
+                        "This disconnects SSH, ends its terminals, and deletes the local connection configuration including the plaintext password."
+                    } else {
                             i18n::text(
                                 self.app_language,
                                 "This removes the workspace from gsdv and deletes its workspace memo file under ~/.gsdv/workspaces/<workspace-hash>/memo.md. The project directory itself is not deleted.",
-                            ),
-                        )
+                            )
+                        })
                         .size(12.0)
                         .color(theme::warning()),
                     );
@@ -905,7 +1059,11 @@ impl GsdvGuiApp {
                         if workspace.is_some()
                             && primary_action(
                                 ui,
-                                i18n::text(self.app_language, "Close Workspace"),
+                                if remote {
+                                    "Delete Remote Workspace"
+                                } else {
+                                    i18n::text(self.app_language, "Close Workspace")
+                                },
                             )
                             .clicked()
                         {
@@ -2049,6 +2207,19 @@ impl GsdvGuiApp {
                 &self.network_settings,
             );
         self.set_active_app_dialog(next_dialog);
+        if add_local_workspace {
+            self.add_local_workspace_from_dialog(ctx);
+        }
+        if let Some((mode, config)) = remote_connect {
+            self.spawn_remote_workspace_add_task(ctx, mode, config);
+        }
+        if let Some((index, config)) = remote_name_edit
+            && let Some(workspace) = self.workspaces.get_mut(index)
+        {
+            workspace.name = config.name.clone();
+            workspace.remote = Some(config);
+            self.persist_workspaces();
+        }
         if quick_overlay_dialog_changed {
             self.set_workflow_quick_overlay_dialog(next_quick_overlay_dialog);
         }
@@ -2473,6 +2644,8 @@ fn reviewer_dialog_title(dialog: &ReviewerDialog, language: AppLanguage) -> &'st
 /// 返回应用弹窗标题，消息弹窗保留调用方给出的动态标题。
 fn app_dialog_title(dialog: &AppDialog, language: AppLanguage) -> &str {
     let title = match dialog {
+        AppDialog::AddWorkspaceKind => "Add Workspace",
+        AppDialog::RemoteWorkspace { .. } => "Remote Workspace",
         AppDialog::RecentMarkdownOutline { .. } => "Recent Markdown",
         AppDialog::RecentAgentHelixTargets => "Recent Helix Targets",
         AppDialog::UnsavedSwitch { .. } => "Unsaved Changes",

@@ -3,6 +3,7 @@ use crate::gui::data::{
     self, NetworkSettings, SubagentViewData, WorkspaceActivity, WorkspaceViewData,
 };
 use crate::gui::hook;
+use crate::gui::remote_workspace::{self, RemoteShell, RemoteWorkspaceConfig};
 use crate::gui::repaint_gate::RepaintController;
 use crate::gui::theme as gui_theme;
 use alacritty_terminal::event::{Event as PtyEvent, EventListener, Notify, OnResize, WindowSize};
@@ -65,6 +66,8 @@ pub enum TerminalSurfaceKind {
 /// Example: workspace with large outline -> terminal receives only launch fields.
 #[derive(Debug, Clone)]
 pub struct TerminalWorkspaceMetadata {
+    /// SSH 启动元数据；None 表示本地 terminal。
+    pub remote: Option<RemoteTerminalMetadata>,
     /// Workspace display name used by terminal chrome.
     pub name: String,
     /// Workspace root used for cwd, env, and history lookup.
@@ -89,12 +92,26 @@ pub struct TerminalWorkspaceMetadata {
     pub activity: WorkspaceActivity,
 }
 
+/// Terminal host 启动远端 SSH channel 所需的连接数据。
+///
+/// 适用场景：Agent 与 Workspace Terminal 各自建立 SSH 连接。
+#[derive(Debug, Clone)]
+pub struct RemoteTerminalMetadata {
+    /// 持久化 SSH 配置。
+    pub config: RemoteWorkspaceConfig,
+    /// 远端默认 shell 类型。
+    pub shell: RemoteShell,
+    /// 远端 gsdv store 中的代理配置，仅注入 SSH 内部的 Agent 命令。
+    pub network_settings: NetworkSettings,
+}
+
 impl TerminalWorkspaceMetadata {
     /// Builds terminal metadata from a full workspace without cloning UI trees.
     ///
     /// Example: workspace outline with 10k nodes -> metadata has no outline field.
     pub fn from_workspace(workspace: &WorkspaceViewData) -> Self {
         Self {
+            remote: None,
             name: workspace.name.clone(),
             path: workspace.path.clone(),
             agent_kind: workspace.agent_kind,
@@ -1036,10 +1053,11 @@ impl GuiTerminalHost {
         let shell = terminal_command(workspace, kind);
         let args = terminal_args(workspace, kind, id, agent_launch, agent_session_id);
         let env = terminal_env(workspace, kind, network_settings);
-        let working_directory = terminal_working_directory(workspace, kind);
+        let working_directory = terminal_backend_working_directory(workspace, kind);
         let launch_command = command_display(&shell, &args);
-        let initial_history = (kind == TerminalSurfaceKind::Workspace)
-            .then(|| data::load_workspace_terminal_history(&workspace.path));
+        let initial_history = (kind == TerminalSurfaceKind::Workspace
+            && workspace.remote.is_none())
+        .then(|| data::load_workspace_terminal_history(&workspace.path));
         let launched_with_resume = kind == TerminalSurfaceKind::Agent
             && args.iter().any(|arg| arg == "resume" || arg == "--resume");
         let launched_session_id = launched_with_resume
@@ -4460,6 +4478,9 @@ impl TerminalHost for GuiTerminalHost {
 }
 
 fn terminal_command(workspace: &TerminalWorkspaceMetadata, kind: TerminalSurfaceKind) -> String {
+    if workspace.remote.is_some() && kind != TerminalSurfaceKind::Helix {
+        return "ssh".to_string();
+    }
     match kind {
         TerminalSurfaceKind::Agent => workspace.agent_kind.command().to_string(),
         TerminalSurfaceKind::Workspace => workspace_terminal_command(),
@@ -4495,6 +4516,50 @@ fn terminal_args(
     agent_launch: &AgentLaunchConfig,
     agent_session_id: Option<&str>,
 ) -> Vec<String> {
+    if let Some(remote) = workspace.remote.as_ref()
+        && kind != TerminalSurfaceKind::Helix
+    {
+        let mut ssh_args = remote_workspace::ssh_connection_args(&remote.config);
+        ssh_args.push("-tt".to_string());
+        ssh_args.push(remote_workspace::ssh_target(&remote.config));
+        if kind == TerminalSurfaceKind::Agent {
+            let resume_cwd = terminal_working_directory(workspace, kind);
+            let agent_args = agent_launch.args_for(
+                workspace.agent_kind,
+                agent_session_id,
+                workspace.agent_model.as_deref(),
+                workspace.agent_model_provider.as_deref(),
+                workspace.agent_effort.as_deref(),
+                workspace.agent_fast_mode,
+                Some(resume_cwd.as_path()),
+            );
+            let remote_env = vec![
+                ("GSDV_AGENT_ID".to_string(), workspace.agent_id.clone()),
+                (
+                    "GSDV_AGENT_KIND".to_string(),
+                    workspace.agent_kind.env_name().to_string(),
+                ),
+                (
+                    "GSDV_WORKSPACE_DIR".to_string(),
+                    workspace.path.display().to_string(),
+                ),
+            ];
+            let remote_env = remote
+                .network_settings
+                .env_vars()
+                .into_iter()
+                .chain(remote_env)
+                .collect::<Vec<_>>();
+            ssh_args.push(remote_workspace::remote_agent_command(
+                remote.shell,
+                &resume_cwd,
+                workspace.agent_kind.command(),
+                &agent_args,
+                &remote_env,
+            ));
+        }
+        return ssh_args;
+    }
     match kind {
         TerminalSurfaceKind::Agent => {
             let mut args = Vec::new();
@@ -4523,11 +4588,28 @@ fn terminal_working_directory(
         && let Some(work_dir) = workspace
             .agent_work_dir
             .as_ref()
-            .filter(|path| path.is_dir())
+            .filter(|path| workspace.remote.is_some() || path.is_dir())
     {
         return work_dir.clone();
     }
+    if workspace.remote.is_some() && kind == TerminalSurfaceKind::Workspace {
+        return std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    }
     workspace.path.clone()
+}
+
+/// 返回本机 terminal backend 启动子进程时使用的 cwd。
+///
+/// 适用场景：Remote Agent 的业务 cwd 在远端，不能传给本机 ssh 进程。例：Remote -> 当前目录。
+fn terminal_backend_working_directory(
+    workspace: &TerminalWorkspaceMetadata,
+    kind: TerminalSurfaceKind,
+) -> PathBuf {
+    if workspace.remote.is_some() {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    } else {
+        terminal_working_directory(workspace, kind)
+    }
 }
 
 fn terminal_env(
@@ -4535,18 +4617,35 @@ fn terminal_env(
     kind: TerminalSurfaceKind,
     network_settings: &NetworkSettings,
 ) -> HashMap<String, String> {
-    let mut env = network_settings
-        .env_vars()
-        .into_iter()
-        .collect::<HashMap<_, _>>();
-    if let Some(gws) = data::ensure_workspace_store_dir(&workspace.path) {
-        env.insert("GWS".to_string(), gws.display().to_string());
+    // Remote 的代理属于 SSH 内部 Agent 命令；注入本机 ssh 会错误地使用本机配置。
+    let mut env = if workspace.remote.is_none() {
+        network_settings
+            .env_vars()
+            .into_iter()
+            .collect::<HashMap<_, _>>()
+    } else {
+        HashMap::new()
+    };
+    if let Some(remote) = workspace.remote.as_ref()
+        && let remote_workspace::RemoteAuth::Password(auth) = &remote.config.auth
+        && let Ok(executable) = std::env::current_exe()
+    {
+        env.insert("SSH_ASKPASS".to_string(), executable.display().to_string());
+        env.insert("SSH_ASKPASS_REQUIRE".to_string(), "force".to_string());
+        env.insert("DISPLAY".to_string(), "gsdv-ssh-askpass".to_string());
+        env.insert("GSDV_SSH_ASKPASS".to_string(), "1".to_string());
+        env.insert("GSDV_SSH_PASSWORD".to_string(), auth.password.clone());
+    }
+    if workspace.remote.is_none() {
+        if let Some(gws) = data::ensure_workspace_store_dir(&workspace.path) {
+            env.insert("GWS".to_string(), gws.display().to_string());
+        }
+        env.insert("GSDV_HOOK_ENDPOINT".to_string(), hook::app_hook_endpoint());
     }
     env.insert(
         "GSDV_WORKSPACE_DIR".to_string(),
         workspace.path.display().to_string(),
     );
-    env.insert("GSDV_HOOK_ENDPOINT".to_string(), hook::app_hook_endpoint());
     if kind == TerminalSurfaceKind::Agent {
         env.insert("GSDV_AGENT_ID".to_string(), workspace.agent_id.clone());
         env.insert(
