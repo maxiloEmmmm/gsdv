@@ -46,6 +46,11 @@ textarea {
   height: 100%;
   height: var(--remote-shell-viewport-height, 100%);
   max-height: var(--remote-shell-viewport-height, 100%);
+  --remote-terminal-fg: #d1fae5;
+  --remote-terminal-bg: #0f172a;
+  --remote-terminal-cursor: #d1fae5;
+  --remote-terminal-muted: #94a3b8;
+  --remote-terminal-primary: #2563eb;
   background: #f8fafc;
 }
 
@@ -191,10 +196,10 @@ textarea {
   margin: 0;
   padding: 12px;
   overflow: auto;
-  border: 1px solid #dbe3ef;
+  border: 1px solid var(--remote-terminal-muted);
   border-radius: 8px;
-  background: #0f172a;
-  color: #d1fae5;
+  background: var(--remote-terminal-bg);
+  color: var(--remote-terminal-fg);
   font-family:
     "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
   font-size: 13px;
@@ -203,7 +208,7 @@ textarea {
 }
 
 .remote-shell__terminal-empty {
-  color: #94a3b8;
+  color: var(--remote-terminal-muted);
   white-space: normal;
 }
 
@@ -269,17 +274,19 @@ textarea {
   min-height: 32px;
   padding: 6px 10px;
   resize: vertical;
-  border: 1px solid #d1d5db;
+  border: 1px solid var(--remote-terminal-muted);
   border-radius: 6px;
-  color: #111827;
+  background: var(--remote-terminal-bg);
+  color: var(--remote-terminal-fg);
+  caret-color: var(--remote-terminal-cursor);
   font: inherit;
   line-height: 18px;
   outline: none;
 }
 
 .remote-shell__input:focus {
-  border-color: #2563eb;
-  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.16);
+  border-color: var(--remote-terminal-primary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--remote-terminal-primary) 22%, transparent);
 }
 
 .remote-shell__input:disabled {

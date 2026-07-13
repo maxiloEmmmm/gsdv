@@ -373,6 +373,8 @@ pub struct TerminalRemoteSnapshot {
     pub rows: Vec<TerminalRemoteRow>,
     /// 当前 terminal 光标。
     pub cursor: TerminalRemoteCursor,
+    /// 当前主题下 remote Web 应使用的 terminal 调色板。
+    pub palette: TerminalRemotePalette,
 }
 
 /// Remote terminal append-only 增量输出。
@@ -438,6 +440,23 @@ pub struct TerminalRemoteCursor {
     pub col_index: usize,
     /// 光标形状。
     pub shape: &'static str,
+}
+
+/// Remote Web 复刻 terminal 颜色时使用的主题调色板。
+///
+/// Example: dark mode -> background `#0b1016` and foreground `#b8c2cc`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TerminalRemotePalette {
+    /// 默认前景色，格式为 #RRGGBB。
+    pub foreground: String,
+    /// 默认背景色，格式为 #RRGGBB。
+    pub background: String,
+    /// 光标色，格式为 #RRGGBB。
+    pub cursor: String,
+    /// 弱化文字色，格式为 #RRGGBB。
+    pub muted: String,
+    /// 交互强调色，格式为 #RRGGBB。
+    pub primary: String,
 }
 
 /// Remote append 比较使用的行签名。
@@ -3319,6 +3338,7 @@ fn terminal_remote_snapshot(source: &TerminalRemoteOutputSource) -> TerminalRemo
             col_index: content.cursor.point.column.0,
             shape: terminal_remote_cursor_shape(content.cursor.shape),
         },
+        palette: terminal_remote_palette(mode),
     }
 }
 
@@ -3379,6 +3399,19 @@ fn terminal_remote_run(
 /// 把 egui 颜色序列化成 remote API 约定的 RGB 字符串。
 fn terminal_remote_color(color: Color32) -> String {
     format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b())
+}
+
+/// 构造 remote Web 可直接使用的 terminal 调色板。
+///
+/// Example: `Dark` -> palette uses the same default colors as OSC 10/11/12.
+fn terminal_remote_palette(mode: gui_theme::ThemeMode) -> TerminalRemotePalette {
+    TerminalRemotePalette {
+        foreground: terminal_remote_color(gui_theme::terminal_text_for(mode)),
+        background: terminal_remote_color(gui_theme::bg_for(mode)),
+        cursor: terminal_remote_color(gui_theme::terminal_text_for(mode)),
+        muted: terminal_remote_color(gui_theme::muted_for(mode)),
+        primary: terminal_remote_color(gui_theme::primary_for(mode)),
+    }
 }
 
 /// 返回 remote API 使用的下划线名称。

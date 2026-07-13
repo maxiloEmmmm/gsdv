@@ -202,6 +202,8 @@ struct RemoteAgentOutputSnapshotMessage {
     rows: Vec<crate::gui::terminal_host::TerminalRemoteRow>,
     /// 当前 terminal 光标。
     cursor: crate::gui::terminal_host::TerminalRemoteCursor,
+    /// 当前 terminal 默认调色板。
+    palette: crate::gui::terminal_host::TerminalRemotePalette,
 }
 
 /// Agent 输出 WebSocket append 消息。
@@ -1078,6 +1080,7 @@ async fn send_remote_agent_output_snapshot(
         cols: snapshot.cols,
         rows: snapshot.rows,
         cursor: snapshot.cursor,
+        palette: snapshot.palette,
     };
     send_remote_agent_output_json(socket, &message).await
 }
