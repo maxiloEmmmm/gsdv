@@ -9,6 +9,16 @@ const MAX_TERMINAL_ROWS = 500;
 const MAX_TERMINAL_COLS = 500;
 const MAX_TERMINAL_VISIBLE_ROWS = 200;
 const REMOTE_SHELL_VIEWPORT_HEIGHT_VAR = "--remote-shell-viewport-height";
+/**
+ * Fallback palette used before the first Rust terminal snapshot arrives.
+ */
+const DEFAULT_TERMINAL_PALETTE = {
+  foreground: "#d1fae5",
+  background: "#0f172a",
+  cursor: "#d1fae5",
+  muted: "#94a3b8",
+  primary: "#2563eb",
+};
 
 /**
  * Renders the remote terminal page layout.
@@ -199,6 +209,7 @@ export default defineComponent({
         rows: [],
         cols: 0,
         cursor: null,
+        palette: { ...DEFAULT_TERMINAL_PALETTE },
         sequence: null,
         status: "Connecting to agent terminal...",
         error: "",
@@ -562,6 +573,7 @@ export default defineComponent({
       tab.rows = trimTerminalRows(rows);
       tab.cols = Number.isFinite(message.cols) ? message.cols : 0;
       tab.cursor = message.cursor ?? null;
+      tab.palette = terminalPalette(message.palette);
       tab.sequence = Number.isFinite(message.sequence) ? message.sequence : null;
       tab.status = "Agent terminal connected.";
       tab.error = "";
@@ -831,11 +843,61 @@ export default defineComponent({
     }
 
     /**
+     * Normalizes a server-provided terminal palette with stable fallbacks.
+     */
+    function terminalPalette(value) {
+      const palette = value && typeof value === "object" ? value : {};
+      return {
+        foreground:
+          typeof palette.foreground === "string"
+            ? palette.foreground
+            : DEFAULT_TERMINAL_PALETTE.foreground,
+        background:
+          typeof palette.background === "string"
+            ? palette.background
+            : DEFAULT_TERMINAL_PALETTE.background,
+        cursor:
+          typeof palette.cursor === "string"
+            ? palette.cursor
+            : DEFAULT_TERMINAL_PALETTE.cursor,
+        muted:
+          typeof palette.muted === "string"
+            ? palette.muted
+            : DEFAULT_TERMINAL_PALETTE.muted,
+        primary:
+          typeof palette.primary === "string"
+            ? palette.primary
+            : DEFAULT_TERMINAL_PALETTE.primary,
+      };
+    }
+
+    /**
+     * Returns the palette used by the currently rendered terminal tab.
+     */
+    function activeTerminalPalette() {
+      return activeTab()?.palette ?? DEFAULT_TERMINAL_PALETTE;
+    }
+
+    /**
+     * Exposes the active terminal palette as CSS custom properties.
+     */
+    function remotePaletteStyle(palette) {
+      return {
+        "--remote-terminal-fg": palette.foreground,
+        "--remote-terminal-bg": palette.background,
+        "--remote-terminal-cursor": palette.cursor,
+        "--remote-terminal-muted": palette.muted,
+        "--remote-terminal-primary": palette.primary,
+      };
+    }
+
+    /**
      * Builds a style descriptor for one terminal cell.
      */
     function terminalCellStyle(cell) {
-      const fg = cell.fg || "#d1fae5";
-      const bg = cell.bg || "#0f172a";
+      const palette = activeTerminalPalette();
+      const fg = cell.fg || palette.foreground;
+      const bg = cell.bg || palette.background;
       return {
         color: cell.inverse ? bg : fg,
         backgroundColor: cell.inverse ? fg : bg,
@@ -884,8 +946,9 @@ export default defineComponent({
      * Renders one merged terminal text run.
      */
     function renderTerminalRun(run, index) {
-      const fg = run.fg || run.color || "#d1fae5";
-      const bg = run.bg || run.backgroundColor || "#0f172a";
+      const palette = activeTerminalPalette();
+      const fg = run.fg || run.color || palette.foreground;
+      const bg = run.bg || run.backgroundColor || palette.background;
       const color = run.inverse ? bg : fg;
       const backgroundColor = run.inverse ? fg : bg;
       return (
@@ -915,8 +978,9 @@ export default defineComponent({
      */
     function terminalRunNode(run) {
       const node = document.createElement("span");
-      const fg = run.fg || run.color || "#d1fae5";
-      const bg = run.bg || run.backgroundColor || "#0f172a";
+      const palette = activeTerminalPalette();
+      const fg = run.fg || run.color || palette.foreground;
+      const bg = run.bg || run.backgroundColor || palette.background;
       node.className = [
         "remote-shell__terminal-run",
         run.bold ? "remote-shell__terminal-run--bold" : "",
@@ -1217,8 +1281,9 @@ export default defineComponent({
       const tab = activeTab();
       const binding = tab?.binding ?? null;
       const terminalBanner = tab?.error || (tab?.status === "dis" ? "dis" : "");
+      const palette = activeTerminalPalette();
       return (
-      <div class="remote-shell">
+      <div class="remote-shell" style={remotePaletteStyle(palette)}>
         <header class="remote-shell__header">
           <Button
             class="remote-shell__menu-button"
