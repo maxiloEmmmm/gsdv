@@ -167,6 +167,7 @@ impl GsdvGuiApp {
             active_agent_slot,
             active_agent_busy,
             route,
+            remote_workspace: workspace.remote.is_some(),
             center_mode,
             app_fullscreen: self.app_fullscreen,
             active_app_dialog_open,
@@ -602,9 +603,16 @@ impl GsdvGuiApp {
             AppEvent::WorkflowTreeLoaded {
                 index,
                 workspace_path,
+                remote_runtime_id,
                 result,
             } => {
-                self.apply_workflow_tree_loaded(ctx, index, workspace_path, result);
+                self.apply_workflow_tree_loaded(
+                    ctx,
+                    index,
+                    workspace_path,
+                    remote_runtime_id,
+                    result,
+                );
             }
             AppEvent::WorkspaceAddPrepared { result } => {
                 self.apply_workspace_add_result(ctx, result);
@@ -746,17 +754,35 @@ impl GsdvGuiApp {
             }
             AppEvent::WorkflowStepSaved {
                 index,
+                workspace_path,
+                remote_runtime_id,
                 target,
                 result,
             } => {
-                self.apply_workflow_step_saved(ctx, index, target, result);
+                self.apply_workflow_step_saved(
+                    ctx,
+                    index,
+                    workspace_path,
+                    remote_runtime_id,
+                    target,
+                    result,
+                );
             }
             AppEvent::WorkflowMutationFinished {
                 index,
+                workspace_path,
+                remote_runtime_id,
                 request,
                 result,
             } => {
-                self.apply_workflow_mutation_finished(ctx, index, request, result);
+                self.apply_workflow_mutation_finished(
+                    ctx,
+                    index,
+                    workspace_path,
+                    remote_runtime_id,
+                    request,
+                    result,
+                );
             }
             AppEvent::MarkdownDiffPromptBuilt { result } => match result {
                 Ok(text) if text.trim().is_empty() => {

@@ -92,6 +92,8 @@ pub enum ReviewerMode {
 pub struct WorkspaceViewData {
     /// Remote 连接配置；None 表示普通本地 workspace。
     pub remote: Option<RemoteWorkspaceConfig>,
+    /// Remote 项目 Outline 是否折叠成 28px 恢复条。
+    pub remote_outline_collapsed: bool,
     pub name: String,
     pub path: PathBuf,
     pub agent_kind: AgentKind,
@@ -690,6 +692,9 @@ struct StoredWorkspace {
     path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     remote: Option<RemoteWorkspaceConfig>,
+    /// Remote Outline 的 workspace 级持久折叠状态。
+    #[serde(default)]
+    remote_outline_collapsed: bool,
     #[serde(default)]
     agent_kind: Option<AgentKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -814,7 +819,11 @@ pub fn load_initial_gui_data(default_agent_kind: AgentKind) -> InitialGuiData {
         .into_iter()
         .filter_map(|workspace| {
             if let Some(config) = workspace.remote.clone() {
-                return Some(new_remote_workspace(config, default_agent_kind));
+                return Some(new_remote_workspace_with_outline_state(
+                    config,
+                    default_agent_kind,
+                    workspace.remote_outline_collapsed,
+                ));
             }
             let path = PathBuf::from(&workspace.path);
             if path.is_dir() {
@@ -1326,6 +1335,7 @@ pub fn new_workspace(path: PathBuf, agent_kind: AgentKind) -> WorkspaceViewData 
         StoredWorkspace {
             path: path.to_string_lossy().to_string(),
             remote: None,
+            remote_outline_collapsed: false,
             agent_kind: Some(agent_kind),
             agent_model: None,
             agent_model_provider: None,
@@ -1349,10 +1359,22 @@ pub fn new_workspace(path: PathBuf, agent_kind: AgentKind) -> WorkspaceViewData 
 
 /// 构造尚未连接的 Remote Workspace 占位渲染状态。
 ///
-/// 适用场景：从本地 store 恢复远端连接配置。例：启动时 -> 后台连接后替换 Agent 数据。
+/// 适用场景：新增 Remote Workspace。例：连接成功 -> 后台快照替换 Agent 数据。
 pub fn new_remote_workspace(
+    config: RemoteWorkspaceConfig,
+    agent_kind: AgentKind,
+) -> WorkspaceViewData {
+    new_remote_workspace_with_outline_state(config, agent_kind, false)
+}
+
+/// 按持久状态构造尚未连接的 Remote Workspace 占位渲染状态。
+///
+/// 适用场景：从 store 恢复 Remote Outline 折叠状态。
+/// 例：`collapsed=true -> 28px Remote Outline`。
+fn new_remote_workspace_with_outline_state(
     mut config: RemoteWorkspaceConfig,
     agent_kind: AgentKind,
+    remote_outline_collapsed: bool,
 ) -> WorkspaceViewData {
     if config.workspace_key.trim().is_empty() {
         config.workspace_key = crate::gui::remote_workspace::new_workspace_key();
@@ -1360,6 +1382,7 @@ pub fn new_remote_workspace(
     let identity = PathBuf::from(format!("remote-{}", config.workspace_key));
     WorkspaceViewData {
         remote: Some(config.clone()),
+        remote_outline_collapsed,
         name: config.name,
         path: identity.clone(),
         agent_kind,
@@ -1412,6 +1435,7 @@ pub fn save_workspace_store(workspaces: &[WorkspaceViewData], active: usize, rai
             .map(|workspace| StoredWorkspace {
                 path: workspace.path.to_string_lossy().to_string(),
                 remote: workspace.remote.clone(),
+                remote_outline_collapsed: workspace.remote_outline_collapsed,
                 agent_kind: Some(workspace.agent_kind),
                 agent_model: workspace.agent_model.clone(),
                 agent_model_provider: normalize_stored_agent_model_provider(
@@ -1919,6 +1943,7 @@ fn build_workspace(
 
     WorkspaceViewData {
         remote: None,
+        remote_outline_collapsed: false,
         name: workspace_name(&path),
         path,
         agent_kind,

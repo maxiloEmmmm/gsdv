@@ -233,6 +233,12 @@ fn input_runtime_keyboard_action(request: &InputRuntimeRequest) -> InputRuntimeK
     {
         return InputRuntimeKeyboardAction::SuppressTerminalInput;
     }
+    if request.remote_workspace
+        && command_or_alt_shortcut_modifier(input.modifiers)
+        && shortcut_key_pressed(input, egui::Key::Z)
+    {
+        return InputRuntimeKeyboardAction::Command(UiCommand::ToggleWorkflowQuickModal);
+    }
     if let Some(command) = read_base_route_command_for_input(
         input,
         request.route == Route::Reviewer,

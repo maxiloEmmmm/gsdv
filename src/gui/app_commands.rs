@@ -63,11 +63,8 @@ impl GsdvGuiApp {
         if remote
             && matches!(
                 command,
-                UiCommand::SaveDocument
-                    | UiCommand::CopyWorkflowPath
-                    | UiCommand::ToggleRecentMarkdownOutline
+                UiCommand::ToggleRecentMarkdownOutline
                     | UiCommand::ToggleOutlineWorkflowTab
-                    | UiCommand::ToggleWorkflowQuickModal
                     | UiCommand::PasteRecentMarkdownDiffsToAgent
                     | UiCommand::ToggleRecentAgentHelixTargets
                     | UiCommand::AgentMarkdownShortcut

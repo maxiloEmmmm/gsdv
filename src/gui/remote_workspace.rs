@@ -6,13 +6,16 @@ use crate::gui::agent::AgentKind;
 use crate::gui::data::{
     AgentColumnViewData, AgentFocusViewData, AgentRowViewData, NetworkSettings, SubagentViewData,
 };
+use crate::gui::workflow::{
+    self, WorkflowMutationRequest, WorkflowSaveRequest, WorkflowSaveSuccess, WorkflowTree,
+};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// SSH 密码认证配置。
@@ -461,6 +464,474 @@ pub fn save_remote_layout(
         "focus": payload.focus,
     });
     write_remote_json(config, shell, &sidecar_path, &sidecar)
+}
+
+/// 通过 SSH 加载当前远端项目的 workflow tree。
+///
+/// 适用场景：Remote Workspace 的 Quick Modal 打开或刷新。
+/// 例：`/repo/gsdv-spec -> WorkflowTree`。
+pub(super) fn load_remote_workflow_tree(
+    config: &RemoteWorkspaceConfig,
+    shell: RemoteShell,
+    workspace_path: &Path,
+) -> Result<WorkflowTree, String> {
+    let command = remote_workflow_inventory_command(shell, workspace_path);
+    let output = run_ssh_command(config, &command).map_err(|error| error.to_string())?;
+    let documents = parse_remote_workflow_inventory(&output).map_err(|error| error.to_string())?;
+    workflow::load_workflow_tree_from_documents(workspace_path, &documents)
+}
+
+/// 通过 SSH 保存当前远端项目的 task/step 文本。
+///
+/// 适用场景：Remote Quick Modal 执行 Cmd+S。
+/// 例：`task desc changed -> 原子覆盖远端 task.md`。
+pub(super) fn save_remote_workflow_step(
+    config: &RemoteWorkspaceConfig,
+    shell: RemoteShell,
+    workspace_path: &Path,
+    request: WorkflowSaveRequest,
+) -> Result<WorkflowSaveSuccess, String> {
+    let absolute = remote_workflow_path(shell, workspace_path, &request.task_path)?;
+    let content = read_remote_workflow_file(config, shell, &absolute)?;
+    let (next_content, saved) = workflow::save_workflow_step_content(&content, &request)?;
+    write_remote_workflow_file(config, shell, &absolute, next_content.as_bytes())?;
+    Ok(saved)
+}
+
+/// 通过 SSH 执行完整的 workflow tree mutation。
+///
+/// 适用场景：Remote Quick Modal 的创建、重命名、合并和删除菜单。
+/// 例：`RenameProject a -> b`。
+pub(super) fn apply_remote_workflow_mutation(
+    config: &RemoteWorkspaceConfig,
+    shell: RemoteShell,
+    workspace_path: &Path,
+    request: WorkflowMutationRequest,
+) -> Result<(), String> {
+    match &request {
+        WorkflowMutationRequest::AddStep { task_path, .. }
+        | WorkflowMutationRequest::RenameStep { task_path, .. }
+        | WorkflowMutationRequest::DeleteStep { task_path, .. }
+        | WorkflowMutationRequest::MergeSteps { task_path, .. } => {
+            let absolute = remote_workflow_path(shell, workspace_path, task_path)?;
+            let content = read_remote_workflow_file(config, shell, &absolute)?;
+            let next_content = workflow::apply_workflow_task_content_mutation(&content, &request)?;
+            write_remote_workflow_file(config, shell, &absolute, next_content.as_bytes())
+        }
+        WorkflowMutationRequest::InitRoot => {
+            let relative = PathBuf::from("gsdv-spec/root.md");
+            let absolute = remote_workflow_path(shell, workspace_path, &relative)?;
+            run_remote_workflow_command(
+                config,
+                remote_workflow_create_file_command(shell, &absolute, None, true),
+            )
+        }
+        WorkflowMutationRequest::AddProject { project_key } => {
+            let project_key = workflow::validate_workflow_key(project_key)?;
+            let relative = PathBuf::from("gsdv-spec")
+                .join("ps")
+                .join(project_key)
+                .join("root.md");
+            let absolute = remote_workflow_path(shell, workspace_path, &relative)?;
+            run_remote_workflow_command(
+                config,
+                remote_workflow_create_file_command(shell, &absolute, None, false),
+            )
+        }
+        WorkflowMutationRequest::AddTask {
+            project_key,
+            task_key,
+        } => {
+            let project_key = workflow::validate_workflow_key(project_key)?;
+            let task_key = workflow::validate_workflow_key(task_key)?;
+            let project_relative = PathBuf::from("gsdv-spec").join("ps").join(project_key);
+            let relative = project_relative.join(format!("task-{task_key}.md"));
+            let project = remote_workflow_path(shell, workspace_path, &project_relative)?;
+            let absolute = remote_workflow_path(shell, workspace_path, &relative)?;
+            run_remote_workflow_command(
+                config,
+                remote_workflow_create_file_command(shell, &absolute, Some(&project), false),
+            )
+        }
+        WorkflowMutationRequest::RenameProject {
+            project_key,
+            new_key,
+        } => {
+            let project_key = workflow::validate_workflow_key(project_key)?;
+            let new_key = workflow::validate_workflow_key(new_key)?;
+            if project_key == new_key {
+                return Ok(());
+            }
+            let projects = PathBuf::from("gsdv-spec").join("ps");
+            let old_path =
+                remote_workflow_path(shell, workspace_path, &projects.join(project_key))?;
+            let new_path = remote_workflow_path(shell, workspace_path, &projects.join(new_key))?;
+            run_remote_workflow_command(
+                config,
+                remote_workflow_rename_command(shell, &old_path, &new_path, true),
+            )
+        }
+        WorkflowMutationRequest::RenameTask { task_path, new_key } => {
+            let new_key = workflow::validate_workflow_key(new_key)?;
+            let old_path = remote_workflow_path(shell, workspace_path, task_path)?;
+            let parent = task_path
+                .parent()
+                .ok_or_else(|| format!("task parent not found: {}", task_path.display()))?;
+            let target = parent.join(format!("task-{new_key}.md"));
+            if target == *task_path {
+                return Ok(());
+            }
+            let new_path = remote_workflow_path(shell, workspace_path, &target)?;
+            run_remote_workflow_command(
+                config,
+                remote_workflow_rename_command(shell, &old_path, &new_path, false),
+            )
+        }
+        WorkflowMutationRequest::DeleteProject { project_key } => {
+            let project_key = workflow::validate_workflow_key(project_key)?;
+            let relative = PathBuf::from("gsdv-spec").join("ps").join(project_key);
+            let absolute = remote_workflow_path(shell, workspace_path, &relative)?;
+            run_remote_workflow_command(
+                config,
+                remote_workflow_delete_command(shell, &absolute, true),
+            )
+        }
+        WorkflowMutationRequest::DeleteTask { task_path } => {
+            let absolute = remote_workflow_path(shell, workspace_path, task_path)?;
+            run_remote_workflow_command(
+                config,
+                remote_workflow_delete_command(shell, &absolute, false),
+            )
+        }
+    }
+}
+
+/// 构造远端 workflow 文档清单命令。
+///
+/// 适用场景：一次 SSH 读取 root、project root 和直接 task 文档。
+/// 例：`/repo -> GSDV-WF 长度帧`。
+fn remote_workflow_inventory_command(shell: RemoteShell, workspace_path: &Path) -> String {
+    match shell {
+        RemoteShell::Posix => {
+            let workspace = posix_quote_str(&workspace_path.to_string_lossy());
+            format!(
+                "w={workspace}; s=\"$w/gsdv-spec\"; emit() {{ f=$1; r=$2; [ -f \"$f\" ] || return 0; pn=$(printf %s \"$r\" | wc -c); cn=$(wc -c <\"$f\"); printf 'GSDV-WF %s %s\\n' \"$pn\" \"$cn\"; printf %s \"$r\"; printf '\\n'; cat \"$f\"; printf '\\n'; }}; emit \"$s/root.md\" 'gsdv-spec/root.md'; p=\"$s/ps\"; if [ -d \"$p\" ]; then for d in \"$p\"/*; do [ -d \"$d\" ] || continue; k=${{d##*/}}; emit \"$d/root.md\" \"gsdv-spec/ps/$k/root.md\"; for f in \"$d\"/task-*.md; do [ -f \"$f\" ] || continue; n=${{f##*/}}; emit \"$f\" \"gsdv-spec/ps/$k/$n\"; done; done; fi"
+            )
+        }
+        RemoteShell::PowerShell | RemoteShell::Cmd => {
+            let workspace = powershell_quote(&workspace_path.to_string_lossy());
+            let script = format!(
+                "$o=[Console]::OpenStandardOutput();function W([string]$s){{$b=[Text.Encoding]::UTF8.GetBytes($s);$o.Write($b,0,$b.Length)}};function E([string]$f,[string]$r){{if([IO.File]::Exists($f)){{$p=[Text.Encoding]::UTF8.GetBytes($r);$b=[IO.File]::ReadAllBytes($f);W(('GSDV-WF '+$p.Length+' '+$b.Length+[char]10));$o.Write($p,0,$p.Length);W([string][char]10);$o.Write($b,0,$b.Length);W([string][char]10)}}}};$w={workspace};$s=Join-Path $w 'gsdv-spec';E (Join-Path $s 'root.md') 'gsdv-spec/root.md';$p=Join-Path $s 'ps';if([IO.Directory]::Exists($p)){{foreach($d in [IO.Directory]::GetDirectories($p)){{$k=[IO.Path]::GetFileName($d);E (Join-Path $d 'root.md') ('gsdv-spec/ps/'+$k+'/root.md');foreach($f in [IO.Directory]::GetFiles($d,'task-*.md')){{$n=[IO.Path]::GetFileName($f);E $f ('gsdv-spec/ps/'+$k+'/'+$n)}}}}}}"
+            );
+            wrap_powershell_command(shell, script)
+        }
+    }
+}
+
+/// 解析远端 workflow 长度帧为 UTF-8 文档集合。
+///
+/// 适用场景：文档可包含任意换行，不能用普通行分隔。
+/// 例：`GSDV-WF 19 4 + path + body -> map entry`。
+fn parse_remote_workflow_inventory(output: &[u8]) -> Result<BTreeMap<PathBuf, String>> {
+    let mut cursor = 0usize;
+    let mut documents = BTreeMap::new();
+    while cursor < output.len() {
+        let header_end = output[cursor..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|offset| cursor + offset)
+            .ok_or_else(|| anyhow!("remote workflow header is incomplete"))?;
+        let header = std::str::from_utf8(&output[cursor..header_end])?.trim_end_matches('\r');
+        let fields = header.split_whitespace().collect::<Vec<_>>();
+        if fields.len() != 3 || fields[0] != "GSDV-WF" {
+            bail!("invalid remote workflow header: {header}");
+        }
+        let path_length = fields[1].parse::<usize>()?;
+        let content_length = fields[2].parse::<usize>()?;
+        let path_start = header_end + 1;
+        let path_end = path_start
+            .checked_add(path_length)
+            .filter(|end| *end <= output.len())
+            .ok_or_else(|| anyhow!("remote workflow path is truncated"))?;
+        let path = std::str::from_utf8(&output[path_start..path_end])?;
+        let content_start = framed_payload_start(output, path_end, "path")?;
+        let content_end = content_start
+            .checked_add(content_length)
+            .filter(|end| *end <= output.len())
+            .ok_or_else(|| anyhow!("remote workflow content is truncated"))?;
+        let content = String::from_utf8(output[content_start..content_end].to_vec())
+            .with_context(|| format!("remote workflow file is not UTF-8: {path}"))?;
+        cursor = framed_payload_start(output, content_end, "content")?;
+        let relative = PathBuf::from(path);
+        validate_remote_workflow_relative_path(&relative).map_err(anyhow::Error::msg)?;
+        if documents.insert(relative, content).is_some() {
+            bail!("remote workflow duplicated path: {path}");
+        }
+    }
+    Ok(documents)
+}
+
+/// 跳过长度帧中一个 payload 后的换行分隔符。
+///
+/// 适用场景：同时兼容 LF 和 CRLF 响应。
+/// 例：`payload-end + LF -> next-start`。
+fn framed_payload_start(output: &[u8], mut cursor: usize, label: &str) -> Result<usize> {
+    if output.get(cursor) == Some(&b'\r') {
+        cursor += 1;
+    }
+    if output.get(cursor) != Some(&b'\n') {
+        bail!("remote workflow {label} terminator is missing");
+    }
+    Ok(cursor + 1)
+}
+
+/// 把 workspace 相对 WF 路径转换成远端原生绝对路径。
+///
+/// 适用场景：所有 Remote WF 写操作在构造 shell 命令前统一防穿越。
+/// 例：`/repo + gsdv-spec/root.md -> /repo/gsdv-spec/root.md`。
+fn remote_workflow_path(
+    shell: RemoteShell,
+    workspace_path: &Path,
+    relative: &Path,
+) -> Result<String, String> {
+    validate_remote_workflow_relative_path(relative)?;
+    let workspace = workspace_path.to_string_lossy();
+    if workspace.trim().is_empty() {
+        return Err("remote workspace path is empty".to_string());
+    }
+    let relative = relative.to_string_lossy().replace('\\', "/");
+    Ok(match shell {
+        RemoteShell::Posix => format!("{}/{}", workspace.trim_end_matches('/'), relative),
+        RemoteShell::PowerShell | RemoteShell::Cmd => format!(
+            "{}\\{}",
+            workspace.trim_end_matches(['/', '\\']),
+            relative.replace('/', "\\")
+        ),
+    })
+}
+
+/// 校验 workflow 路径只含普通组件且位于 gsdv-spec 下。
+///
+/// 适用场景：拒绝 `..`、绝对路径和平台分隔符绕过。
+/// 例：`gsdv-spec/../x -> Err`。
+fn validate_remote_workflow_relative_path(path: &Path) -> Result<(), String> {
+    let mut components = path.components();
+    if components.next() != Some(Component::Normal("gsdv-spec".as_ref())) {
+        return Err(format!(
+            "workflow path is outside gsdv-spec: {}",
+            path.display()
+        ));
+    }
+    if components.any(|component| match component {
+        Component::Normal(value) => value.to_string_lossy().contains('\\'),
+        _ => true,
+    }) {
+        return Err(format!("workflow path is unsafe: {}", path.display()));
+    }
+    Ok(())
+}
+
+/// 读取一个远端 workflow UTF-8 文件。
+///
+/// 适用场景：保存或内容 mutation 前读取远端最新 task。
+/// 例：`task.md -> String`。
+fn read_remote_workflow_file(
+    config: &RemoteWorkspaceConfig,
+    shell: RemoteShell,
+    absolute: &str,
+) -> Result<String, String> {
+    let command = match shell {
+        RemoteShell::Posix => {
+            let path = posix_quote_str(absolute);
+            format!(
+                "p={path}; [ -f \"$p\" ] || {{ printf 'workflow file not found: %s\\n' \"$p\" >&2; exit 1; }}; cat \"$p\""
+            )
+        }
+        RemoteShell::PowerShell | RemoteShell::Cmd => {
+            let path = powershell_quote(absolute);
+            let script = format!(
+                "$p={path};if(![IO.File]::Exists($p)){{throw ('workflow file not found: '+$p)}};$b=[IO.File]::ReadAllBytes($p);[Console]::OpenStandardOutput().Write($b,0,$b.Length)"
+            );
+            wrap_powershell_command(shell, script)
+        }
+    };
+    let output = run_ssh_command(config, &command).map_err(|error| error.to_string())?;
+    String::from_utf8(output).map_err(|error| format!("workflow file is not UTF-8: {error}"))
+}
+
+/// 原子覆盖一个远端 workflow 文件。
+///
+/// 适用场景：task 保存和内容 mutation，避免进程中断留下半个 Markdown。
+/// 例：`bytes -> 临时文件 -> rename`。
+fn write_remote_workflow_file(
+    config: &RemoteWorkspaceConfig,
+    shell: RemoteShell,
+    absolute: &str,
+    content: &[u8],
+) -> Result<(), String> {
+    let command = match shell {
+        RemoteShell::Posix => {
+            let path = posix_quote_str(absolute);
+            format!(
+                "umask 077; p={path}; d=${{p%/*}}; mkdir -p \"$d\"; t=\"$p.gsdv-$$\"; cat >\"$t\" && mv -f -- \"$t\" \"$p\""
+            )
+        }
+        RemoteShell::PowerShell | RemoteShell::Cmd => {
+            let path = powershell_quote(absolute);
+            let script = format!(
+                "$p={path};$d=[IO.Path]::GetDirectoryName($p);[IO.Directory]::CreateDirectory($d)|Out-Null;$t=$p+'.gsdv-'+$PID;$m=[IO.MemoryStream]::new();[Console]::OpenStandardInput().CopyTo($m);[IO.File]::WriteAllBytes($t,$m.ToArray());Move-Item -LiteralPath $t -Destination $p -Force"
+            );
+            wrap_powershell_command(shell, script)
+        }
+    };
+    run_ssh_command_with_input(config, &command, content)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+/// 构造创建空 workflow 文件的命令。
+///
+/// 适用场景：初始化 root、创建 project 或 task。
+/// 例：`allow_existing=true + 已有 root.md -> success`。
+fn remote_workflow_create_file_command(
+    shell: RemoteShell,
+    absolute: &str,
+    required_parent: Option<&str>,
+    allow_existing: bool,
+) -> String {
+    match shell {
+        RemoteShell::Posix => {
+            let path = posix_quote_str(absolute);
+            let required = required_parent
+                .map(|parent| {
+                    let parent = posix_quote_str(parent);
+                    format!("r={parent}; [ -d \"$r\" ] || {{ printf 'workflow parent not found: %s\\n' \"$r\" >&2; exit 1; }}; ")
+                })
+                .unwrap_or_default();
+            let existing = if allow_existing {
+                "[ -f \"$p\" ] && exit 0; ".to_string()
+            } else {
+                "[ ! -e \"$p\" ] || { printf 'workflow path already exists: %s\\n' \"$p\" >&2; exit 1; }; ".to_string()
+            };
+            format!(
+                "umask 077; {required}p={path}; {existing}[ ! -e \"$p\" ] || {{ printf 'workflow path is not a file: %s\\n' \"$p\" >&2; exit 1; }}; d=${{p%/*}}; mkdir -p \"$d\"; t=\"$p.gsdv-$$\"; : >\"$t\" && mv -- \"$t\" \"$p\""
+            )
+        }
+        RemoteShell::PowerShell | RemoteShell::Cmd => {
+            let path = powershell_quote(absolute);
+            let required = required_parent
+                .map(|parent| {
+                    let parent = powershell_quote(parent);
+                    format!("$r={parent};if(![IO.Directory]::Exists($r)){{throw ('workflow parent not found: '+$r)}};")
+                })
+                .unwrap_or_default();
+            let existing = if allow_existing {
+                "if([IO.File]::Exists($p)){exit 0};".to_string()
+            } else {
+                "if([IO.File]::Exists($p) -or [IO.Directory]::Exists($p)){throw ('workflow path already exists: '+$p)};".to_string()
+            };
+            let script = format!(
+                "{required}$p={path};{existing}if([IO.Directory]::Exists($p)){{throw ('workflow path is not a file: '+$p)}};$d=[IO.Path]::GetDirectoryName($p);[IO.Directory]::CreateDirectory($d)|Out-Null;$t=$p+'.gsdv-'+$PID;[IO.File]::WriteAllBytes($t,[byte[]]@());Move-Item -LiteralPath $t -Destination $p"
+            );
+            wrap_powershell_command(shell, script)
+        }
+    }
+}
+
+/// 构造远端 workflow 路径重命名命令。
+///
+/// 适用场景：project 目录和 task 文件重命名共享前置检查。
+/// 例：`a -> b，b 已存在 -> error`。
+fn remote_workflow_rename_command(
+    shell: RemoteShell,
+    old_path: &str,
+    new_path: &str,
+    directory: bool,
+) -> String {
+    match shell {
+        RemoteShell::Posix => {
+            let old_path = posix_quote_str(old_path);
+            let new_path = posix_quote_str(new_path);
+            let kind_check = if directory { "-d" } else { "-f" };
+            format!(
+                "o={old_path}; n={new_path}; [ {kind_check} \"$o\" ] || {{ printf 'workflow source not found: %s\\n' \"$o\" >&2; exit 1; }}; [ ! -e \"$n\" ] || {{ printf 'workflow target already exists: %s\\n' \"$n\" >&2; exit 1; }}; mv -- \"$o\" \"$n\""
+            )
+        }
+        RemoteShell::PowerShell | RemoteShell::Cmd => {
+            let old_path = powershell_quote(old_path);
+            let new_path = powershell_quote(new_path);
+            let source_check = if directory {
+                "[IO.Directory]::Exists($o)"
+            } else {
+                "[IO.File]::Exists($o)"
+            };
+            let script = format!(
+                "$o={old_path};$n={new_path};if(!({source_check})){{throw ('workflow source not found: '+$o)}};if([IO.File]::Exists($n) -or [IO.Directory]::Exists($n)){{throw ('workflow target already exists: '+$n)}};Move-Item -LiteralPath $o -Destination $n"
+            );
+            wrap_powershell_command(shell, script)
+        }
+    }
+}
+
+/// 构造远端 workflow 路径删除命令。
+///
+/// 适用场景：删除 project 子树或单个 task。
+/// 例：`directory=true -> 递归删除 project`。
+fn remote_workflow_delete_command(shell: RemoteShell, absolute: &str, directory: bool) -> String {
+    match shell {
+        RemoteShell::Posix => {
+            let path = posix_quote_str(absolute);
+            if directory {
+                format!(
+                    "p={path}; [ -d \"$p\" ] || {{ printf 'workflow project not found: %s\\n' \"$p\" >&2; exit 1; }}; rm -rf -- \"$p\""
+                )
+            } else {
+                format!(
+                    "p={path}; [ -f \"$p\" ] || {{ printf 'workflow task not found: %s\\n' \"$p\" >&2; exit 1; }}; rm -f -- \"$p\""
+                )
+            }
+        }
+        RemoteShell::PowerShell | RemoteShell::Cmd => {
+            let path = powershell_quote(absolute);
+            let (source_check, recurse) = if directory {
+                ("[IO.Directory]::Exists($p)", " -Recurse")
+            } else {
+                ("[IO.File]::Exists($p)", "")
+            };
+            let script = format!(
+                "$p={path};if(!({source_check})){{throw ('workflow path not found: '+$p)}};Remove-Item -LiteralPath $p{recurse} -Force"
+            );
+            wrap_powershell_command(shell, script)
+        }
+    }
+}
+
+/// 执行一个无 stdin 的远端 workflow 命令。
+///
+/// 适用场景：创建、重命名和删除只关心退出状态。
+/// 例：`exit 0 -> Ok(())`。
+fn run_remote_workflow_command(
+    config: &RemoteWorkspaceConfig,
+    command: String,
+) -> Result<(), String> {
+    run_ssh_command(config, &command)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+/// 在 cmd 远端用 PowerShell 执行脚本，PowerShell 远端则直接执行。
+///
+/// 适用场景：Windows 两种默认 shell 共用二进制安全文件 API。
+/// 例：`Cmd + script -> powershell -Command ...`。
+fn wrap_powershell_command(shell: RemoteShell, script: String) -> String {
+    if shell == RemoteShell::Cmd {
+        format!(
+            "powershell -NoProfile -NonInteractive -Command \"{}\"",
+            script
+        )
+    } else {
+        script
+    }
 }
 
 /// 通过 SSH 读取一个远端 JSON 文件。

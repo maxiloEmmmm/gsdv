@@ -146,6 +146,8 @@ use app_input::{agent_tab_own_shortcut_pressed, read_reviewer_command, read_ui_c
 const SCREENSHOT_REQUEST_FILE: &str = "capture.request";
 const WORKSPACE_RAIL_WIDTH: f32 = 184.0;
 const COMPACT_WORKSPACE_RAIL_WIDTH: f32 = 58.0;
+/// Remote Outline 折叠后与 Agent col 相同的恢复条宽度。
+const COLLAPSED_REMOTE_OUTLINE_WIDTH: f32 = 28.0;
 const RAIL_EDGE_INSET: f32 = 2.0;
 const BOTTOM_BAR_HEIGHT: f32 = 22.0;
 const AGENT_THEME_RESTART_DELAY: Duration = Duration::from_millis(900);
@@ -1747,6 +1749,8 @@ enum AppEvent {
     WorkflowTreeLoaded {
         index: usize,
         workspace_path: PathBuf,
+        /// Remote runtime ID；本地 workspace 为 None。
+        remote_runtime_id: Option<u64>,
         result: Result<WorkflowTree, String>,
     },
     /// 添加 workspace 的后台准备完成。
@@ -1817,12 +1821,20 @@ enum AppEvent {
     /// workflow step 左右片段保存完成。
     WorkflowStepSaved {
         index: usize,
+        /// 保存请求发出时的项目路径，用于丢弃 Remote 项目切换后的旧结果。
+        workspace_path: PathBuf,
+        /// 保存请求发出时的 Remote runtime ID；本地 workspace 为 None。
+        remote_runtime_id: Option<u64>,
         target: WorkflowSelectionTarget,
         result: Result<WorkflowSaveSuccess, String>,
     },
     /// workflow tree 右键菜单文件修改完成。
     WorkflowMutationFinished {
         index: usize,
+        /// mutation 发出时的项目路径，用于隔离 Remote 项目异步结果。
+        workspace_path: PathBuf,
+        /// mutation 发出时的 Remote runtime ID；本地 workspace 为 None。
+        remote_runtime_id: Option<u64>,
         request: WorkflowMutationRequest,
         result: Result<(), String>,
     },
@@ -1987,6 +1999,8 @@ struct InputRuntimeRequest {
     active_agent_busy: bool,
     /// 当前 workspace route。
     route: Route,
+    /// 当前 workspace 是否为 SSH Remote Workspace。
+    remote_workspace: bool,
     /// 当前 workspace center mode。
     center_mode: CenterMode,
     /// app 是否处于 F11 全屏模式。
@@ -2870,9 +2884,22 @@ impl GsdvGuiApp {
                 .show(ctx, |ui| self.workspace_rail(ui));
 
             if should_show_outline_panel(self.current_workspace()) {
+                let remote_outline_collapsed = self.current_workspace().is_some_and(|workspace| {
+                    workspace.remote.is_some() && workspace.remote_outline_collapsed
+                });
+                let outline_width = if remote_outline_collapsed {
+                    COLLAPSED_REMOTE_OUTLINE_WIDTH
+                } else {
+                    272.0
+                };
+                let frame = if remote_outline_collapsed {
+                    collapsed_outline_panel_frame()
+                } else {
+                    panel_frame()
+                };
                 SidePanel::left("outline_panel")
-                    .exact_width(272.0)
-                    .frame(panel_frame())
+                    .exact_width(outline_width)
+                    .frame(frame)
                     .show(ctx, |ui| self.outline_panel(ui));
             }
         }
