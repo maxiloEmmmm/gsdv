@@ -416,6 +416,20 @@ impl GsdvGuiApp {
     /// 适用场景：Remote 模式替代 Markdown/Workflow outline。例：点击项目 -> 切换 Agent 网格。
     fn remote_outline_panel(&mut self, ui: &mut Ui) {
         let index = self.active_workspace;
+        if self
+            .workspaces
+            .get(index)
+            .is_some_and(|workspace| workspace.remote_outline_collapsed)
+        {
+            if remote_outline_collapse_button(ui, false).clicked() {
+                if let Some(workspace) = self.workspaces.get_mut(index) {
+                    workspace.remote_outline_collapsed = false;
+                }
+                self.mark_workspace_store_dirty();
+                self.request_app_repaint();
+            }
+            return;
+        }
         let (connected, error, selected, projects) = self
             .remote_workspaces
             .get(index)
@@ -439,10 +453,15 @@ impl GsdvGuiApp {
             })
             .unwrap_or_else(|| (false, None, None, Vec::new()));
         let mut next_project = None;
+        let mut collapse_outline = false;
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("REMOTE WORKSPACES").strong().size(12.0));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if remote_outline_collapse_button(ui, true).clicked() {
+                        collapse_outline = true;
+                    }
+                    ui.add_space(4.0);
                     let status = if connected {
                         "Connected"
                     } else {
@@ -472,6 +491,12 @@ impl GsdvGuiApp {
         });
         if let Some(project_index) = next_project {
             self.select_remote_project(ui.ctx(), index, project_index);
+        } else if collapse_outline {
+            if let Some(workspace) = self.workspaces.get_mut(index) {
+                workspace.remote_outline_collapsed = true;
+            }
+            self.mark_workspace_store_dirty();
+            self.request_app_repaint();
         }
     }
 
@@ -2048,6 +2073,11 @@ impl GsdvGuiApp {
     ///
     /// Example: fullscreen `Alt+Z` -> compact project/task tree, step tree, task and step editors.
     pub(super) fn workflow_quick_modal_surface(&mut self, ui: &mut Ui) {
+        let (loading, load_error) = self
+            .workflow_states
+            .get(self.active_workspace)
+            .map(|state| (state.loading, state.load_error.clone()))
+            .unwrap_or((false, None));
         let selected = self
             .workflow_states
             .get(self.active_workspace)
@@ -2057,7 +2087,33 @@ impl GsdvGuiApp {
             .get(self.active_workspace)
             .and_then(|state| state.tree.clone());
         let Some(tree) = tree else {
-            workflow_empty_editor_message(ui, i18n::text(self.app_language, "Loading workflow..."));
+            if loading {
+                workflow_empty_editor_message(
+                    ui,
+                    i18n::text(self.app_language, "Loading workflow..."),
+                );
+                return;
+            }
+            let Some(error) = load_error else {
+                workflow_empty_editor_message(
+                    ui,
+                    i18n::text(self.app_language, "Loading workflow..."),
+                );
+                return;
+            };
+            let root_missing = self
+                .current_workspace()
+                .is_some_and(|workspace| workflow_root_missing_error(&workspace.path, &error));
+            ui.vertical_centered(|ui| {
+                ui.label(RichText::new(&error).color(theme::danger()));
+                if root_missing {
+                    ui.add_space(10.0);
+                    if primary_action(ui, i18n::text(self.app_language, "Create root.md")).clicked()
+                    {
+                        self.request_workflow_mutation(ui.ctx(), WorkflowMutationRequest::InitRoot);
+                    }
+                }
+            });
             return;
         };
 

@@ -323,13 +323,18 @@ impl GsdvGuiApp {
         workspace_index: usize,
         project_index: usize,
     ) {
-        let valid = self
+        let current_project = self
             .remote_workspaces
             .get(workspace_index)
             .and_then(Option::as_ref)
-            .is_some_and(|runtime| project_index < runtime.projects.len());
-        if !valid {
+            .and_then(|runtime| {
+                (project_index < runtime.projects.len()).then_some(runtime.selected_project)
+            });
+        let Some(current_project) = current_project else {
             return;
+        };
+        if current_project != Some(project_index) {
+            self.close_remote_workflow_for_project_switch(workspace_index);
         }
         self.capture_selected_remote_project(workspace_index);
         if let Some(runtime) = self
@@ -342,6 +347,27 @@ impl GsdvGuiApp {
         self.restore_selected_remote_project(workspace_index);
         self.spawn_remote_active_save(workspace_index, project_index, ctx);
         self.spawn_visible_remote_agents(ctx, workspace_index);
+    }
+
+    /// 切换 Remote 项目前关闭 modal 并清空旧项目 WF 状态。
+    ///
+    /// 适用场景：同一个 Remote Rail 项下从项目 A 切到 B。
+    /// 例：`A modal open -> close + WorkflowUiState::default()`。
+    fn close_remote_workflow_for_project_switch(&mut self, workspace_index: usize) {
+        if workspace_index == self.active_workspace
+            && matches!(
+                self.active_app_dialog(),
+                Some(AppDialog::WorkflowQuickModal)
+            )
+        {
+            self.set_active_app_dialog(None);
+        }
+        if let Some(dialog) = self.workflow_quick_overlay_dialogs.get_mut(workspace_index) {
+            *dialog = None;
+        }
+        if let Some(state) = self.workflow_states.get_mut(workspace_index) {
+            *state = WorkflowUiState::default();
+        }
     }
 
     /// 将当前 WorkspaceViewData 和 Agent hosts 放回远端项目缓存。

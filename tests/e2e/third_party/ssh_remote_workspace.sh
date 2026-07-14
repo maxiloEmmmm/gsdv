@@ -33,8 +33,32 @@ require_env() {
 # 删除本机临时目录。
 # 示例：脚本正常退出或失败 -> 不遗留临时输出。
 cleanup() {
+    if [[ -n "${remote_workflow_relative:-}" && -n "${remote_shell:-}" ]]; then
+        case "$remote_shell" in
+            posix)
+                ssh "${common_args[@]}" "$target" \
+                    "r=\"\$HOME/$remote_workflow_relative\"; rm -rf -- \"\$r\"" || true
+                ;;
+            powershell | cmd)
+                remote_powershell \
+                    "\$r=Join-Path \$HOME '$remote_workflow_relative';if([IO.Directory]::Exists(\$r)){Remove-Item -LiteralPath \$r -Recurse -Force}" || true
+                ;;
+        esac
+    fi
     if [[ -n "${temporary_dir:-}" ]]; then
         rm -rf "$temporary_dir"
+    fi
+}
+
+# 在 PowerShell/cmd 远端执行同一段 PowerShell 文件 API 脚本。
+# 示例：remote_powershell '$HOME' -> 输出远端 HOME。
+remote_powershell() {
+    local script="$1"
+    if [[ "$remote_shell" == "cmd" ]]; then
+        ssh "${common_args[@]}" "$target" \
+            "powershell -NoProfile -NonInteractive -Command \"$script\""
+    else
+        ssh "${common_args[@]}" "$target" "$script"
     fi
 }
 
@@ -119,4 +143,40 @@ case "$remote_shell" in
 esac
 
 [[ "$roundtrip" == "$payload" ]]
-printf 'ok: shell=%s connections=isolated json=roundtrip\n' "$remote_shell"
+
+remote_workflow_relative=".gsdv/remote workflow e2e-$$"
+workflow_payload=$'task desc\n\n## [ ] build\nfirst body\n'
+case "$remote_shell" in
+    posix)
+        ssh "${common_args[@]}" "$target" \
+            "r=\"\$HOME/$remote_workflow_relative\"; rm -rf -- \"\$r\"; d=\"\$r/gsdv-spec/ps/demo\"; mkdir -p \"\$d\"; : >\"\$r/gsdv-spec/root.md\"; : >\"\$d/root.md\"; printf '%s' 'task desc
+
+## [ ] build
+first body
+' >\"\$d/task-a.md\""
+        ssh "${common_args[@]}" "$target" \
+            "w=\"\$HOME/$remote_workflow_relative\"; s=\"\$w/gsdv-spec\"; emit() { f=\$1; r=\$2; [ -f \"\$f\" ] || return 0; pn=\$(printf %s \"\$r\" | wc -c); cn=\$(wc -c <\"\$f\"); printf 'GSDV-WF %s %s\\n' \"\$pn\" \"\$cn\"; printf %s \"\$r\"; printf '\\n'; cat \"\$f\"; printf '\\n'; }; emit \"\$s/root.md\" 'gsdv-spec/root.md'; p=\"\$s/ps\"; for d in \"\$p\"/*; do [ -d \"\$d\" ] || continue; k=\${d##*/}; emit \"\$d/root.md\" \"gsdv-spec/ps/\$k/root.md\"; for f in \"\$d\"/task-*.md; do [ -f \"\$f\" ] || continue; n=\${f##*/}; emit \"\$f\" \"gsdv-spec/ps/\$k/\$n\"; done; done" \
+            >"$temporary_dir/workflow-inventory"
+        grep -aFq 'gsdv-spec/ps/demo/task-a.md' "$temporary_dir/workflow-inventory"
+        workflow_roundtrip="$(printf '%s' "$workflow_payload" | ssh "${common_args[@]}" "$target" \
+            "p=\"\$HOME/$remote_workflow_relative/gsdv-spec/ps/demo/task-a.md\"; d=\${p%/*}; mkdir -p \"\$d\"; t=\"\$p.gsdv-\$\$\"; cat >\"\$t\" && mv -f -- \"\$t\" \"\$p\"; cat \"\$p\"")"
+        [[ "$workflow_roundtrip" == "$workflow_payload" ]]
+        ssh "${common_args[@]}" "$target" \
+            "r=\"\$HOME/$remote_workflow_relative/gsdv-spec/ps\"; mv -- \"\$r/demo/task-a.md\" \"\$r/demo/task-b.md\"; mv -- \"\$r/demo\" \"\$r/renamed\"; rm -f -- \"\$r/renamed/task-b.md\"; rm -rf -- \"\$r/renamed\"; [ ! -e \"\$r/renamed\" ]"
+        ;;
+    powershell | cmd)
+        remote_powershell \
+            "\$r=Join-Path \$HOME '$remote_workflow_relative';if([IO.Directory]::Exists(\$r)){Remove-Item -LiteralPath \$r -Recurse -Force};\$d=Join-Path \$r 'gsdv-spec/ps/demo';[IO.Directory]::CreateDirectory(\$d)|Out-Null;[IO.File]::WriteAllBytes((Join-Path \$r 'gsdv-spec/root.md'),[byte[]]@());[IO.File]::WriteAllBytes((Join-Path \$d 'root.md'),[byte[]]@());\$b=[Text.Encoding]::UTF8.GetBytes('task desc'+[char]10+[char]10+'## [ ] build'+[char]10+'first body'+[char]10);[IO.File]::WriteAllBytes((Join-Path \$d 'task-a.md'),\$b)"
+        remote_powershell \
+            "\$o=[Console]::OpenStandardOutput();function W([string]\$s){\$b=[Text.Encoding]::UTF8.GetBytes(\$s);\$o.Write(\$b,0,\$b.Length)};function E([string]\$f,[string]\$r){if([IO.File]::Exists(\$f)){\$p=[Text.Encoding]::UTF8.GetBytes(\$r);\$b=[IO.File]::ReadAllBytes(\$f);W(('GSDV-WF '+\$p.Length+' '+\$b.Length+[char]10));\$o.Write(\$p,0,\$p.Length);W([string][char]10);\$o.Write(\$b,0,\$b.Length);W([string][char]10)}};\$r=Join-Path \$HOME '$remote_workflow_relative';\$s=Join-Path \$r 'gsdv-spec';E (Join-Path \$s 'root.md') 'gsdv-spec/root.md';\$p=Join-Path \$s 'ps';foreach(\$d in [IO.Directory]::GetDirectories(\$p)){\$k=[IO.Path]::GetFileName(\$d);E (Join-Path \$d 'root.md') ('gsdv-spec/ps/'+\$k+'/root.md');foreach(\$f in [IO.Directory]::GetFiles(\$d,'task-*.md')){\$n=[IO.Path]::GetFileName(\$f);E \$f ('gsdv-spec/ps/'+\$k+'/'+\$n)}}" \
+            >"$temporary_dir/workflow-inventory"
+        grep -aFq 'gsdv-spec/ps/demo/task-a.md' "$temporary_dir/workflow-inventory"
+        workflow_roundtrip="$(printf '%s' "$workflow_payload" | remote_powershell \
+            "\$p=Join-Path \$HOME '$remote_workflow_relative/gsdv-spec/ps/demo/task-a.md';\$d=[IO.Path]::GetDirectoryName(\$p);[IO.Directory]::CreateDirectory(\$d)|Out-Null;\$t=\$p+'.gsdv-'+\$PID;\$m=[IO.MemoryStream]::new();[Console]::OpenStandardInput().CopyTo(\$m);[IO.File]::WriteAllBytes(\$t,\$m.ToArray());Move-Item -LiteralPath \$t -Destination \$p -Force;\$b=[IO.File]::ReadAllBytes(\$p);[Console]::OpenStandardOutput().Write(\$b,0,\$b.Length)")"
+        [[ "$workflow_roundtrip" == "$workflow_payload" ]]
+        remote_powershell \
+            "\$r=Join-Path \$HOME '$remote_workflow_relative/gsdv-spec/ps';Move-Item -LiteralPath (Join-Path \$r 'demo/task-a.md') -Destination (Join-Path \$r 'demo/task-b.md');Move-Item -LiteralPath (Join-Path \$r 'demo') -Destination (Join-Path \$r 'renamed');Remove-Item -LiteralPath (Join-Path \$r 'renamed/task-b.md') -Force;Remove-Item -LiteralPath (Join-Path \$r 'renamed') -Recurse -Force;if([IO.Directory]::Exists((Join-Path \$r 'renamed'))){exit 1}"
+        ;;
+esac
+
+printf 'ok: shell=%s connections=isolated json=roundtrip workflow=crud\n' "$remote_shell"

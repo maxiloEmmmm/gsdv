@@ -3,6 +3,65 @@
 use super::*;
 
 impl GsdvGuiApp {
+    /// 返回指定 workspace 的 Remote WF 连接快照。
+    ///
+    /// 适用场景：后台任务发出前固定 config 与 shell，避免 render 状态跨线程借用。
+    /// 例：`Local -> Ok(None)`，`Remote connected -> Ok(Some(...))`。
+    fn remote_workflow_context(
+        &self,
+        index: usize,
+    ) -> Result<Option<(RemoteWorkspaceConfig, RemoteShell)>, String> {
+        let Some(workspace) = self.workspaces.get(index) else {
+            return Err("workflow workspace not found".to_string());
+        };
+        let Some(config) = workspace.remote.clone() else {
+            return Ok(None);
+        };
+        let runtime = self
+            .remote_workspaces
+            .get(index)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| "remote workflow runtime is unavailable".to_string())?;
+        if !runtime.connected {
+            return Err(runtime
+                .error
+                .clone()
+                .unwrap_or_else(|| "remote workflow is reconnecting".to_string()));
+        }
+        let shell = runtime
+            .shell
+            .ok_or_else(|| "remote workflow shell is unavailable".to_string())?;
+        Ok(Some((config, shell)))
+    }
+
+    /// 判断 workflow 后台结果是否仍属于当前项目和 Remote 连接。
+    ///
+    /// 适用场景：切项目或编辑 Remote 配置后丢弃旧 SSH 结果。
+    /// 例：`same path + different runtime id -> false`。
+    fn workflow_request_identity_matches(
+        &self,
+        index: usize,
+        workspace_path: &Path,
+        remote_runtime_id: Option<u64>,
+    ) -> bool {
+        let Some(workspace) = self.workspaces.get(index) else {
+            return false;
+        };
+        if workspace.path != workspace_path {
+            return false;
+        }
+        match workspace.remote {
+            None => remote_runtime_id.is_none(),
+            Some(_) => {
+                self.remote_workspaces
+                    .get(index)
+                    .and_then(Option::as_ref)
+                    .map(|runtime| runtime.id)
+                    == remote_runtime_id
+            }
+        }
+    }
+
     /// 切换左侧面板 tab，并在进入 workflow 时派发加载任务。
     pub(super) fn set_outline_panel_tab(&mut self, ctx: &egui::Context, tab: OutlinePanelTab) {
         if !self.set_outline_panel_tab_only(ctx, tab) {
@@ -226,19 +285,30 @@ impl GsdvGuiApp {
         index: usize,
         workspace_path: PathBuf,
     ) {
+        let remote_runtime_id = self
+            .remote_workspaces
+            .get(index)
+            .and_then(Option::as_ref)
+            .map(|runtime| runtime.id);
+        let remote = self.remote_workflow_context(index);
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
         let repaint_controller = self.repaint_controller.clone();
         self.background_runtime.spawn(async move {
             let event_workspace_path = workspace_path.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                crate::gui::workflow::load_workflow_tree(&workspace_path)
+            let result = tokio::task::spawn_blocking(move || match remote {
+                Ok(Some((config, shell))) => {
+                    remote_workspace::load_remote_workflow_tree(&config, shell, &workspace_path)
+                }
+                Ok(None) => crate::gui::workflow::load_workflow_tree(&workspace_path),
+                Err(error) => Err(error),
             })
             .await
             .unwrap_or_else(|error| Err(error.to_string()));
             let _ = tx.send(AppEvent::WorkflowTreeLoaded {
                 index,
                 workspace_path: event_workspace_path,
+                remote_runtime_id,
                 result,
             });
             repaint_controller.request_repaint(&repaint_ctx);
@@ -251,12 +321,10 @@ impl GsdvGuiApp {
         ctx: &egui::Context,
         index: usize,
         workspace_path: PathBuf,
+        remote_runtime_id: Option<u64>,
         result: Result<WorkflowTree, String>,
     ) {
-        let Some(workspace) = self.workspaces.get(index) else {
-            return;
-        };
-        if workspace.path != workspace_path {
+        if !self.workflow_request_identity_matches(index, &workspace_path, remote_runtime_id) {
             return;
         }
         let Some(state) = self.workflow_states.get_mut(index) else {
@@ -581,6 +649,12 @@ impl GsdvGuiApp {
         selected: Option<WorkflowSelectionTarget>,
         request: WorkflowSaveRequest,
     ) {
+        let remote_runtime_id = self
+            .remote_workspaces
+            .get(index)
+            .and_then(Option::as_ref)
+            .map(|runtime| runtime.id);
+        let remote = self.remote_workflow_context(index);
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
         let repaint_controller = self.repaint_controller.clone();
@@ -588,13 +662,25 @@ impl GsdvGuiApp {
             task_path: request.task_path.clone(),
         });
         self.background_runtime.spawn(async move {
-            let result = tokio::task::spawn_blocking(move || {
-                crate::gui::workflow::save_workflow_step_editor(&workspace_path, request)
+            let task_workspace_path = workspace_path.clone();
+            let result = tokio::task::spawn_blocking(move || match remote {
+                Ok(Some((config, shell))) => remote_workspace::save_remote_workflow_step(
+                    &config,
+                    shell,
+                    &task_workspace_path,
+                    request,
+                ),
+                Ok(None) => {
+                    crate::gui::workflow::save_workflow_step_editor(&task_workspace_path, request)
+                }
+                Err(error) => Err(error),
             })
             .await
             .unwrap_or_else(|error| Err(error.to_string()));
             let _ = tx.send(AppEvent::WorkflowStepSaved {
                 index,
+                workspace_path,
+                remote_runtime_id,
                 target,
                 result,
             });
@@ -607,9 +693,14 @@ impl GsdvGuiApp {
         &mut self,
         ctx: &egui::Context,
         index: usize,
+        workspace_path: PathBuf,
+        remote_runtime_id: Option<u64>,
         target: WorkflowSelectionTarget,
         result: Result<WorkflowSaveSuccess, String>,
     ) {
+        if !self.workflow_request_identity_matches(index, &workspace_path, remote_runtime_id) {
+            return;
+        }
         let Some(state) = self.workflow_states.get_mut(index) else {
             return;
         };
@@ -669,18 +760,37 @@ impl GsdvGuiApp {
         workspace_path: PathBuf,
         request: WorkflowMutationRequest,
     ) {
+        let remote_runtime_id = self
+            .remote_workspaces
+            .get(index)
+            .and_then(Option::as_ref)
+            .map(|runtime| runtime.id);
+        let remote = self.remote_workflow_context(index);
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
         let repaint_controller = self.repaint_controller.clone();
         self.background_runtime.spawn(async move {
             let request_for_task = request.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                crate::gui::workflow::apply_workflow_mutation(&workspace_path, request_for_task)
+            let task_workspace_path = workspace_path.clone();
+            let result = tokio::task::spawn_blocking(move || match remote {
+                Ok(Some((config, shell))) => remote_workspace::apply_remote_workflow_mutation(
+                    &config,
+                    shell,
+                    &task_workspace_path,
+                    request_for_task,
+                ),
+                Ok(None) => crate::gui::workflow::apply_workflow_mutation(
+                    &task_workspace_path,
+                    request_for_task,
+                ),
+                Err(error) => Err(error),
             })
             .await
             .unwrap_or_else(|error| Err(error.to_string()));
             let _ = tx.send(AppEvent::WorkflowMutationFinished {
                 index,
+                workspace_path,
+                remote_runtime_id,
                 request,
                 result,
             });
@@ -693,13 +803,24 @@ impl GsdvGuiApp {
         &mut self,
         ctx: &egui::Context,
         index: usize,
+        workspace_path: PathBuf,
+        remote_runtime_id: Option<u64>,
         request: WorkflowMutationRequest,
         result: Result<(), String>,
     ) {
+        if !self.workflow_request_identity_matches(index, &workspace_path, remote_runtime_id) {
+            return;
+        }
+        let Some(workspace) = self.workspaces.get(index) else {
+            return;
+        };
+        let remote = workspace.remote.is_some();
         match result {
             Ok(()) => {
                 self.cleanup_after_workflow_mutation(index, &request);
-                self.spawn_outline_refresh_tasks(ctx, BTreeSet::from([index]));
+                if !remote {
+                    self.spawn_outline_refresh_tasks(ctx, BTreeSet::from([index]));
+                }
                 self.request_workflow_tree_refresh(ctx, index);
                 self.push_toast(
                     i18n::text(self.app_language, "Workflow updated"),

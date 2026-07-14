@@ -2,6 +2,7 @@
 //!
 //! 本模块只处理文件内容和结构化数据，不直接修改 egui 渲染状态。
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -304,6 +305,82 @@ pub(super) fn load_workflow_tree(workspace_root: &Path) -> Result<WorkflowTree, 
     })
 }
 
+/// 从已读取的 workflow 文档集合构建 tree。
+///
+/// 适用场景：Remote Workspace 通过 SSH 读取文件后复用本地解析规则。
+/// 例：`gsdv-spec/root.md + task-a.md -> WorkflowTree`。
+pub(super) fn load_workflow_tree_from_documents(
+    workspace_root: &Path,
+    documents: &BTreeMap<PathBuf, String>,
+) -> Result<WorkflowTree, String> {
+    let root_path = PathBuf::from(GSDV_SPEC_DIR).join(ROOT_MD);
+    if !documents.contains_key(&root_path) {
+        return Err(format!(
+            "{} not found",
+            workspace_root.join(&root_path).display()
+        ));
+    }
+
+    let projects_root = PathBuf::from(GSDV_SPEC_DIR).join(PROJECTS_DIR);
+    let mut project_keys = documents
+        .keys()
+        .filter_map(|path| {
+            let project_dir = path.parent()?;
+            if path.file_name()? != ROOT_MD || project_dir.parent()? != projects_root {
+                return None;
+            }
+            Some(project_dir.file_name()?.to_string_lossy().to_string())
+        })
+        .collect::<Vec<_>>();
+    project_keys.sort();
+    project_keys.dedup();
+
+    let projects = project_keys
+        .into_iter()
+        .map(|project_key| {
+            let project_dir = projects_root.join(&project_key);
+            let mut task_paths = documents
+                .keys()
+                .filter(|path| path.parent() == Some(project_dir.as_path()))
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with(TASK_PREFIX))
+                        && path
+                            .extension()
+                            .is_some_and(|extension| extension == MARKDOWN_EXT)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            task_paths.sort_by(|left, right| file_name_string(left).cmp(&file_name_string(right)));
+            let tasks = task_paths
+                .into_iter()
+                .filter_map(|path| {
+                    let content = documents.get(&path)?;
+                    Some(WorkflowTaskNode {
+                        label: workflow_task_label_for_path(&path),
+                        path,
+                        desc: parse_task_desc(content),
+                        steps: parse_task_steps(content),
+                    })
+                })
+                .collect();
+            WorkflowProjectNode {
+                key: project_key.clone(),
+                label: project_key,
+                root_path: project_dir.join(ROOT_MD),
+                tasks,
+            }
+        })
+        .collect();
+
+    Ok(WorkflowTree {
+        spec_path: PathBuf::from(GSDV_SPEC_DIR),
+        root_path,
+        projects,
+    })
+}
+
 /// 从一个项目目录加载 task 文档列表。
 fn load_project_tasks(
     workspace_root: &Path,
@@ -425,25 +502,38 @@ pub(super) fn save_workflow_step_editor(
     workspace_root: &Path,
     request: WorkflowSaveRequest,
 ) -> Result<WorkflowSaveSuccess, String> {
+    let absolute = workspace_root.join(&request.task_path);
+    let content = fs::read_to_string(&absolute)
+        .map_err(|error| format!("failed to read {}: {error}", absolute.display()))?;
+    let (next_content, saved) = save_workflow_step_content(&content, &request)?;
+    fs::write(&absolute, next_content.as_bytes())
+        .map_err(|error| format!("failed to write {}: {error}", absolute.display()))?;
+    Ok(saved)
+}
+
+/// 在内存中的 task Markdown 上应用片段保存。
+///
+/// 适用场景：本地与 Remote 存储层在写盘前共享同一套内容规则。
+/// 例：`旧 task + 新 step desc -> (新 task, 保存结果)`。
+pub(super) fn save_workflow_step_content(
+    content: &str,
+    request: &WorkflowSaveRequest,
+) -> Result<(String, WorkflowSaveSuccess), String> {
     validate_workflow_task_desc(&request.task_text)?;
     if let Some(step_text) = request.step_text.as_deref() {
         validate_workflow_step_desc(step_text)?;
     }
-    let absolute = workspace_root.join(&request.task_path);
-    let content = fs::read_to_string(&absolute)
-        .map_err(|error| format!("failed to read {}: {error}", absolute.display()))?;
     let mut lines = markdown_lines(&content);
     replace_task_desc(&mut lines, &request.task_text);
     if let (Some(step_path), Some(step_text)) = (&request.step_path, request.step_text.as_deref()) {
         replace_step_desc(&mut lines, step_path, step_text)?;
     }
     let next_content = join_markdown_lines(&lines);
-    fs::write(&absolute, next_content.as_bytes())
-        .map_err(|error| format!("failed to write {}: {error}", absolute.display()))?;
-    Ok(WorkflowSaveSuccess {
-        task_text: request.task_text,
-        step_text: request.step_text,
-    })
+    let saved = WorkflowSaveSuccess {
+        task_text: request.task_text.clone(),
+        step_text: request.step_text.clone(),
+    };
+    Ok((next_content, saved))
 }
 
 /// 校验 task 说明，避免说明伪装成新的 step heading。
@@ -617,10 +707,17 @@ fn add_workflow_step(
     key: &str,
     desc: &str,
 ) -> Result<(), String> {
+    rewrite_workflow_task(workspace_root, task_path, |content| {
+        add_workflow_step_content(content, key, desc)
+    })
+}
+
+/// 向内存中的 task Markdown 追加一个 step。
+///
+/// 适用场景：Remote 保存前不能直接调用本地文件 API。
+/// 例：`空 task + build -> ## [ ] build`。
+fn add_workflow_step_content(content: &str, key: &str, desc: &str) -> Result<String, String> {
     let key = validate_workflow_step_title(key)?;
-    let absolute = workspace_root.join(task_path);
-    let content = fs::read_to_string(&absolute)
-        .map_err(|error| format!("failed to read {}: {error}", absolute.display()))?;
     let mut lines = markdown_lines(&content);
     if parse_step_records(&content)
         .iter()
@@ -635,9 +732,7 @@ fn add_workflow_step(
     if !desc.trim().is_empty() {
         lines.extend(desc.lines().map(str::to_string));
     }
-    let next_content = join_markdown_lines(&lines);
-    fs::write(&absolute, next_content.as_bytes())
-        .map_err(|error| format!("failed to write {}: {error}", absolute.display()))
+    Ok(join_markdown_lines(&lines))
 }
 
 /// 重命名 workflow project 目录。
@@ -707,10 +802,21 @@ fn rename_workflow_step(
     step_path: &[usize],
     new_key: &str,
 ) -> Result<(), String> {
+    rewrite_workflow_task(workspace_root, task_path, |content| {
+        rename_workflow_step_content(content, step_path, new_key)
+    })
+}
+
+/// 在内存中的 task Markdown 里重命名 step。
+///
+/// 适用场景：本地与 Remote 共用标题冲突和索引校验。
+/// 例：`build -> compile`。
+fn rename_workflow_step_content(
+    content: &str,
+    step_path: &[usize],
+    new_key: &str,
+) -> Result<String, String> {
     let new_key = validate_workflow_step_title(new_key)?;
-    let absolute = workspace_root.join(task_path);
-    let content = fs::read_to_string(&absolute)
-        .map_err(|error| format!("failed to read {}: {error}", absolute.display()))?;
     let mut lines = markdown_lines(&content);
     let records = parse_step_records(&content);
     let index = records
@@ -719,7 +825,7 @@ fn rename_workflow_step(
         .ok_or_else(|| "step not found".to_string())?;
     let record = records[index].clone();
     if record.title == new_key {
-        return Ok(());
+        return Ok(content.to_string());
     }
     if records
         .iter()
@@ -728,9 +834,7 @@ fn rename_workflow_step(
         return Err(format!("step already exists at this level: {new_key}"));
     }
     lines[record.line_index] = renamed_step_line(&record, new_key);
-    let next_content = join_markdown_lines(&lines);
-    fs::write(&absolute, next_content.as_bytes())
-        .map_err(|error| format!("failed to write {}: {error}", absolute.display()))
+    Ok(join_markdown_lines(&lines))
 }
 
 /// 删除 workflow project 目录。
@@ -763,9 +867,16 @@ fn delete_workflow_step(
     task_path: &Path,
     step_path: &[usize],
 ) -> Result<(), String> {
-    let absolute = workspace_root.join(task_path);
-    let content = fs::read_to_string(&absolute)
-        .map_err(|error| format!("failed to read {}: {error}", absolute.display()))?;
+    rewrite_workflow_task(workspace_root, task_path, |content| {
+        delete_workflow_step_content(content, step_path)
+    })
+}
+
+/// 从内存中的 task Markdown 删除一个 step 子树。
+///
+/// 适用场景：Remote 删除必须先在本机按现有索引规则生成新文档。
+/// 例：`[0] -> 删除首个 step 块`。
+fn delete_workflow_step_content(content: &str, step_path: &[usize]) -> Result<String, String> {
     let mut lines = markdown_lines(&content);
     let records = parse_step_records(&content);
     let index = records
@@ -778,9 +889,7 @@ fn delete_workflow_step(
         .map(|record| record.line_index)
         .unwrap_or(lines.len());
     lines.splice(record.line_index..delete_end, Vec::<String>::new());
-    let next_content = join_markdown_lines(&lines);
-    fs::write(&absolute, next_content.as_bytes())
-        .map_err(|error| format!("failed to write {}: {error}", absolute.display()))
+    Ok(join_markdown_lines(&lines))
 }
 
 /// 合并 task 文档里连续的多个 step 块。
@@ -790,13 +899,24 @@ fn merge_workflow_steps(
     step_paths: &[Vec<usize>],
     title: &str,
 ) -> Result<(), String> {
+    rewrite_workflow_task(workspace_root, task_path, |content| {
+        merge_workflow_steps_content(content, step_paths, title)
+    })
+}
+
+/// 在内存中的 task Markdown 合并连续 step。
+///
+/// 适用场景：Remote 与本地必须生成完全一致的合并结果。
+/// 例：`[a,b] + merged -> 单个 merged step`。
+fn merge_workflow_steps_content(
+    content: &str,
+    step_paths: &[Vec<usize>],
+    title: &str,
+) -> Result<String, String> {
     let title = validate_workflow_step_title(title)?;
     if step_paths.len() < 2 {
         return Err("Select at least two steps to merge".to_string());
     }
-    let absolute = workspace_root.join(task_path);
-    let content = fs::read_to_string(&absolute)
-        .map_err(|error| format!("failed to read {}: {error}", absolute.display()))?;
     let mut lines = markdown_lines(&content);
     let records = parse_step_records(&content);
     let selected_indices = workflow_step_indices_for_merge(&records, step_paths)?;
@@ -827,7 +947,47 @@ fn merge_workflow_steps(
         .map(|record| record.line_index)
         .unwrap_or(lines.len());
     lines.splice(records[first_index].line_index..first_end, replacement);
-    let next_content = join_markdown_lines(&lines);
+    Ok(join_markdown_lines(&lines))
+}
+
+/// 对需要改写 task 内容的 workflow mutation 执行纯内存转换。
+///
+/// 适用场景：Remote 先 SSH 读取 task，再复用本地 mutation 语义。
+/// 例：`RenameStep + task text -> 新 task text`。
+pub(super) fn apply_workflow_task_content_mutation(
+    content: &str,
+    request: &WorkflowMutationRequest,
+) -> Result<String, String> {
+    match request {
+        WorkflowMutationRequest::AddStep { key, desc, .. } => {
+            add_workflow_step_content(content, key, desc)
+        }
+        WorkflowMutationRequest::RenameStep {
+            step_path, new_key, ..
+        } => rename_workflow_step_content(content, step_path, new_key),
+        WorkflowMutationRequest::DeleteStep { step_path, .. } => {
+            delete_workflow_step_content(content, step_path)
+        }
+        WorkflowMutationRequest::MergeSteps {
+            step_paths, title, ..
+        } => merge_workflow_steps_content(content, step_paths, title),
+        _ => Err("workflow mutation does not rewrite a task document".to_string()),
+    }
+}
+
+/// 读取、转换并覆盖一个本地 workflow task。
+///
+/// 适用场景：文件存储层复用纯内容转换函数。
+/// 例：`task.md + rename transform -> 覆盖 task.md`。
+fn rewrite_workflow_task(
+    workspace_root: &Path,
+    task_path: &Path,
+    transform: impl FnOnce(&str) -> Result<String, String>,
+) -> Result<(), String> {
+    let absolute = workspace_root.join(task_path);
+    let content = fs::read_to_string(&absolute)
+        .map_err(|error| format!("failed to read {}: {error}", absolute.display()))?;
+    let next_content = transform(&content)?;
     fs::write(&absolute, next_content.as_bytes())
         .map_err(|error| format!("failed to write {}: {error}", absolute.display()))
 }
