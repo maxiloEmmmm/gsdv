@@ -617,6 +617,9 @@ impl GsdvGuiApp {
             AppEvent::WorkspaceAddPrepared { result } => {
                 self.apply_workspace_add_result(ctx, result);
             }
+            AppEvent::WorkspaceDirectoryChangePrepared { result } => {
+                self.apply_workspace_directory_change_result(ctx, result);
+            }
             AppEvent::RemoteWorkspaceAddPrepared {
                 mode,
                 config,
