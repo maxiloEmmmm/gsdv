@@ -1757,6 +1757,10 @@ enum AppEvent {
     WorkspaceAddPrepared {
         result: Result<WorkspaceAddTaskResult, String>,
     },
+    /// 切换本地 workspace 目录的后台准备完成。
+    WorkspaceDirectoryChangePrepared {
+        result: Result<WorkspaceDirectoryChangeTaskResult, String>,
+    },
     /// 新 Remote Workspace 连接验证完成。
     RemoteWorkspaceAddPrepared {
         mode: RemoteWorkspaceDialogMode,
@@ -2243,6 +2247,33 @@ enum WorkspaceAddTaskResult {
 }
 
 #[derive(Debug)]
+enum WorkspaceDirectoryChangeTaskResult {
+    /// 选择的目录就是当前 workspace 目录。
+    Unchanged {
+        /// 任务启动时捕获的 workspace 下标。
+        index: usize,
+        /// 任务启动时捕获的 workspace 路径。
+        old_path: PathBuf,
+    },
+    /// 目标目录已经在另一个 workspace 中。
+    Existing {
+        /// 已存在 workspace 在任务启动时的下标。
+        index: usize,
+        /// 已存在 workspace 在任务启动时的路径。
+        path: PathBuf,
+    },
+    /// 目标目录已加载完成，可以刷新当前 workspace 的目录字段。
+    Changed {
+        /// 任务启动时捕获的 workspace 下标。
+        index: usize,
+        /// 任务启动时捕获的旧 workspace 路径。
+        old_path: PathBuf,
+        /// 新目录对应的目录派生渲染状态。
+        directory: WorkspaceViewData,
+    },
+}
+
+#[derive(Debug)]
 enum FileMutationResult {
     /// Markdown file creation result.
     CreateMarkdown {
@@ -2626,6 +2657,7 @@ enum OutlineFavoriteScope {
 enum WorkspaceRailAction {
     Switch(usize),
     Close(usize),
+    ChangeDirectory(usize),
     EditRemote(usize),
 }
 

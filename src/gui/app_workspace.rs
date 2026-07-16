@@ -78,6 +78,9 @@ impl GsdvGuiApp {
         match action {
             WorkspaceRailAction::Switch(index) => self.switch_workspace(index),
             WorkspaceRailAction::Close(index) => self.request_close_workspace(index),
+            WorkspaceRailAction::ChangeDirectory(index) => {
+                self.change_workspace_directory_from_dialog(ctx, index)
+            }
             WorkspaceRailAction::EditRemote(index) => {
                 let Some(config) = self
                     .workspaces
@@ -125,6 +128,45 @@ impl GsdvGuiApp {
             .map(|workspace| workspace.path.clone())
             .collect();
         self.spawn_workspace_add_task(ctx, path, self.default_agent_kind, existing_paths);
+    }
+
+    /// 打开目录选择器并派发本地 workspace 目录切换任务。
+    ///
+    /// 适用场景：保留 rail 槽位但替换 workspace root。
+    /// 例：当前 `/repo/a` 选择 `/repo/b` -> index 不变，root 变成 `/repo/b`。
+    pub(super) fn change_workspace_directory_from_dialog(
+        &mut self,
+        ctx: &egui::Context,
+        index: usize,
+    ) {
+        let Some(workspace) = self.workspaces.get(index) else {
+            return;
+        };
+        if workspace.remote.is_some() {
+            return;
+        }
+        let old_path = workspace.path.clone();
+        let agent_kind = workspace.agent_kind;
+        let dialog = rfd::FileDialog::new()
+            .set_title(i18n::text(self.app_language, "Change workspace directory"))
+            .set_directory(&old_path);
+        let Some(new_path) = dialog.pick_folder() else {
+            return;
+        };
+        let existing_paths = self
+            .workspaces
+            .iter()
+            .enumerate()
+            .map(|(index, workspace)| (index, workspace.path.clone()))
+            .collect();
+        self.spawn_workspace_directory_change_task(
+            ctx,
+            index,
+            old_path,
+            new_path,
+            agent_kind,
+            existing_paths,
+        );
     }
 
     /// 应用添加 workspace 后台任务结果。
@@ -203,6 +245,216 @@ impl GsdvGuiApp {
         self.queue_app_event(AppEvent::SyncTerminalEventRepaintFlags);
         self.sync_fs_watches();
         self.persist_workspaces();
+    }
+
+    /// 应用本地 workspace 目录切换后台任务结果。
+    ///
+    /// 适用场景：目录选择器返回后只切换当前 workspace root。
+    /// 例：`Changed(index=1)` -> index 1 保留 Agent 身份并换成新 path。
+    pub(super) fn apply_workspace_directory_change_result(
+        &mut self,
+        _ctx: &egui::Context,
+        result: Result<WorkspaceDirectoryChangeTaskResult, String>,
+    ) {
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                self.set_active_app_dialog(Some(AppDialog::Message {
+                    title: i18n::text(self.app_language, "Change Workspace Directory Failed")
+                        .to_string(),
+                    message: error,
+                }));
+                return;
+            }
+        };
+        match result {
+            WorkspaceDirectoryChangeTaskResult::Unchanged { index, old_path } => {
+                if self
+                    .workspaces
+                    .get(index)
+                    .is_some_and(|workspace| workspace.path == old_path)
+                {
+                    self.switch_workspace(index);
+                }
+            }
+            WorkspaceDirectoryChangeTaskResult::Existing { index, path } => {
+                if self
+                    .workspaces
+                    .get(index)
+                    .is_some_and(|workspace| workspace.path == path)
+                {
+                    self.switch_workspace(index);
+                } else if let Some(index) = self
+                    .workspaces
+                    .iter()
+                    .position(|workspace| workspace.path == path)
+                {
+                    self.switch_workspace(index);
+                }
+            }
+            WorkspaceDirectoryChangeTaskResult::Changed {
+                index,
+                old_path,
+                directory,
+            } => {
+                let Some(index) = self
+                    .workspaces
+                    .get(index)
+                    .is_some_and(|current| current.path == old_path && current.remote.is_none())
+                    .then_some(index)
+                    .or_else(|| {
+                        self.workspaces.iter().position(|current| {
+                            current.path == old_path && current.remote.is_none()
+                        })
+                    })
+                else {
+                    return;
+                };
+                if let Some(existing_index) =
+                    self.workspaces
+                        .iter()
+                        .enumerate()
+                        .find_map(|(existing_index, current)| {
+                            (existing_index != index && current.path == directory.path)
+                                .then_some(existing_index)
+                        })
+                {
+                    self.switch_workspace(existing_index);
+                    return;
+                }
+                self.apply_workspace_directory_fields(index, directory);
+                self.reset_workspace_runtime_for_directory_change(index);
+                self.active_workspace = index;
+                self.mark_extra_tools_scan_due();
+                self.queue_app_event(AppEvent::SyncTerminalEventRepaintFlags);
+                self.sync_fs_watches();
+                self.persist_workspaces();
+                self.request_app_repaint();
+            }
+        }
+    }
+
+    /// 将新目录的派生字段写入当前 workspace。
+    ///
+    /// 适用场景：workspace 身份不变，只换 root 和目录扫描结果。
+    /// 例：`/repo/a -> /repo/b` 保留 session，但 outline 来自 `/repo/b`。
+    fn apply_workspace_directory_fields(
+        &mut self,
+        index: usize,
+        directory_workspace: WorkspaceViewData,
+    ) {
+        let Some(workspace) = self.workspaces.get_mut(index) else {
+            return;
+        };
+        // 触发条件：用户对现有 workspace 执行“切换目录”。
+        // 不能直接替换对象：workspace 身份、memo、Agent 布局和 session 要保留。
+        // 防止副作用：避免切目录后所有 Agent tab 消失或 session 丢失。
+        workspace.name = directory_workspace.name;
+        workspace.path = directory_workspace.path;
+        workspace.selected_file = directory_workspace.selected_file;
+        workspace.outline = directory_workspace.outline;
+        workspace.outline_favorites = directory_workspace.outline_favorites;
+        workspace.recent_markdowns = directory_workspace.recent_markdowns;
+    }
+
+    /// 重置切换目录时不能跨 root 复用的 workspace 运行态。
+    ///
+    /// 适用场景：本地 workspace root 已变更，旧 cwd 的进程和草稿必须丢弃。
+    /// 例：旧 agent 正在 `/repo/a`，切到 `/repo/b` -> drop terminal host。
+    fn reset_workspace_runtime_for_directory_change(&mut self, index: usize) {
+        self.clear_agent_input_translation_state();
+        if let Some(workspace) = self.workspaces.get_mut(index) {
+            workspace.activity = WorkspaceActivity::Unknown;
+            for subagent in &mut workspace.subagents {
+                subagent.activity = WorkspaceActivity::Unknown;
+            }
+        }
+        if let Some(adapter) = self.reviewer_adapters.get_mut(index) {
+            *adapter = None;
+        }
+        if let Some(snapshot) = self.reviewer_snapshots.get_mut(index) {
+            *snapshot = None;
+        }
+        if let Some(dialog) = self.reviewer_dialogs.get_mut(index) {
+            *dialog = None;
+        }
+        if let Some(target) = self.reviewer_diff_scroll_targets.get_mut(index) {
+            *target = None;
+        }
+        if let Some(rows) = self.reviewer_diff_selected_rows.get_mut(index) {
+            *rows = None;
+        }
+        if let Some(hosts) = self.terminal_hosts.get_mut(index) {
+            *hosts = WorkspaceTerminalHosts::default();
+        }
+        if let Some(remote) = self.remote_workspaces.get_mut(index) {
+            *remote = None;
+        }
+        if let Some(targets) = self.recent_agent_helix_targets.get_mut(index) {
+            targets.clear();
+        }
+        if let Some(watchdogs) = self.agent_busy_watchdogs.get_mut(index) {
+            let mut next = BTreeMap::from([(AgentSlotId::Main, AgentBusyWatchdogState::default())]);
+            if let Some(workspace) = self.workspaces.get(index) {
+                next.extend(workspace.subagents.iter().map(|subagent| {
+                    (
+                        AgentSlotId::Subagent(subagent.id.clone()),
+                        AgentBusyWatchdogState::default(),
+                    )
+                }));
+            }
+            *watchdogs = next;
+        }
+        if let Some(open) = self.workspace_terminal_drawers.get_mut(index) {
+            *open = false;
+        }
+        if let Some(open) = self.reviewer_helix_drawers.get_mut(index) {
+            *open = false;
+        }
+        if let Some(restart) = self.pending_agent_theme_restarts.get_mut(index) {
+            *restart = None;
+        }
+        if let Some(document) = self.documents.get_mut(index) {
+            *document = DocumentState::default();
+        }
+        if let Some(dialog) = self.app_dialogs.get_mut(index) {
+            *dialog = None;
+        }
+        if let Some(dialog) = self.workflow_quick_overlay_dialogs.get_mut(index) {
+            *dialog = None;
+        }
+        if let Some(rect) = self.outline_tree_rects.get_mut(index) {
+            *rect = None;
+        }
+        if let Some(favorites_only) = self.outline_favorites_only.get_mut(index) {
+            *favorites_only = false;
+        }
+        if let Some(tab) = self.outline_panel_tabs.get_mut(index) {
+            *tab = OutlinePanelTab::Outline;
+        }
+        if let Some(state) = self.workflow_states.get_mut(index) {
+            *state = WorkflowUiState::default();
+        }
+        if let Some(error) = self.memo_save_errors.get_mut(index) {
+            *error = None;
+        }
+        self.pending_terminal_spawns
+            .retain(|key| key.index != index);
+        self.outline_refreshes_in_flight.remove(&index);
+        self.pending_outline_refreshes.remove(&index);
+        self.pending_reviewer_loads.remove(&index);
+        self.reviewer_loads_in_flight.remove(&index);
+        self.reviewer_adapter_tasks_in_flight.remove(&index);
+        self.reviewer_git_data_in_flight.remove(&index);
+        self.pending_reviewer_git_data_budget.remove(&index);
+        self.pending_reviewer_adapter_tasks.remove(&index);
+        self.pending_memo_saves.remove(&index);
+        self.pending_markdown_reparse.remove(&index);
+        self.fs_watch_dirty.outline_workspaces.remove(&index);
+        self.fs_watch_dirty.workflow_workspaces.remove(&index);
+        self.fs_watch_dirty.reviewer_workspaces.remove(&index);
+        self.fs_watch_dirty
+            .clamp_workspace_indexes(self.workspaces.len());
     }
 
     /// Opens the destructive close confirmation for a workspace.

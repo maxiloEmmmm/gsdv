@@ -197,6 +197,14 @@ impl GsdvGuiApp {
                             rail_action = Some(WorkspaceRailAction::EditRemote(index));
                             ui.close_menu();
                         }
+                        if workspace.remote.is_none()
+                            && ui
+                                .button(i18n::text(self.app_language, "Change workspace directory"))
+                                .clicked()
+                        {
+                            rail_action = Some(WorkspaceRailAction::ChangeDirectory(index));
+                            ui.close_menu();
+                        }
                         if ui
                             .button(if workspace.remote.is_some() {
                                 "Delete remote workspace"
@@ -264,6 +272,14 @@ impl GsdvGuiApp {
                             && ui.button("Edit remote workspace").clicked()
                         {
                             rail_action = Some(WorkspaceRailAction::EditRemote(index));
+                            ui.close_menu();
+                        }
+                        if workspace.remote.is_none()
+                            && ui
+                                .button(i18n::text(self.app_language, "Change workspace directory"))
+                                .clicked()
+                        {
+                            rail_action = Some(WorkspaceRailAction::ChangeDirectory(index));
                             ui.close_menu();
                         }
                         if ui

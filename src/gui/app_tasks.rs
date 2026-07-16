@@ -283,6 +283,55 @@ impl GsdvGuiApp {
         });
     }
 
+    /// 后台规范化并加载本地 workspace 切换目录结果。
+    ///
+    /// 适用场景：右键 workspace rail 切换当前槽位的 root。
+    /// 例：`/repo/a -> /repo/b` 会生成新 root 的目录派生状态。
+    pub(super) fn spawn_workspace_directory_change_task(
+        &self,
+        ctx: &egui::Context,
+        index: usize,
+        old_path: PathBuf,
+        new_path: PathBuf,
+        agent_kind: AgentKind,
+        existing_paths: Vec<(usize, PathBuf)>,
+    ) {
+        let tx = self.app_event_tx.clone();
+        let repaint_ctx = ctx.clone();
+        let repaint_controller = self.repaint_controller.clone();
+        self.background_runtime.spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                let canonical_new = new_path.canonicalize().unwrap_or(new_path);
+                let canonical_old = old_path.canonicalize().unwrap_or_else(|_| old_path.clone());
+                if canonical_new == canonical_old {
+                    return WorkspaceDirectoryChangeTaskResult::Unchanged { index, old_path };
+                }
+                if let Some((existing_index, existing_path)) =
+                    existing_paths.into_iter().find(|(_, existing_path)| {
+                        existing_path
+                            .canonicalize()
+                            .unwrap_or_else(|_| existing_path.clone())
+                            == canonical_new
+                    })
+                {
+                    return WorkspaceDirectoryChangeTaskResult::Existing {
+                        index: existing_index,
+                        path: existing_path,
+                    };
+                }
+                WorkspaceDirectoryChangeTaskResult::Changed {
+                    index,
+                    old_path,
+                    directory: data::new_workspace(canonical_new, agent_kind),
+                }
+            })
+            .await
+            .map_err(|error| error.to_string());
+            let _ = tx.send(AppEvent::WorkspaceDirectoryChangePrepared { result });
+            repaint_controller.request_repaint(&repaint_ctx);
+        });
+    }
+
     /// 将 Markdown 解析派发到 egui update 路径之外。
     pub(super) fn spawn_markdown_reparse_task(
         &self,
