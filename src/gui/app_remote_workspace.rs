@@ -633,6 +633,97 @@ impl GsdvGuiApp {
         }
     }
 
+    /// 重启 Remote Workspace 下所有已经存在 terminal host 的 Agent。
+    ///
+    /// 适用场景：Remote rail 右键重启所有活跃 Agent。
+    /// 例：项目 A 当前可见、项目 B 后台缓存 -> 两边已有 host 的 Agent 都 resume。
+    pub(super) fn restart_remote_workspace_agents(&mut self, ctx: &egui::Context, index: usize) {
+        if !self
+            .workspaces
+            .get(index)
+            .is_some_and(|workspace| workspace.remote.is_some())
+        {
+            return;
+        }
+        self.capture_selected_remote_project(index);
+        let Some(workspace) = self.workspaces.get(index) else {
+            return;
+        };
+        let Some(config) = workspace.remote.clone() else {
+            return;
+        };
+        let workspace_name = workspace.name.clone();
+        let Some(runtime) = self
+            .remote_workspaces
+            .get_mut(index)
+            .and_then(Option::as_mut)
+        else {
+            return;
+        };
+        let Some(shell) = runtime.shell else {
+            return;
+        };
+        let network_settings = runtime.network_settings.clone();
+        let mut requests = Vec::new();
+        for project in &mut runtime.projects {
+            let slots = project
+                .agents
+                .iter_mut()
+                .filter_map(|(slot_id, slot)| {
+                    slot.host.as_ref()?;
+                    slot.host = None;
+                    slot.error = None;
+                    Some(slot_id.clone())
+                })
+                .collect::<Vec<_>>();
+            for slot in slots {
+                if let Some(metadata) = remote_project_terminal_metadata(
+                    &workspace_name,
+                    &config,
+                    shell,
+                    &network_settings,
+                    &project.snapshot,
+                    &slot,
+                ) {
+                    requests.push((slot, metadata));
+                }
+            }
+        }
+        let request_keys = requests
+            .iter()
+            .map(|(slot, metadata)| TerminalSpawnKey {
+                index,
+                workspace_path: metadata.path.clone(),
+                kind: TerminalSurfaceKind::Agent,
+                agent_slot: slot.clone(),
+            })
+            .collect::<Vec<_>>();
+        self.pending_terminal_spawns
+            .retain(|key| !request_keys.iter().any(|request| request == key));
+        self.restore_selected_remote_project(index);
+        let restart_count = requests.len();
+        for (slot, metadata) in requests {
+            let key = TerminalSpawnKey {
+                index,
+                workspace_path: metadata.path.clone(),
+                kind: TerminalSurfaceKind::Agent,
+                agent_slot: slot,
+            };
+            self.spawn_terminal_host_task(ctx, key, metadata);
+        }
+        if restart_count > 0 {
+            self.push_toast(
+                i18n::text_with_arg(
+                    self.app_language,
+                    "Restarted {count} agent(s)",
+                    "{count}",
+                    restart_count.to_string(),
+                ),
+                theme::success(),
+            );
+        }
+    }
+
     /// 保存 Remote Outline 选择到远端 store.active。
     ///
     /// 适用场景：项目点击后。例：过滤列表下标 1 -> 原始 store_index 3。
