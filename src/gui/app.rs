@@ -2658,6 +2658,7 @@ enum WorkspaceRailAction {
     Switch(usize),
     Close(usize),
     ChangeDirectory(usize),
+    RestartRemoteAgents(usize),
     EditRemote(usize),
 }
 

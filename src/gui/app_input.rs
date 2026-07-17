@@ -257,6 +257,14 @@ fn input_runtime_workspace_route_action(
     request: &InputRuntimeRequest,
 ) -> InputRuntimeKeyboardAction {
     let input = &request.input;
+    if request.remote_workspace
+        && let Some(direction) = read_agent_focus_move(input)
+    {
+        // 触发条件：Remote 项目的 Agent surface 可能不走普通 Agent center 分支。
+        // 不能只放在 Agent/Terminal 分支：Remote 抢占后 Ctrl+方向会进 terminal。
+        // 防止副作用：仅限 Remote，避免本地 Editor 的 Ctrl+方向跳词被抢。
+        return InputRuntimeKeyboardAction::Command(UiCommand::MoveAgentFocus(direction));
+    }
     match request.center_mode {
         CenterMode::Agent | CenterMode::Terminal => {
             if let Some(direction) = read_agent_focus_move(input) {

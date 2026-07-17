@@ -81,6 +81,9 @@ impl GsdvGuiApp {
             WorkspaceRailAction::ChangeDirectory(index) => {
                 self.change_workspace_directory_from_dialog(ctx, index)
             }
+            WorkspaceRailAction::RestartRemoteAgents(index) => {
+                self.restart_remote_workspace_agents(ctx, index)
+            }
             WorkspaceRailAction::EditRemote(index) => {
                 let Some(config) = self
                     .workspaces
