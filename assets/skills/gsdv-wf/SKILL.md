@@ -20,6 +20,7 @@ The root project mainly indexes the whole project overview. If it does not exist
 Example: `$GSDV_SPEC`/ps/some/root.md
 `some/root.md` describes the core mechanism of this project. It is called P_MD below.
 
+
 <some/task-*.md>
 The task description Markdown files for the some project. They are called P_TASK_MD below.
 
@@ -38,6 +39,11 @@ Step description...
 - The step description is the Markdown content after the step heading and before the next step heading.
 - A step description may contain implementation notes, reasoning, pseudocode, constraints, or acceptance details.
 </some/task-*.md>
+
+<some/docs>
+some docs or prd can @ref in task-*.md
+</some/docs>
+
 </desc>
 
 
