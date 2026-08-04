@@ -3455,16 +3455,16 @@ fn codex_model_provider_picker(
             if ui
                 .radio_value(
                     &mut selected,
-                    data::CODEX_MODEL_PROVIDER_NEVER.to_string(),
-                    data::CODEX_MODEL_PROVIDER_NEVER,
+                    data::CODEX_MODEL_PROVIDER_OPENAI.to_string(),
+                    data::CODEX_MODEL_PROVIDER_OPENAI,
                 )
                 .clicked()
             {
-                *model_provider = data::CODEX_MODEL_PROVIDER_NEVER.to_string();
+                *model_provider = data::CODEX_MODEL_PROVIDER_OPENAI.to_string();
             }
             for provider in model_providers {
                 let provider = provider.trim();
-                if provider.is_empty() || provider == data::CODEX_MODEL_PROVIDER_NEVER {
+                if provider.is_empty() || provider == data::CODEX_MODEL_PROVIDER_OPENAI {
                     continue;
                 }
                 if ui

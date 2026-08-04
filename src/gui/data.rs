@@ -34,7 +34,7 @@ pub const DEFAULT_REMOTE_SERVER_PORT: u16 = 20050;
 pub const MIN_REMOTE_SERVER_PORT: u16 = 1;
 pub const MAX_REMOTE_SERVER_PORT: u16 = u16::MAX;
 /// Fixed Codex model provider option requested by the UI.
-pub const CODEX_MODEL_PROVIDER_NEVER: &str = "never";
+pub const CODEX_MODEL_PROVIDER_OPENAI: &str = "openai";
 
 /// Cache key for Codex transcript aborted-turn checks.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
