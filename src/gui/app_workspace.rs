@@ -77,6 +77,8 @@ impl GsdvGuiApp {
     ) {
         match action {
             WorkspaceRailAction::Switch(index) => self.switch_workspace(index),
+            WorkspaceRailAction::ToggleFocus(index) => self.toggle_workspace_focus(index),
+            WorkspaceRailAction::ToggleFocusFilter => self.toggle_workspace_focus_filter(),
             WorkspaceRailAction::Close(index) => self.request_close_workspace(index),
             WorkspaceRailAction::ChangeDirectory(index) => {
                 self.change_workspace_directory_from_dialog(ctx, index)
@@ -101,6 +103,52 @@ impl GsdvGuiApp {
                 self.request_app_repaint();
                 let _ = ctx;
             }
+        }
+    }
+
+    /// Toggles one workspace's focus marker and keeps the active workspace visible.
+    ///
+    /// 适用场景：workspace rail 右键菜单。例：`focused=false -> true`。
+    pub(super) fn toggle_workspace_focus(&mut self, index: usize) {
+        let Some(workspace) = self.workspaces.get_mut(index) else {
+            return;
+        };
+        workspace.focused = !workspace.focused;
+        self.ensure_active_workspace_visible();
+        self.persist_workspaces();
+        self.request_app_repaint();
+    }
+
+    /// Toggles the rail focus filter and selects the first focused workspace when needed.
+    ///
+    /// 适用场景：rail 底部 switch。例：开启过滤且当前未聚焦 -> 切换到首个聚焦项。
+    pub(super) fn toggle_workspace_focus_filter(&mut self) {
+        self.focus_filter_enabled = !self.focus_filter_enabled;
+        self.ensure_active_workspace_visible();
+        self.persist_workspaces();
+        self.request_app_repaint();
+    }
+
+    /// Ensures the active workspace remains reachable under the current focus filter.
+    ///
+    /// 适用场景：开启过滤或取消当前聚焦标记。例：当前项隐藏 -> 首个聚焦项。
+    fn ensure_active_workspace_visible(&mut self) {
+        if !self.focus_filter_enabled {
+            return;
+        }
+        if self
+            .workspaces
+            .get(self.active_workspace)
+            .is_some_and(|workspace| workspace.focused)
+        {
+            return;
+        }
+        if let Some(index) = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.focused)
+        {
+            self.switch_workspace(index);
         }
     }
 
@@ -244,6 +292,7 @@ impl GsdvGuiApp {
         self.workflow_states.push(WorkflowUiState::default());
         self.memo_save_errors.push(None);
         self.active_workspace = self.workspaces.len().saturating_sub(1);
+        self.ensure_active_workspace_visible();
         self.mark_extra_tools_scan_due();
         self.queue_app_event(AppEvent::SyncTerminalEventRepaintFlags);
         self.sync_fs_watches();
@@ -550,6 +599,7 @@ impl GsdvGuiApp {
         } else if self.active_workspace > index {
             self.active_workspace = self.active_workspace.saturating_sub(1);
         }
+        self.ensure_active_workspace_visible();
         self.mark_extra_tools_scan_due();
         self.queue_app_event(AppEvent::SyncTerminalEventRepaintFlags);
         self.sync_fs_watches();

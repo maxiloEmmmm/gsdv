@@ -183,7 +183,16 @@ impl GsdvGuiApp {
                 ui.add_space(8.0);
 
                 let mut rail_action = None;
-                for (index, workspace) in self.workspaces.iter().enumerate() {
+                let visible_workspace_indices = self
+                    .workspaces
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, workspace)| {
+                        (!self.focus_filter_enabled || workspace.focused).then_some(index)
+                    })
+                    .collect::<Vec<_>>();
+                for index in visible_workspace_indices {
+                    let workspace = &self.workspaces[index];
                     let response = workspace_rail_row(
                         ui,
                         workspace,
@@ -191,6 +200,17 @@ impl GsdvGuiApp {
                         &self.repaint_controller,
                     );
                     response.context_menu(|ui| {
+                        if ui
+                            .button(if workspace.focused {
+                                i18n::text(self.app_language, "Unfocus workspace")
+                            } else {
+                                i18n::text(self.app_language, "Focus workspace")
+                            })
+                            .clicked()
+                        {
+                            rail_action = Some(WorkspaceRailAction::ToggleFocus(index));
+                            ui.close_menu();
+                        }
                         if workspace.remote.is_some()
                             && ui.button("Edit remote workspace").clicked()
                         {
@@ -230,18 +250,34 @@ impl GsdvGuiApp {
                     }
                     ui.add_space(4.0);
                 }
-                if let Some(action) = rail_action {
-                    self.handle_workspace_rail_action(ui.ctx(), action);
-                }
-
-                let bottom_height = 30.0 + 10.0 + 30.0;
+                let bottom_height = 30.0 + 10.0 + 28.0 + 10.0 + 30.0;
                 ui.add_space((ui.available_height() - bottom_height).max(24.0));
+                ui.allocate_ui_with_layout(
+                    Vec2::new(ui.available_width(), 28.0),
+                    Layout::right_to_left(Align::Center),
+                    |ui| {
+                        ui.add_space(RAIL_EDGE_INSET);
+                        if workspace_focus_filter_switch(
+                            ui,
+                            self.focus_filter_enabled,
+                            self.app_language,
+                        )
+                        .clicked()
+                        {
+                            rail_action = Some(WorkspaceRailAction::ToggleFocusFilter);
+                        }
+                    },
+                );
+                ui.add_space(10.0);
                 if rail_nav_row(ui, "+", i18n::text(self.app_language, "New Workspace")).clicked() {
                     self.add_workspace_from_dialog(ui.ctx());
                 }
                 ui.add_space(10.0);
                 if rail_nav_row(ui, "gear", i18n::text(self.app_language, "Settings")).clicked() {
                     self.set_active_app_dialog(Some(AppDialog::Settings));
+                }
+                if let Some(action) = rail_action {
+                    self.handle_workspace_rail_action(ui.ctx(), action);
                 }
             },
         );
@@ -268,7 +304,16 @@ impl GsdvGuiApp {
                 ui.add_space(18.0);
 
                 let mut rail_action = None;
-                for (index, workspace) in self.workspaces.iter().enumerate() {
+                let visible_workspace_indices = self
+                    .workspaces
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, workspace)| {
+                        (!self.focus_filter_enabled || workspace.focused).then_some(index)
+                    })
+                    .collect::<Vec<_>>();
+                for index in visible_workspace_indices {
+                    let workspace = &self.workspaces[index];
                     let response = compact_workspace_rail_row(
                         ui,
                         workspace,
@@ -276,6 +321,17 @@ impl GsdvGuiApp {
                         &self.repaint_controller,
                     );
                     response.context_menu(|ui| {
+                        if ui
+                            .button(if workspace.focused {
+                                i18n::text(self.app_language, "Unfocus workspace")
+                            } else {
+                                i18n::text(self.app_language, "Focus workspace")
+                            })
+                            .clicked()
+                        {
+                            rail_action = Some(WorkspaceRailAction::ToggleFocus(index));
+                            ui.close_menu();
+                        }
                         if workspace.remote.is_some()
                             && ui.button("Edit remote workspace").clicked()
                         {
@@ -315,12 +371,14 @@ impl GsdvGuiApp {
                     }
                     ui.add_space(8.0);
                 }
-                if let Some(action) = rail_action {
-                    self.handle_workspace_rail_action(ui.ctx(), action);
-                }
-
-                let bottom_height = 28.0 + 10.0 + 28.0;
+                let bottom_height = 28.0 + 10.0 + 22.0 + 10.0 + 28.0;
                 ui.add_space((ui.available_height() - bottom_height).max(24.0));
+                if workspace_focus_filter_switch(ui, self.focus_filter_enabled, self.app_language)
+                    .clicked()
+                {
+                    rail_action = Some(WorkspaceRailAction::ToggleFocusFilter);
+                }
+                ui.add_space(10.0);
                 if compact_rail_nav_button(
                     ui,
                     i18n::text(self.app_language, "New workspace"),
@@ -343,6 +401,9 @@ impl GsdvGuiApp {
                 .clicked()
                 {
                     self.set_active_app_dialog(Some(AppDialog::Settings));
+                }
+                if let Some(action) = rail_action {
+                    self.handle_workspace_rail_action(ui.ctx(), action);
                 }
             },
         );

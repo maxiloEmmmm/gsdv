@@ -498,6 +498,52 @@ pub(super) fn theme_mode_switch(
     response.on_hover_text(i18n::text(language, "Toggle light/dark mode"))
 }
 
+/// Draws the workspace focus filter toggle.
+///
+/// 适用场景：rail 底部切换是否只显示已聚焦 workspace。例：`false -> true`。
+pub(super) fn workspace_focus_filter_switch(
+    ui: &mut Ui,
+    enabled: bool,
+    language: AppLanguage,
+) -> egui::Response {
+    let size = Vec2::new(38.0, 22.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let fill = if enabled {
+        theme::primary()
+    } else {
+        theme::surface_elevated()
+    };
+    ui.painter().rect_filled(rect, CornerRadius::same(11), fill);
+    ui.painter().rect_stroke(
+        rect,
+        CornerRadius::same(11),
+        Stroke::new(
+            1.0,
+            if enabled {
+                theme::primary()
+            } else {
+                theme::border()
+            },
+        ),
+        egui::StrokeKind::Inside,
+    );
+    let knob_x = if enabled {
+        rect.right() - 11.0
+    } else {
+        rect.left() + 11.0
+    };
+    ui.painter().circle_filled(
+        egui::pos2(knob_x, rect.center().y),
+        8.0,
+        if enabled {
+            theme::on_primary()
+        } else {
+            theme::muted()
+        },
+    );
+    response.on_hover_text(i18n::text(language, "Show focused workspaces only"))
+}
+
 pub(super) fn rail_header_add_button(ui: &mut Ui) -> egui::Response {
     rail_header_icon_button(ui, "Add", |ui, center, color| {
         paint_plus_icon(ui, center, 5.0, color, 1.4);
