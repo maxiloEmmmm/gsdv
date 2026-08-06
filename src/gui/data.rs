@@ -94,6 +94,8 @@ pub struct WorkspaceViewData {
     pub remote: Option<RemoteWorkspaceConfig>,
     /// Remote 项目 Outline 是否折叠成 28px 恢复条。
     pub remote_outline_collapsed: bool,
+    /// Whether this workspace is included when focus filtering is enabled.
+    pub focused: bool,
     pub name: String,
     pub path: PathBuf,
     pub agent_kind: AgentKind,
@@ -289,6 +291,8 @@ pub struct InitialGuiData {
     pub workspaces: Vec<WorkspaceViewData>,
     /// Whether the workspace rail should start in compact mode.
     pub rail_collapsed: bool,
+    /// Whether the workspace rail only shows focused workspaces.
+    pub focus_filter_enabled: bool,
 }
 
 /// 应用界面语言，适用于全局 GUI 文案切换。
@@ -670,6 +674,8 @@ struct StoreFile {
     #[serde(default)]
     rail_collapsed: bool,
     #[serde(default)]
+    focus_filter_enabled: bool,
+    #[serde(default)]
     default_agent_kind: Option<AgentKind>,
     #[serde(default)]
     theme_mode: Option<ThemeMode>,
@@ -695,6 +701,9 @@ struct StoredWorkspace {
     /// Remote Outline 的 workspace 级持久折叠状态。
     #[serde(default)]
     remote_outline_collapsed: bool,
+    /// Whether this workspace is marked as focused in the rail.
+    #[serde(default)]
+    focused: bool,
     #[serde(default)]
     agent_kind: Option<AgentKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -823,6 +832,7 @@ pub fn load_initial_gui_data(default_agent_kind: AgentKind) -> InitialGuiData {
                     config,
                     default_agent_kind,
                     workspace.remote_outline_collapsed,
+                    workspace.focused,
                 ));
             }
             let path = PathBuf::from(&workspace.path);
@@ -845,11 +855,24 @@ pub fn load_initial_gui_data(default_agent_kind: AgentKind) -> InitialGuiData {
         .active
         .filter(|index| *index < workspaces.len())
         .unwrap_or(0);
+    let active_workspace = if stored.focus_filter_enabled
+        && !workspaces
+            .get(active_workspace)
+            .is_some_and(|workspace| workspace.focused)
+    {
+        workspaces
+            .iter()
+            .position(|workspace| workspace.focused)
+            .unwrap_or(active_workspace)
+    } else {
+        active_workspace
+    };
 
     InitialGuiData {
         active_workspace,
         workspaces,
         rail_collapsed: stored.rail_collapsed,
+        focus_filter_enabled: stored.focus_filter_enabled,
     }
 }
 
@@ -1336,6 +1359,7 @@ pub fn new_workspace(path: PathBuf, agent_kind: AgentKind) -> WorkspaceViewData 
             path: path.to_string_lossy().to_string(),
             remote: None,
             remote_outline_collapsed: false,
+            focused: false,
             agent_kind: Some(agent_kind),
             agent_model: None,
             agent_model_provider: None,
@@ -1364,7 +1388,7 @@ pub fn new_remote_workspace(
     config: RemoteWorkspaceConfig,
     agent_kind: AgentKind,
 ) -> WorkspaceViewData {
-    new_remote_workspace_with_outline_state(config, agent_kind, false)
+    new_remote_workspace_with_outline_state(config, agent_kind, false, false)
 }
 
 /// 按持久状态构造尚未连接的 Remote Workspace 占位渲染状态。
@@ -1375,6 +1399,7 @@ fn new_remote_workspace_with_outline_state(
     mut config: RemoteWorkspaceConfig,
     agent_kind: AgentKind,
     remote_outline_collapsed: bool,
+    focused: bool,
 ) -> WorkspaceViewData {
     if config.workspace_key.trim().is_empty() {
         config.workspace_key = crate::gui::remote_workspace::new_workspace_key();
@@ -1383,6 +1408,7 @@ fn new_remote_workspace_with_outline_state(
     WorkspaceViewData {
         remote: Some(config.clone()),
         remote_outline_collapsed,
+        focused,
         name: config.name,
         path: identity.clone(),
         agent_kind,
@@ -1411,7 +1437,12 @@ fn new_remote_workspace_with_outline_state(
     }
 }
 
-pub fn save_workspace_store(workspaces: &[WorkspaceViewData], active: usize, rail_collapsed: bool) {
+pub fn save_workspace_store(
+    workspaces: &[WorkspaceViewData],
+    active: usize,
+    rail_collapsed: bool,
+    focus_filter_enabled: bool,
+) {
     let _guard = store_write_guard();
     let Some(path) = gsdv_store_path() else {
         return;
@@ -1423,6 +1454,7 @@ pub fn save_workspace_store(workspaces: &[WorkspaceViewData], active: usize, rai
     let store = StoreFile {
         active: (!workspaces.is_empty()).then_some(active.min(workspaces.len().saturating_sub(1))),
         rail_collapsed,
+        focus_filter_enabled,
         default_agent_kind: existing_store.default_agent_kind,
         theme_mode: existing_store.theme_mode,
         language: existing_store.language,
@@ -1436,6 +1468,7 @@ pub fn save_workspace_store(workspaces: &[WorkspaceViewData], active: usize, rai
                 path: workspace.path.to_string_lossy().to_string(),
                 remote: workspace.remote.clone(),
                 remote_outline_collapsed: workspace.remote_outline_collapsed,
+                focused: workspace.focused,
                 agent_kind: Some(workspace.agent_kind),
                 agent_model: workspace.agent_model.clone(),
                 agent_model_provider: normalize_stored_agent_model_provider(
@@ -1944,6 +1977,7 @@ fn build_workspace(
     WorkspaceViewData {
         remote: None,
         remote_outline_collapsed: false,
+        focused: stored.focused,
         name: workspace_name(&path),
         path,
         agent_kind,

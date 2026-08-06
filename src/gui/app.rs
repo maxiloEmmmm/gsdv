@@ -465,6 +465,8 @@ struct GsdvGuiApp {
     last_screenshot_path: Option<PathBuf>,
     theme_mode: theme::ThemeMode,
     rail_collapsed: bool,
+    /// Whether the workspace rail only shows focused workspaces.
+    focus_filter_enabled: bool,
     /// Whether F11 hides navigation chrome and keeps only center content plus bottom bar.
     app_fullscreen: bool,
     /// 用户设置的新 workspace 默认 agent。
@@ -965,6 +967,7 @@ impl GsdvGuiApp {
             last_screenshot_path: None,
             theme_mode: theme::current_mode(),
             rail_collapsed: value.rail_collapsed,
+            focus_filter_enabled: value.focus_filter_enabled,
             app_fullscreen: false,
             default_agent_kind: agent_launch.kind,
             agent_launch,
@@ -2656,7 +2659,9 @@ enum OutlineFavoriteScope {
 
 enum WorkspaceRailAction {
     Switch(usize),
+    ToggleFocus(usize),
     Close(usize),
+    ToggleFocusFilter,
     ChangeDirectory(usize),
     RestartRemoteAgents(usize),
     EditRemote(usize),

@@ -44,13 +44,19 @@ impl GsdvGuiApp {
         let workspaces = self.workspaces.clone();
         let active_workspace = self.active_workspace;
         let rail_collapsed = self.rail_collapsed;
+        let focus_filter_enabled = self.focus_filter_enabled;
         let save_in_flight = Arc::clone(&self.workspace_store_save_in_flight);
         let repaint_ctx = ctx.clone();
         let repaint_controller = self.repaint_controller.clone();
         save_in_flight.store(true, Ordering::SeqCst);
         self.background_runtime.spawn(async move {
             let _ = tokio::task::spawn_blocking(move || {
-                data::save_workspace_store(&workspaces, active_workspace, rail_collapsed);
+                data::save_workspace_store(
+                    &workspaces,
+                    active_workspace,
+                    rail_collapsed,
+                    focus_filter_enabled,
+                );
             })
             .await;
             save_in_flight.store(false, Ordering::SeqCst);
