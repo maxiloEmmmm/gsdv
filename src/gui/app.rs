@@ -34,8 +34,9 @@ use crate::gui::theme;
 use crate::gui::workflow::{
     WorkflowMutationRequest, WorkflowProjectNode, WorkflowSaveRequest, WorkflowSaveSuccess,
     WorkflowSelectionTarget, WorkflowStepEditor, WorkflowStepNode, WorkflowTaskEditor,
-    WorkflowTaskNode, WorkflowTree, path_is_workflow_spec_path, workflow_root_missing_error,
-    workflow_step_editor_from_node, workflow_task_editor_from_node,
+    WorkflowTaskNode, WorkflowTree, path_is_workflow_spec_path, workflow_project_state_key,
+    workflow_project_state_key_from_path, workflow_projects, workflow_root_missing_error,
+    workflow_step_editor_from_node, workflow_task_editor_from_node, workflow_tasks, workflow_trees,
 };
 use crate::reviewer::app::{GuiReviewerRowTone, ReviewerGitDataResult};
 use eframe::egui::text_edit::{TextEditOutput, TextEditState};
@@ -1263,6 +1264,10 @@ struct WorkflowUiState {
     loading: bool,
     /// 最近一次 workflow tree 加载错误。
     load_error: Option<String>,
+    /// 是否已完成本次运行内的首次子 repo workflow 扫描。
+    sub_workflows_scanned: bool,
+    /// 最近一次扫描发现的子 repo 相对 workspace 路径。
+    sub_workflow_repo_paths: Vec<PathBuf>,
     /// 当前选中的 workflow 目标。
     selected: Option<WorkflowSelectionTarget>,
     /// 最近一次选中的 task 工作台目标，用于切回 workflow 时恢复上下文。
@@ -1754,6 +1759,8 @@ enum AppEvent {
         workspace_path: PathBuf,
         /// Remote runtime ID；本地 workspace 为 None。
         remote_runtime_id: Option<u64>,
+        /// 本次加载是否执行了子 repo 发现扫描。
+        scanned_sub_workflows: bool,
         result: Result<WorkflowTree, String>,
     },
     /// 添加 workspace 的后台准备完成。
@@ -2366,10 +2373,12 @@ enum AppDialog {
     },
     WorkflowQuickModal,
     WorkflowAddTask {
+        spec_path: PathBuf,
         project_key: String,
         key: String,
     },
     WorkflowAddProject {
+        spec_path: PathBuf,
         key: String,
     },
     WorkflowAddStep {
@@ -2378,7 +2387,7 @@ enum AppDialog {
         desc: String,
     },
     WorkflowRenameProject {
-        project_key: String,
+        project_path: PathBuf,
         key: String,
     },
     WorkflowRenameTask {
@@ -2630,6 +2639,8 @@ fn required_remote_field(value: &str, label: &str) -> Result<String, String> {
 enum WorkflowDeleteTarget {
     /// 删除整个 project 目录。
     Project {
+        /// 项目目录相对 workspace 的路径。
+        project_path: PathBuf,
         /// 项目目录名。
         project_key: String,
     },

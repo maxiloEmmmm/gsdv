@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// workspace 根目录下的 workflow 规范目录。
 const GSDV_SPEC_DIR: &str = "gsdv-spec";
@@ -19,8 +19,12 @@ const MARKDOWN_EXT: &str = "md";
 
 /// 判断路径是否属于 workspace 的 workflow 规范目录。
 pub(super) fn path_is_workflow_spec_path(workspace_root: &Path, path: &Path) -> bool {
-    let spec_root = workspace_root.join(GSDV_SPEC_DIR);
-    path == spec_root || path.starts_with(spec_root)
+    let Ok(relative) = path.strip_prefix(workspace_root) else {
+        return false;
+    };
+    relative
+        .components()
+        .any(|component| matches!(component, Component::Normal(value) if value == GSDV_SPEC_DIR))
 }
 
 /// 判断加载错误是否表示 workflow 根文件还没初始化。
@@ -31,12 +35,65 @@ pub(super) fn workflow_root_missing_error(workspace_root: &Path, error: &str) ->
 /// workflow 树加载结果。
 #[derive(Debug, Clone, Default)]
 pub(super) struct WorkflowTree {
+    /// 当前 workflow 所属 repo 相对 workspace 的路径；主 repo 为空。
+    pub repo_path: PathBuf,
     /// workspace 内相对的 gsdv-spec 目录。
     pub spec_path: PathBuf,
     /// workspace 级 workflow root.md 相对 workspace 的路径。
     pub root_path: PathBuf,
     /// 当前 workspace 的 workflow 项目列表。
     pub projects: Vec<WorkflowProjectNode>,
+    /// workspace 内手动或首次扫描发现的子 repo workflow。
+    pub sub_workflows: Vec<WorkflowTree>,
+}
+
+/// 遍历主 workflow 与已加载的子 repo workflow。
+///
+/// 适用场景：选择、校验和渲染需要统一查找所有 tree。
+/// 例：`主树 + 2 个子树 -> 3 个元素`。
+pub(super) fn workflow_trees(tree: &WorkflowTree) -> impl Iterator<Item = &WorkflowTree> {
+    std::iter::once(tree).chain(tree.sub_workflows.iter())
+}
+
+/// 遍历主 workflow 与子 repo 中的全部项目。
+///
+/// 适用场景：按 root/task 路径定位所属项目。
+/// 例：`2 棵树各 1 项目 -> 2 个项目`。
+pub(super) fn workflow_projects(tree: &WorkflowTree) -> impl Iterator<Item = &WorkflowProjectNode> {
+    workflow_trees(tree).flat_map(|tree| tree.projects.iter())
+}
+
+/// 遍历主 workflow 与子 repo 中的全部 task。
+///
+/// 适用场景：编辑器按 workspace 相对 task 路径恢复节点。
+/// 例：`所有项目 -> 所有直接 task`。
+pub(super) fn workflow_tasks(tree: &WorkflowTree) -> impl Iterator<Item = &WorkflowTaskNode> {
+    workflow_projects(tree).flat_map(|project| project.tasks.iter())
+}
+
+/// 返回跨 repo 唯一的 project 折叠状态 key。
+///
+/// 适用场景：不同 repo 可以拥有同名 project。
+/// 例：`services/api + main -> services/api/main`。
+pub(super) fn workflow_project_state_key(tree: &WorkflowTree, project_key: &str) -> String {
+    tree.repo_path
+        .join(project_key)
+        .to_string_lossy()
+        .to_string()
+}
+
+/// 从 project 目录相对路径生成折叠状态 key。
+///
+/// 适用场景：project 重命名后的状态迁移。例：`repo/gsdv-spec/ps/main -> repo/main`。
+pub(super) fn workflow_project_state_key_from_path(project_path: &Path) -> Option<String> {
+    let project_key = project_path.file_name()?.to_string_lossy();
+    let repo_path = project_path.parent()?.parent()?.parent()?;
+    Some(
+        repo_path
+            .join(project_key.as_ref())
+            .to_string_lossy()
+            .to_string(),
+    )
 }
 
 /// workflow 项目节点。
@@ -173,11 +230,15 @@ pub(super) enum WorkflowMutationRequest {
     InitRoot,
     /// 在 workflow 规范目录下创建一个项目 root.md。
     AddProject {
+        /// 目标 repo 的 gsdv-spec 相对 workspace 的路径。
+        spec_path: PathBuf,
         /// 项目目录名。
         project_key: String,
     },
     /// 在项目目录下创建一个空 task Markdown 文件。
     AddTask {
+        /// 目标 repo 的 gsdv-spec 相对 workspace 的路径。
+        spec_path: PathBuf,
         /// 项目目录名。
         project_key: String,
         /// task key，不包含 `task-` 前缀和 `.md` 后缀。
@@ -194,8 +255,8 @@ pub(super) enum WorkflowMutationRequest {
     },
     /// 重命名 workflow project 目录。
     RenameProject {
-        /// 原项目目录名。
-        project_key: String,
+        /// 原项目目录相对 workspace 的路径。
+        project_path: PathBuf,
         /// 新项目目录名。
         new_key: String,
     },
@@ -217,8 +278,8 @@ pub(super) enum WorkflowMutationRequest {
     },
     /// 删除整个 workflow project 目录。
     DeleteProject {
-        /// 项目目录名。
-        project_key: String,
+        /// 项目目录相对 workspace 的路径。
+        project_path: PathBuf,
     },
     /// 删除一个 task Markdown 文件。
     DeleteTask {
@@ -275,8 +336,51 @@ pub(super) fn workflow_step_editor_from_node(
 
 /// 从 workspace 根目录加载 workflow tree。
 pub(super) fn load_workflow_tree(workspace_root: &Path) -> Result<WorkflowTree, String> {
-    let spec_root = workspace_root.join(GSDV_SPEC_DIR);
-    let root_md = workflow_root_path(workspace_root);
+    load_workflow_tree_at_repo(workspace_root, Path::new(""))
+}
+
+/// 加载主 workflow，并按需扫描或复用已发现的子 repo。
+///
+/// 适用场景：首次打开传 `scan_sub_workflows=true`，文件刷新复用缓存路径。
+/// 例：`known=[services/api] -> 主树 + services/api 子树`。
+pub(super) fn load_workflow_tree_with_sub_workflows(
+    workspace_root: &Path,
+    scan_sub_workflows: bool,
+    known_repo_paths: &[PathBuf],
+) -> Result<WorkflowTree, String> {
+    let mut tree = load_workflow_tree(workspace_root)?;
+    let repo_paths = if scan_sub_workflows {
+        discover_nested_git_repo_paths(workspace_root)?
+    } else {
+        known_repo_paths.to_vec()
+    };
+    for repo_path in repo_paths {
+        let root_path = workspace_root
+            .join(&repo_path)
+            .join(GSDV_SPEC_DIR)
+            .join(ROOT_MD);
+        if !root_path.is_file() {
+            continue;
+        }
+        tree.sub_workflows
+            .push(load_workflow_tree_at_repo(workspace_root, &repo_path)?);
+    }
+    tree.sub_workflows
+        .sort_by(|left, right| left.repo_path.cmp(&right.repo_path));
+    Ok(tree)
+}
+
+/// 从 workspace 内指定 repo 根加载一棵 workflow tree。
+///
+/// 适用场景：主 repo 使用空路径，子 repo 使用 workspace 相对路径。
+/// 例：`services/api -> services/api/gsdv-spec/root.md`。
+fn load_workflow_tree_at_repo(
+    workspace_root: &Path,
+    repo_path: &Path,
+) -> Result<WorkflowTree, String> {
+    let repo_root = workspace_root.join(repo_path);
+    let spec_root = repo_root.join(GSDV_SPEC_DIR);
+    let root_md = spec_root.join(ROOT_MD);
     if !root_md.is_file() {
         return Err(format!("{} not found", root_md.display()));
     }
@@ -299,10 +403,60 @@ pub(super) fn load_workflow_tree(workspace_root: &Path) -> Result<WorkflowTree, 
         });
     }
     Ok(WorkflowTree {
-        spec_path: PathBuf::from(GSDV_SPEC_DIR),
+        repo_path: repo_path.to_path_buf(),
+        spec_path: relative_to_workspace(workspace_root, &spec_root),
         root_path: relative_to_workspace(workspace_root, &root_md),
         projects,
+        sub_workflows: Vec::new(),
     })
+}
+
+/// 扫描 workspace 下最近一层嵌套 Git repo 的 workflow 路径。
+///
+/// 触发条件：首次打开 workflow 或用户手动扫描。
+/// 不能在命中 `.git` 后继续递归：一个 repo 可能包含大量依赖目录。
+/// 防止回归：嵌套 repo 内部再次扫描造成重复树和额外 IO。
+fn discover_nested_git_repo_paths(workspace_root: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut repo_paths = Vec::new();
+    discover_nested_git_repo_paths_in(workspace_root, Path::new(""), &mut repo_paths)?;
+    repo_paths.sort();
+    repo_paths.dedup();
+    Ok(repo_paths)
+}
+
+/// 递归扫描尚未命中 Git 边界的目录。
+///
+/// 适用场景：workspace 根自身的 `.git` 不参与判断，只检查其子目录。
+/// 例：`services/api/.git -> services/api`，并停止进入 `services/api`。
+fn discover_nested_git_repo_paths_in(
+    workspace_root: &Path,
+    relative_dir: &Path,
+    repo_paths: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    let absolute_dir = workspace_root.join(relative_dir);
+    let entries = fs::read_dir(&absolute_dir)
+        .map_err(|error| format!("failed to read {}: {error}", absolute_dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let file_type = entry.file_type().map_err(|error| error.to_string())?;
+        if !file_type.is_dir() || file_type.is_symlink() {
+            continue;
+        }
+        let name = entry.file_name();
+        if name == ".git" {
+            continue;
+        }
+        let child_relative = relative_dir.join(&name);
+        let child_absolute = entry.path();
+        if fs::symlink_metadata(child_absolute.join(".git")).is_ok() {
+            if child_absolute.join(GSDV_SPEC_DIR).join(ROOT_MD).is_file() {
+                repo_paths.push(child_relative);
+            }
+            continue;
+        }
+        discover_nested_git_repo_paths_in(workspace_root, &child_relative, repo_paths)?;
+    }
+    Ok(())
 }
 
 /// 从已读取的 workflow 文档集合构建 tree。
@@ -313,7 +467,37 @@ pub(super) fn load_workflow_tree_from_documents(
     workspace_root: &Path,
     documents: &BTreeMap<PathBuf, String>,
 ) -> Result<WorkflowTree, String> {
-    let root_path = PathBuf::from(GSDV_SPEC_DIR).join(ROOT_MD);
+    let mut tree =
+        load_workflow_tree_from_documents_at_repo(workspace_root, documents, Path::new(""))?;
+    let mut repo_paths = documents
+        .keys()
+        .filter_map(|path| workflow_document_repo_path(path))
+        .filter(|path| !path.as_os_str().is_empty())
+        .collect::<Vec<_>>();
+    repo_paths.sort();
+    repo_paths.dedup();
+    for repo_path in repo_paths {
+        tree.sub_workflows
+            .push(load_workflow_tree_from_documents_at_repo(
+                workspace_root,
+                documents,
+                &repo_path,
+            )?);
+    }
+    Ok(tree)
+}
+
+/// 从远端文档集合加载指定 repo 的 workflow tree。
+///
+/// 适用场景：一份 SSH inventory 同时携带主 repo 和多个子 repo 文档。
+/// 例：`services/api + documents -> 子 WorkflowTree`。
+fn load_workflow_tree_from_documents_at_repo(
+    workspace_root: &Path,
+    documents: &BTreeMap<PathBuf, String>,
+    repo_path: &Path,
+) -> Result<WorkflowTree, String> {
+    let spec_path = repo_path.join(GSDV_SPEC_DIR);
+    let root_path = spec_path.join(ROOT_MD);
     if !documents.contains_key(&root_path) {
         return Err(format!(
             "{} not found",
@@ -321,7 +505,7 @@ pub(super) fn load_workflow_tree_from_documents(
         ));
     }
 
-    let projects_root = PathBuf::from(GSDV_SPEC_DIR).join(PROJECTS_DIR);
+    let projects_root = spec_path.join(PROJECTS_DIR);
     let mut project_keys = documents
         .keys()
         .filter_map(|path| {
@@ -375,10 +559,32 @@ pub(super) fn load_workflow_tree_from_documents(
         .collect();
 
     Ok(WorkflowTree {
-        spec_path: PathBuf::from(GSDV_SPEC_DIR),
+        repo_path: repo_path.to_path_buf(),
+        spec_path,
         root_path,
         projects,
+        sub_workflows: Vec::new(),
     })
+}
+
+/// 从一条远端 inventory 文档路径识别其 repo 相对路径。
+///
+/// 适用场景：`services/api/gsdv-spec/root.md -> services/api`。
+/// 例：主 `gsdv-spec/root.md -> 空路径`。
+fn workflow_document_repo_path(path: &Path) -> Option<PathBuf> {
+    if path.file_name()? != ROOT_MD {
+        return None;
+    }
+    let spec_path = path.parent()?;
+    if spec_path.file_name()? != GSDV_SPEC_DIR {
+        return None;
+    }
+    Some(
+        spec_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default(),
+    )
 }
 
 /// 从一个项目目录加载 task 文档列表。
@@ -563,22 +769,24 @@ pub(super) fn apply_workflow_mutation(
 ) -> Result<(), String> {
     match request {
         WorkflowMutationRequest::InitRoot => init_workflow_root(workspace_root),
-        WorkflowMutationRequest::AddProject { project_key } => {
-            add_workflow_project(workspace_root, &project_key)
-        }
+        WorkflowMutationRequest::AddProject {
+            spec_path,
+            project_key,
+        } => add_workflow_project(workspace_root, &spec_path, &project_key),
         WorkflowMutationRequest::AddTask {
+            spec_path,
             project_key,
             task_key,
-        } => add_workflow_task(workspace_root, &project_key, &task_key),
+        } => add_workflow_task(workspace_root, &spec_path, &project_key, &task_key),
         WorkflowMutationRequest::AddStep {
             task_path,
             key,
             desc,
         } => add_workflow_step(workspace_root, &task_path, &key, &desc),
         WorkflowMutationRequest::RenameProject {
-            project_key,
+            project_path,
             new_key,
-        } => rename_workflow_project(workspace_root, &project_key, &new_key),
+        } => rename_workflow_project(workspace_root, &project_path, &new_key),
         WorkflowMutationRequest::RenameTask { task_path, new_key } => {
             rename_workflow_task(workspace_root, &task_path, &new_key)
         }
@@ -587,8 +795,8 @@ pub(super) fn apply_workflow_mutation(
             step_path,
             new_key,
         } => rename_workflow_step(workspace_root, &task_path, &step_path, &new_key),
-        WorkflowMutationRequest::DeleteProject { project_key } => {
-            delete_workflow_project(workspace_root, &project_key)
+        WorkflowMutationRequest::DeleteProject { project_path } => {
+            delete_workflow_project(workspace_root, &project_path)
         }
         WorkflowMutationRequest::DeleteTask { task_path } => {
             delete_workflow_task(workspace_root, &task_path)
@@ -617,6 +825,34 @@ pub(super) fn validate_workflow_key(key: &str) -> Result<&str, String> {
         return Err("Key cannot contain path separators".to_string());
     }
     Ok(key)
+}
+
+/// 校验 workflow 路径是 workspace 内含 gsdv-spec 的普通相对路径。
+///
+/// 适用场景：本地和 Remote mutation 共用路径边界检查。
+/// 例：`services/api/gsdv-spec/ps/main -> Ok`，`../x -> Err`。
+pub(super) fn validate_workflow_relative_path(path: &Path) -> Result<(), String> {
+    let mut contains_spec = false;
+    let mut has_component = false;
+    for component in path.components() {
+        let Component::Normal(value) = component else {
+            return Err(format!("workflow path is unsafe: {}", path.display()));
+        };
+        has_component = true;
+        if value == GSDV_SPEC_DIR {
+            contains_spec = true;
+        }
+        if value.to_string_lossy().contains('\\') {
+            return Err(format!("workflow path is unsafe: {}", path.display()));
+        }
+    }
+    if !has_component || !contains_spec {
+        return Err(format!(
+            "workflow path is outside gsdv-spec: {}",
+            path.display()
+        ));
+    }
+    Ok(())
 }
 
 /// 校验 workflow step 标题是否能作为单行 Markdown heading。
@@ -661,10 +897,15 @@ fn workflow_root_path(workspace_root: &Path) -> PathBuf {
 }
 
 /// 创建 workflow project 根文件。
-fn add_workflow_project(workspace_root: &Path, project_key: &str) -> Result<(), String> {
+fn add_workflow_project(
+    workspace_root: &Path,
+    spec_path: &Path,
+    project_key: &str,
+) -> Result<(), String> {
+    validate_workflow_relative_path(spec_path)?;
     let project_key = validate_workflow_key(project_key)?;
     let project_dir = workspace_root
-        .join(GSDV_SPEC_DIR)
+        .join(spec_path)
         .join(PROJECTS_DIR)
         .join(project_key);
     let root_path = project_dir.join(ROOT_MD);
@@ -680,13 +921,15 @@ fn add_workflow_project(workspace_root: &Path, project_key: &str) -> Result<(), 
 /// 在项目目录下创建空 task Markdown 文件。
 fn add_workflow_task(
     workspace_root: &Path,
+    spec_path: &Path,
     project_key: &str,
     task_key: &str,
 ) -> Result<(), String> {
+    validate_workflow_relative_path(spec_path)?;
     let project_key = validate_workflow_key(project_key)?;
     let task_key = validate_workflow_key(task_key)?;
     let project_dir = workspace_root
-        .join(GSDV_SPEC_DIR)
+        .join(spec_path)
         .join(PROJECTS_DIR)
         .join(project_key);
     if !project_dir.is_dir() {
@@ -738,16 +981,31 @@ fn add_workflow_step_content(content: &str, key: &str, desc: &str) -> Result<Str
 /// 重命名 workflow project 目录。
 fn rename_workflow_project(
     workspace_root: &Path,
-    project_key: &str,
+    project_path: &Path,
     new_key: &str,
 ) -> Result<(), String> {
+    validate_workflow_relative_path(project_path)?;
+    let project_key = project_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            format!(
+                "workflow project path is invalid: {}",
+                project_path.display()
+            )
+        })?;
     let project_key = validate_workflow_key(project_key)?;
     let new_key = validate_workflow_key(new_key)?;
     if project_key == new_key {
         return Ok(());
     }
-    let projects_dir = workspace_root.join(GSDV_SPEC_DIR).join(PROJECTS_DIR);
-    let old_dir = projects_dir.join(project_key);
+    let old_dir = workspace_root.join(project_path);
+    let projects_dir = old_dir.parent().ok_or_else(|| {
+        format!(
+            "workflow project parent not found: {}",
+            project_path.display()
+        )
+    })?;
     let new_dir = projects_dir.join(new_key);
     if !old_dir.is_dir() {
         return Err(format!("workflow project not found: {project_key}"));
@@ -838,14 +1096,14 @@ fn rename_workflow_step_content(
 }
 
 /// 删除 workflow project 目录。
-fn delete_workflow_project(workspace_root: &Path, project_key: &str) -> Result<(), String> {
-    let project_key = validate_workflow_key(project_key)?;
-    let project_dir = workspace_root
-        .join(GSDV_SPEC_DIR)
-        .join(PROJECTS_DIR)
-        .join(project_key);
+fn delete_workflow_project(workspace_root: &Path, project_path: &Path) -> Result<(), String> {
+    validate_workflow_relative_path(project_path)?;
+    let project_dir = workspace_root.join(project_path);
     if !project_dir.is_dir() {
-        return Err(format!("workflow project not found: {project_key}"));
+        return Err(format!(
+            "workflow project not found: {}",
+            project_path.display()
+        ));
     }
     fs::remove_dir_all(&project_dir)
         .map_err(|error| format!("failed to delete {}: {error}", project_dir.display()))

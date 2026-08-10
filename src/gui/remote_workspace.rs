@@ -15,7 +15,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// SSH 密码认证配置。
@@ -474,8 +474,15 @@ pub(super) fn load_remote_workflow_tree(
     config: &RemoteWorkspaceConfig,
     shell: RemoteShell,
     workspace_path: &Path,
+    scan_sub_workflows: bool,
+    known_repo_paths: &[PathBuf],
 ) -> Result<WorkflowTree, String> {
-    let command = remote_workflow_inventory_command(shell, workspace_path);
+    let command = remote_workflow_inventory_command(
+        shell,
+        workspace_path,
+        scan_sub_workflows,
+        known_repo_paths,
+    )?;
     let output = run_ssh_command(config, &command).map_err(|error| error.to_string())?;
     let documents = parse_remote_workflow_inventory(&output).map_err(|error| error.to_string())?;
     workflow::load_workflow_tree_from_documents(workspace_path, &documents)
@@ -526,12 +533,13 @@ pub(super) fn apply_remote_workflow_mutation(
                 remote_workflow_create_file_command(shell, &absolute, None, true),
             )
         }
-        WorkflowMutationRequest::AddProject { project_key } => {
+        WorkflowMutationRequest::AddProject {
+            spec_path,
+            project_key,
+        } => {
+            validate_remote_workflow_relative_path(spec_path)?;
             let project_key = workflow::validate_workflow_key(project_key)?;
-            let relative = PathBuf::from("gsdv-spec")
-                .join("ps")
-                .join(project_key)
-                .join("root.md");
+            let relative = spec_path.join("ps").join(project_key).join("root.md");
             let absolute = remote_workflow_path(shell, workspace_path, &relative)?;
             run_remote_workflow_command(
                 config,
@@ -539,12 +547,14 @@ pub(super) fn apply_remote_workflow_mutation(
             )
         }
         WorkflowMutationRequest::AddTask {
+            spec_path,
             project_key,
             task_key,
         } => {
+            validate_remote_workflow_relative_path(spec_path)?;
             let project_key = workflow::validate_workflow_key(project_key)?;
             let task_key = workflow::validate_workflow_key(task_key)?;
-            let project_relative = PathBuf::from("gsdv-spec").join("ps").join(project_key);
+            let project_relative = spec_path.join("ps").join(project_key);
             let relative = project_relative.join(format!("task-{task_key}.md"));
             let project = remote_workflow_path(shell, workspace_path, &project_relative)?;
             let absolute = remote_workflow_path(shell, workspace_path, &relative)?;
@@ -554,17 +564,31 @@ pub(super) fn apply_remote_workflow_mutation(
             )
         }
         WorkflowMutationRequest::RenameProject {
-            project_key,
+            project_path,
             new_key,
         } => {
+            validate_remote_workflow_relative_path(project_path)?;
+            let project_key = project_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    format!(
+                        "workflow project path is invalid: {}",
+                        project_path.display()
+                    )
+                })?;
             let project_key = workflow::validate_workflow_key(project_key)?;
             let new_key = workflow::validate_workflow_key(new_key)?;
             if project_key == new_key {
                 return Ok(());
             }
-            let projects = PathBuf::from("gsdv-spec").join("ps");
-            let old_path =
-                remote_workflow_path(shell, workspace_path, &projects.join(project_key))?;
+            let projects = project_path.parent().ok_or_else(|| {
+                format!(
+                    "workflow project parent not found: {}",
+                    project_path.display()
+                )
+            })?;
+            let old_path = remote_workflow_path(shell, workspace_path, project_path)?;
             let new_path = remote_workflow_path(shell, workspace_path, &projects.join(new_key))?;
             run_remote_workflow_command(
                 config,
@@ -587,10 +611,8 @@ pub(super) fn apply_remote_workflow_mutation(
                 remote_workflow_rename_command(shell, &old_path, &new_path, false),
             )
         }
-        WorkflowMutationRequest::DeleteProject { project_key } => {
-            let project_key = workflow::validate_workflow_key(project_key)?;
-            let relative = PathBuf::from("gsdv-spec").join("ps").join(project_key);
-            let absolute = remote_workflow_path(shell, workspace_path, &relative)?;
+        WorkflowMutationRequest::DeleteProject { project_path } => {
+            let absolute = remote_workflow_path(shell, workspace_path, project_path)?;
             run_remote_workflow_command(
                 config,
                 remote_workflow_delete_command(shell, &absolute, true),
@@ -610,22 +632,59 @@ pub(super) fn apply_remote_workflow_mutation(
 ///
 /// 适用场景：一次 SSH 读取 root、project root 和直接 task 文档。
 /// 例：`/repo -> GSDV-WF 长度帧`。
-fn remote_workflow_inventory_command(shell: RemoteShell, workspace_path: &Path) -> String {
-    match shell {
+fn remote_workflow_inventory_command(
+    shell: RemoteShell,
+    workspace_path: &Path,
+    scan_sub_workflows: bool,
+    known_repo_paths: &[PathBuf],
+) -> Result<String, String> {
+    let mut repo_paths = Vec::new();
+    for repo_path in known_repo_paths {
+        if repo_path.as_os_str().is_empty() {
+            continue;
+        }
+        validate_remote_workflow_relative_path(&repo_path.join("gsdv-spec"))?;
+        repo_paths.push(repo_path.to_string_lossy().replace('\\', "/"));
+    }
+    Ok(match shell {
         RemoteShell::Posix => {
             let workspace = posix_quote_str(&workspace_path.to_string_lossy());
+            let cached = repo_paths
+                .iter()
+                .map(|repo_path| {
+                    let repo = posix_quote_str(repo_path);
+                    format!("r={repo}; T \"$w/$r\" \"$r\";")
+                })
+                .collect::<String>();
+            let sub_workflows = if scan_sub_workflows {
+                "S \"$w\" '';".to_string()
+            } else {
+                cached
+            };
             format!(
-                "w={workspace}; s=\"$w/gsdv-spec\"; emit() {{ f=$1; r=$2; [ -f \"$f\" ] || return 0; pn=$(printf %s \"$r\" | wc -c); cn=$(wc -c <\"$f\"); printf 'GSDV-WF %s %s\\n' \"$pn\" \"$cn\"; printf %s \"$r\"; printf '\\n'; cat \"$f\"; printf '\\n'; }}; emit \"$s/root.md\" 'gsdv-spec/root.md'; p=\"$s/ps\"; if [ -d \"$p\" ]; then for d in \"$p\"/*; do [ -d \"$d\" ] || continue; k=${{d##*/}}; emit \"$d/root.md\" \"gsdv-spec/ps/$k/root.md\"; for f in \"$d\"/task-*.md; do [ -f \"$f\" ] || continue; n=${{f##*/}}; emit \"$f\" \"gsdv-spec/ps/$k/$n\"; done; done; fi"
+                "w={workspace}; E() {{ f=$1; r=$2; [ -f \"$f\" ] || return 0; pn=$(printf %s \"$r\" | wc -c); cn=$(wc -c <\"$f\"); printf 'GSDV-WF %s %s\\n' \"$pn\" \"$cn\"; printf %s \"$r\"; printf '\\n'; cat \"$f\"; printf '\\n'; }}; T() {{ b=$1; r=$2; s=\"$b/gsdv-spec\"; q=${{r:+$r/}}gsdv-spec; E \"$s/root.md\" \"$q/root.md\"; p=\"$s/ps\"; if [ -d \"$p\" ]; then for d in \"$p\"/*; do [ -d \"$d\" ] || continue; k=${{d##*/}}; E \"$d/root.md\" \"$q/ps/$k/root.md\"; for f in \"$d\"/task-*.md; do [ -f \"$f\" ] || continue; n=${{f##*/}}; E \"$f\" \"$q/ps/$k/$n\"; done; done; fi; }}; S() {{ b=$1; r=$2; for d in \"$b\"/* \"$b\"/.[!.]* \"$b\"/..?*; do [ -d \"$d\" ] || continue; [ -L \"$d\" ] && continue; n=${{d##*/}}; [ \"$n\" = .git ] && continue; q=${{r:+$r/}}$n; g=\"$d/.git\"; if [ -e \"$g\" ] || [ -L \"$g\" ]; then [ -f \"$d/gsdv-spec/root.md\" ] && T \"$d\" \"$q\"; else S \"$d\" \"$q\"; fi; done; }}; T \"$w\" ''; {sub_workflows}"
             )
         }
         RemoteShell::PowerShell | RemoteShell::Cmd => {
             let workspace = powershell_quote(&workspace_path.to_string_lossy());
+            let cached = repo_paths
+                .iter()
+                .map(|repo_path| {
+                    let repo = powershell_quote(repo_path);
+                    format!("$r={repo};T (Join-Path $w $r) $r;")
+                })
+                .collect::<String>();
+            let sub_workflows = if scan_sub_workflows {
+                "S $w '';".to_string()
+            } else {
+                cached
+            };
             let script = format!(
-                "$o=[Console]::OpenStandardOutput();function W([string]$s){{$b=[Text.Encoding]::UTF8.GetBytes($s);$o.Write($b,0,$b.Length)}};function E([string]$f,[string]$r){{if([IO.File]::Exists($f)){{$p=[Text.Encoding]::UTF8.GetBytes($r);$b=[IO.File]::ReadAllBytes($f);W(('GSDV-WF '+$p.Length+' '+$b.Length+[char]10));$o.Write($p,0,$p.Length);W([string][char]10);$o.Write($b,0,$b.Length);W([string][char]10)}}}};$w={workspace};$s=Join-Path $w 'gsdv-spec';E (Join-Path $s 'root.md') 'gsdv-spec/root.md';$p=Join-Path $s 'ps';if([IO.Directory]::Exists($p)){{foreach($d in [IO.Directory]::GetDirectories($p)){{$k=[IO.Path]::GetFileName($d);E (Join-Path $d 'root.md') ('gsdv-spec/ps/'+$k+'/root.md');foreach($f in [IO.Directory]::GetFiles($d,'task-*.md')){{$n=[IO.Path]::GetFileName($f);E $f ('gsdv-spec/ps/'+$k+'/'+$n)}}}}}}"
+                "$o=[Console]::OpenStandardOutput();function W([string]$s){{$b=[Text.Encoding]::UTF8.GetBytes($s);$o.Write($b,0,$b.Length)}};function E([string]$f,[string]$r){{if([IO.File]::Exists($f)){{$p=[Text.Encoding]::UTF8.GetBytes($r);$b=[IO.File]::ReadAllBytes($f);W(('GSDV-WF '+$p.Length+' '+$b.Length+[char]10));$o.Write($p,0,$p.Length);W([string][char]10);$o.Write($b,0,$b.Length);W([string][char]10)}}}};function T([string]$b,[string]$r){{$s=Join-Path $b 'gsdv-spec';$q=if($r){{$r+'/gsdv-spec'}}else{{'gsdv-spec'}};E (Join-Path $s 'root.md') ($q+'/root.md');$p=Join-Path $s 'ps';if([IO.Directory]::Exists($p)){{foreach($d in [IO.Directory]::GetDirectories($p)){{$k=[IO.Path]::GetFileName($d);E (Join-Path $d 'root.md') ($q+'/ps/'+$k+'/root.md');foreach($f in [IO.Directory]::GetFiles($d,'task-*.md')){{$n=[IO.Path]::GetFileName($f);E $f ($q+'/ps/'+$k+'/'+$n)}}}}}}}};function S([string]$b,[string]$r){{foreach($d in [IO.Directory]::GetDirectories($b)){{$a=[IO.File]::GetAttributes($d);if(($a -band [IO.FileAttributes]::ReparsePoint) -ne 0){{continue}};$n=[IO.Path]::GetFileName($d);if($n -eq '.git'){{continue}};$q=if($r){{$r+'/'+$n}}else{{$n}};$g=Join-Path $d '.git';if([IO.File]::Exists($g) -or [IO.Directory]::Exists($g)){{if([IO.File]::Exists((Join-Path $d 'gsdv-spec/root.md'))){{T $d $q}}}}else{{S $d $q}}}}}};$w={workspace};T $w '';{sub_workflows}"
             );
             wrap_powershell_command(shell, script)
         }
-    }
+    })
 }
 
 /// 解析远端 workflow 长度帧为 UTF-8 文档集合。
@@ -715,20 +774,7 @@ fn remote_workflow_path(
 /// 适用场景：拒绝 `..`、绝对路径和平台分隔符绕过。
 /// 例：`gsdv-spec/../x -> Err`。
 fn validate_remote_workflow_relative_path(path: &Path) -> Result<(), String> {
-    let mut components = path.components();
-    if components.next() != Some(Component::Normal("gsdv-spec".as_ref())) {
-        return Err(format!(
-            "workflow path is outside gsdv-spec: {}",
-            path.display()
-        ));
-    }
-    if components.any(|component| match component {
-        Component::Normal(value) => value.to_string_lossy().contains('\\'),
-        _ => true,
-    }) {
-        return Err(format!("workflow path is unsafe: {}", path.display()));
-    }
-    Ok(())
+    workflow::validate_workflow_relative_path(path)
 }
 
 /// 读取一个远端 workflow UTF-8 文件。
