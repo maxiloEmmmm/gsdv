@@ -235,12 +235,25 @@ impl GsdvGuiApp {
         let selected = state.selected.as_ref()?;
         let tree = state.tree.as_ref()?;
         match selected {
-            WorkflowSelectionTarget::WorkspaceRoot { .. } => Some("root.md".to_string()),
-            WorkflowSelectionTarget::Project { root_path } => tree
-                .projects
-                .iter()
-                .find(|project| project.root_path == *root_path)
-                .map(|project| project.label.clone()),
+            WorkflowSelectionTarget::WorkspaceRoot { root_path } => workflow_trees(tree)
+                .find(|tree| tree.root_path == *root_path)
+                .map(|tree| {
+                    let mut parts = workflow_repo_copy_parts(&tree.repo_path);
+                    parts.push("root.md".to_string());
+                    workflow_copy_path_from_parts(&parts)
+                }),
+            WorkflowSelectionTarget::Project { root_path } => {
+                workflow_trees(tree).find_map(|tree| {
+                    tree.projects
+                        .iter()
+                        .find(|project| project.root_path == *root_path)
+                        .map(|project| {
+                            let mut parts = workflow_repo_copy_parts(&tree.repo_path);
+                            parts.push(project.label.clone());
+                            workflow_copy_path_from_parts(&parts)
+                        })
+                })
+            }
             WorkflowSelectionTarget::Task { task_path } => {
                 workflow_task_copy_path_from_tree(tree, task_path)
             }
@@ -264,6 +277,31 @@ impl GsdvGuiApp {
 
     /// 请求刷新指定 workspace 的 workflow tree。
     pub(super) fn request_workflow_tree_refresh(&mut self, ctx: &egui::Context, index: usize) {
+        let scan_sub_workflows = self
+            .workflow_states
+            .get(index)
+            .is_some_and(|state| !state.sub_workflows_scanned);
+        self.request_workflow_tree_refresh_with_scan(ctx, index, scan_sub_workflows);
+    }
+
+    /// 手动重新扫描指定 workspace 的子 repo workflow。
+    ///
+    /// 适用场景：Work-flow tab 右键菜单显式发现新增 repo。
+    /// 例：运行期间新增 `services/api/.git` -> 扫描后加入 tree。
+    pub(super) fn request_sub_workflow_scan(&mut self, ctx: &egui::Context, index: usize) {
+        self.request_workflow_tree_refresh_with_scan(ctx, index, true);
+    }
+
+    /// 按指定扫描策略请求 workflow tree 刷新。
+    ///
+    /// 适用场景：首次/手动扫描发现 repo，普通 watcher 刷新复用缓存。
+    /// 例：`scan=false + cached=[api] -> 只加载主 repo 和 api`。
+    fn request_workflow_tree_refresh_with_scan(
+        &mut self,
+        ctx: &egui::Context,
+        index: usize,
+        scan_sub_workflows: bool,
+    ) {
         let Some(state) = self.workflow_states.get_mut(index) else {
             return;
         };
@@ -275,7 +313,14 @@ impl GsdvGuiApp {
         };
         state.loading = true;
         state.load_error = None;
-        self.spawn_workflow_tree_load_task(ctx, index, workspace.path.clone());
+        let known_repo_paths = state.sub_workflow_repo_paths.clone();
+        self.spawn_workflow_tree_load_task(
+            ctx,
+            index,
+            workspace.path.clone(),
+            scan_sub_workflows,
+            known_repo_paths,
+        );
     }
 
     /// 后台加载 workflow tree。
@@ -284,6 +329,8 @@ impl GsdvGuiApp {
         ctx: &egui::Context,
         index: usize,
         workspace_path: PathBuf,
+        scan_sub_workflows: bool,
+        known_repo_paths: Vec<PathBuf>,
     ) {
         let remote_runtime_id = self
             .remote_workspaces
@@ -297,10 +344,18 @@ impl GsdvGuiApp {
         self.background_runtime.spawn(async move {
             let event_workspace_path = workspace_path.clone();
             let result = tokio::task::spawn_blocking(move || match remote {
-                Ok(Some((config, shell))) => {
-                    remote_workspace::load_remote_workflow_tree(&config, shell, &workspace_path)
-                }
-                Ok(None) => crate::gui::workflow::load_workflow_tree(&workspace_path),
+                Ok(Some((config, shell))) => remote_workspace::load_remote_workflow_tree(
+                    &config,
+                    shell,
+                    &workspace_path,
+                    scan_sub_workflows,
+                    &known_repo_paths,
+                ),
+                Ok(None) => crate::gui::workflow::load_workflow_tree_with_sub_workflows(
+                    &workspace_path,
+                    scan_sub_workflows,
+                    &known_repo_paths,
+                ),
                 Err(error) => Err(error),
             })
             .await
@@ -309,6 +364,7 @@ impl GsdvGuiApp {
                 index,
                 workspace_path: event_workspace_path,
                 remote_runtime_id,
+                scanned_sub_workflows: scan_sub_workflows,
                 result,
             });
             repaint_controller.request_repaint(&repaint_ctx);
@@ -322,6 +378,7 @@ impl GsdvGuiApp {
         index: usize,
         workspace_path: PathBuf,
         remote_runtime_id: Option<u64>,
+        scanned_sub_workflows: bool,
         result: Result<WorkflowTree, String>,
     ) {
         if !self.workflow_request_identity_matches(index, &workspace_path, remote_runtime_id) {
@@ -335,11 +392,21 @@ impl GsdvGuiApp {
         let mut pending_target_mode = WorkflowTargetOpenMode::Workspace;
         match result {
             Ok(tree) => {
-                let project_keys: BTreeSet<String> = tree
-                    .projects
-                    .iter()
-                    .map(|project| project.key.clone())
+                let project_keys: BTreeSet<String> = workflow_trees(&tree)
+                    .flat_map(|tree| {
+                        tree.projects
+                            .iter()
+                            .map(|project| workflow_project_state_key(tree, &project.key))
+                    })
                     .collect();
+                state.sub_workflow_repo_paths = tree
+                    .sub_workflows
+                    .iter()
+                    .map(|tree| tree.repo_path.clone())
+                    .collect();
+                if scanned_sub_workflows {
+                    state.sub_workflows_scanned = true;
+                }
                 let pending_task_restore = state.pending_task_restore_after_load.take();
                 state
                     .collapsed_project_keys
@@ -556,9 +623,7 @@ impl GsdvGuiApp {
     fn workflow_editor_for_task(&self, task_path: &Path) -> Option<WorkflowTaskEditor> {
         let state = self.workflow_states.get(self.active_workspace)?;
         let tree = state.tree.as_ref()?;
-        tree.projects
-            .iter()
-            .flat_map(|project| project.tasks.iter())
+        workflow_tasks(tree)
             .find(|task| task.path == task_path)
             .map(workflow_task_editor_from_node)
     }
@@ -571,13 +636,11 @@ impl GsdvGuiApp {
     ) -> Option<WorkflowStepEditor> {
         let state = self.workflow_states.get(self.active_workspace)?;
         let tree = state.tree.as_ref()?;
-        for project in &tree.projects {
-            for task in &project.tasks {
-                if task.path == task_path
-                    && let Some(node) = workflow_step_node_at_path(&task.steps, step_path)
-                {
-                    return Some(workflow_step_editor_from_node(task_path, node));
-                }
+        for task in workflow_tasks(tree) {
+            if task.path == task_path
+                && let Some(node) = workflow_step_node_at_path(&task.steps, step_path)
+            {
+                return Some(workflow_step_editor_from_node(task_path, node));
             }
         }
         None
@@ -840,16 +903,24 @@ impl GsdvGuiApp {
     fn cleanup_after_workflow_mutation(&mut self, index: usize, request: &WorkflowMutationRequest) {
         match request {
             WorkflowMutationRequest::RenameProject {
-                project_key,
+                project_path,
                 new_key,
             } => {
-                let old_prefix = PathBuf::from("gsdv-spec").join("ps").join(project_key);
-                let new_prefix = PathBuf::from("gsdv-spec").join("ps").join(new_key);
+                let old_prefix = project_path.clone();
+                let new_prefix = project_path
+                    .parent()
+                    .map(|parent| parent.join(new_key))
+                    .unwrap_or_else(|| PathBuf::from(new_key));
                 self.rename_workflow_document_prefix(index, &old_prefix, &new_prefix);
-                if let Some(state) = self.workflow_states.get_mut(index)
-                    && state.collapsed_project_keys.remove(project_key)
-                {
-                    state.collapsed_project_keys.insert(new_key.clone());
+                if let Some(state) = self.workflow_states.get_mut(index) {
+                    let old_state_key = workflow_project_state_key_from_path(project_path);
+                    let new_state_key = workflow_project_state_key_from_path(&new_prefix);
+                    if let (Some(old_state_key), Some(new_state_key)) =
+                        (old_state_key, new_state_key)
+                        && state.collapsed_project_keys.remove(&old_state_key)
+                    {
+                        state.collapsed_project_keys.insert(new_state_key);
+                    }
                 }
             }
             WorkflowMutationRequest::RenameTask { task_path, new_key } => {
@@ -863,9 +934,8 @@ impl GsdvGuiApp {
             } => {
                 self.clear_workflow_editor_for_step_subtree(index, task_path, step_path);
             }
-            WorkflowMutationRequest::DeleteProject { project_key } => {
-                let prefix = PathBuf::from("gsdv-spec").join("ps").join(project_key);
-                self.clear_workflow_document_under_prefix(index, &prefix);
+            WorkflowMutationRequest::DeleteProject { project_path } => {
+                self.clear_workflow_document_under_prefix(index, project_path);
             }
             WorkflowMutationRequest::DeleteTask { task_path } => {
                 self.clear_workflow_document_path(index, task_path);
@@ -900,12 +970,7 @@ impl GsdvGuiApp {
         let Some(tree) = state.tree.as_ref() else {
             return;
         };
-        let Some(task) = tree
-            .projects
-            .iter()
-            .flat_map(|project| project.tasks.iter())
-            .find(|task| task.path == task_path)
-        else {
+        let Some(task) = workflow_tasks(tree).find(|task| task.path == task_path) else {
             return;
         };
         state.pending_target_after_save = Some(WorkflowSelectionTarget::Step {
@@ -1073,20 +1138,25 @@ impl GsdvGuiApp {
     ) -> Option<String> {
         match request {
             WorkflowMutationRequest::InitRoot => None,
-            WorkflowMutationRequest::AddProject { project_key } => {
+            WorkflowMutationRequest::AddProject {
+                spec_path,
+                project_key,
+            } => {
                 if let Err(error) = crate::gui::workflow::validate_workflow_key(project_key) {
                     return Some(error);
                 }
-                self.workflow_project_duplicate_error("", project_key)
+                self.workflow_project_duplicate_error(spec_path, "", project_key)
             }
             WorkflowMutationRequest::AddTask {
+                spec_path,
                 project_key,
                 task_key,
             } => {
                 if let Err(error) = crate::gui::workflow::validate_workflow_key(task_key) {
                     return Some(error);
                 }
-                self.workflow_task_duplicate_error(project_key, task_key, None)
+                let project_path = spec_path.join("ps").join(project_key);
+                self.workflow_task_duplicate_error(&project_path, task_key, None)
             }
             WorkflowMutationRequest::AddStep { task_path, key, .. } => {
                 let key = match crate::gui::workflow::validate_workflow_step_title(key) {
@@ -1096,16 +1166,18 @@ impl GsdvGuiApp {
                 self.workflow_step_duplicate_error(task_path, key, None)
             }
             WorkflowMutationRequest::RenameProject {
-                project_key,
+                project_path,
                 new_key,
             } => {
                 if let Err(error) = crate::gui::workflow::validate_workflow_key(new_key) {
                     return Some(error);
                 }
-                if project_key == new_key {
+                let project_key = project_path.file_name()?.to_string_lossy();
+                if project_key == new_key.as_str() {
                     return None;
                 }
-                self.workflow_project_duplicate_error(project_key, new_key)
+                let spec_path = project_path.parent()?.parent()?;
+                self.workflow_project_duplicate_error(spec_path, &project_key, new_key)
             }
             WorkflowMutationRequest::RenameTask { task_path, new_key } => {
                 if let Err(error) = crate::gui::workflow::validate_workflow_key(new_key) {
@@ -1115,11 +1187,8 @@ impl GsdvGuiApp {
                 if current_key == *new_key {
                     return None;
                 }
-                let project_key = task_path
-                    .parent()
-                    .and_then(Path::file_name)
-                    .map(|name| name.to_string_lossy().to_string())?;
-                self.workflow_task_duplicate_error(&project_key, new_key, Some(task_path))
+                let project_path = task_path.parent()?;
+                self.workflow_task_duplicate_error(project_path, new_key, Some(task_path))
             }
             WorkflowMutationRequest::RenameStep {
                 task_path,
@@ -1155,13 +1224,20 @@ impl GsdvGuiApp {
     }
 
     /// 检查 project key 是否和现有 project 重复。
-    fn workflow_project_duplicate_error(&self, current_key: &str, key: &str) -> Option<String> {
+    fn workflow_project_duplicate_error(
+        &self,
+        spec_path: &Path,
+        current_key: &str,
+        key: &str,
+    ) -> Option<String> {
         let tree = self
             .workflow_states
             .get(self.active_workspace)?
             .tree
             .as_ref()?;
-        tree.projects
+        workflow_trees(tree)
+            .find(|tree| tree.spec_path == spec_path)?
+            .projects
             .iter()
             .any(|project| project.key != current_key && project.key == key)
             .then(|| format!("project already exists: {key}"))
@@ -1170,7 +1246,7 @@ impl GsdvGuiApp {
     /// 检查 task 是否和同 project 现有 task key 重复。
     fn workflow_task_duplicate_error(
         &self,
-        project_key: &str,
+        project_path: &Path,
         key: &str,
         exclude_task_path: Option<&Path>,
     ) -> Option<String> {
@@ -1179,10 +1255,8 @@ impl GsdvGuiApp {
             .get(self.active_workspace)?
             .tree
             .as_ref()?;
-        let project = tree
-            .projects
-            .iter()
-            .find(|project| project.key == project_key)?;
+        let project = workflow_projects(tree)
+            .find(|project| project.root_path.parent() == Some(project_path))?;
         project
             .tasks
             .iter()
@@ -1204,11 +1278,7 @@ impl GsdvGuiApp {
             .get(self.active_workspace)?
             .tree
             .as_ref()?;
-        let task = tree
-            .projects
-            .iter()
-            .flat_map(|project| project.tasks.iter())
-            .find(|task| task.path == task_path)?;
+        let task = workflow_tasks(tree).find(|task| task.path == task_path)?;
         task.steps
             .iter()
             .any(|step| exclude_step_path != Some(step.path.as_slice()) && step.title == key)
@@ -1227,11 +1297,7 @@ impl GsdvGuiApp {
             .get(self.active_workspace)?
             .tree
             .as_ref()?;
-        let task = tree
-            .projects
-            .iter()
-            .flat_map(|project| project.tasks.iter())
-            .find(|task| task.path == task_path)?;
+        let task = workflow_tasks(tree).find(|task| task.path == task_path)?;
         task.steps
             .iter()
             .any(|step| !merged_step_paths.contains(&step.path) && step.title == key)
@@ -1245,9 +1311,7 @@ impl GsdvGuiApp {
             .get(self.active_workspace)?
             .tree
             .as_ref()?;
-        tree.projects
-            .iter()
-            .flat_map(|project| project.tasks.iter())
+        workflow_tasks(tree)
             .find(|task| task.path == task_path)
             .map(workflow_task_key)
     }
@@ -1259,11 +1323,7 @@ impl GsdvGuiApp {
             .get(self.active_workspace)?
             .tree
             .as_ref()?;
-        let task = tree
-            .projects
-            .iter()
-            .flat_map(|project| project.tasks.iter())
-            .find(|task| task.path == task_path)?;
+        let task = workflow_tasks(tree).find(|task| task.path == task_path)?;
         workflow_step_node_at_path(&task.steps, step_path).map(|step| step.title.clone())
     }
 
@@ -1327,12 +1387,19 @@ fn workflow_target_task_path(target: &WorkflowSelectionTarget) -> Option<&Path> 
 
 /// 从 workflow tree 里生成 task 的复制路径。
 fn workflow_task_copy_path_from_tree(tree: &WorkflowTree, task_path: &Path) -> Option<String> {
-    tree.projects.iter().find_map(|project| {
-        project
-            .tasks
-            .iter()
-            .find(|task| task.path == task_path)
-            .map(|task| workflow_copy_path_from_parts(&[project.label.clone(), task.label.clone()]))
+    workflow_trees(tree).find_map(|tree| {
+        tree.projects.iter().find_map(|project| {
+            project
+                .tasks
+                .iter()
+                .find(|task| task.path == task_path)
+                .map(|task| {
+                    let mut parts = workflow_repo_copy_parts(&tree.repo_path);
+                    parts.push(project.label.clone());
+                    parts.push(task.label.clone());
+                    workflow_copy_path_from_parts(&parts)
+                })
+        })
     })
 }
 
@@ -1342,16 +1409,31 @@ fn workflow_step_copy_path_from_tree(
     task_path: &Path,
     step_path: &[usize],
 ) -> Option<String> {
-    tree.projects.iter().find_map(|project| {
-        project.tasks.iter().find_map(|task| {
-            if task.path != task_path {
-                return None;
-            }
-            let mut parts = vec![project.label.clone(), task.label.clone()];
-            parts.extend(workflow_step_titles_at_path(&task.steps, step_path)?);
-            Some(workflow_copy_path_from_parts(&parts))
+    workflow_trees(tree).find_map(|tree| {
+        tree.projects.iter().find_map(|project| {
+            project.tasks.iter().find_map(|task| {
+                if task.path != task_path {
+                    return None;
+                }
+                let mut parts = workflow_repo_copy_parts(&tree.repo_path);
+                parts.push(project.label.clone());
+                parts.push(task.label.clone());
+                parts.extend(workflow_step_titles_at_path(&task.steps, step_path)?);
+                Some(workflow_copy_path_from_parts(&parts))
+            })
         })
     })
+}
+
+/// 返回 repo 相对路径对应的复制前缀。
+///
+/// 适用场景：子 repo 的 task/step 复制必须带 workspace 相对 repo 路径。
+/// 例：`services/api -> ["services/api"]`。
+fn workflow_repo_copy_parts(repo_path: &Path) -> Vec<String> {
+    (!repo_path.as_os_str().is_empty())
+        .then(|| repo_path.to_string_lossy().replace('\\', "/"))
+        .into_iter()
+        .collect()
 }
 
 /// 返回 step 路径上的各级 step 标题。
@@ -1481,9 +1563,7 @@ pub(super) fn set_single_workflow_step_selection(
 
 /// 返回 tree 中第一条 task，适用于首次切入 workflow task 工作台。
 fn first_workflow_task_target(tree: &WorkflowTree) -> Option<WorkflowSelectionTarget> {
-    tree.projects
-        .iter()
-        .flat_map(|project| project.tasks.iter())
+    workflow_tasks(tree)
         .next()
         .map(|task| WorkflowSelectionTarget::Task {
             task_path: task.path.clone(),

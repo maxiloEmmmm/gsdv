@@ -479,7 +479,10 @@ impl GsdvGuiApp {
                         }
                     });
                 }
-                AppDialog::WorkflowAddProject { mut key } => {
+                AppDialog::WorkflowAddProject {
+                    spec_path,
+                    mut key,
+                } => {
                     ui.label(
                         RichText::new(i18n::text(self.app_language, "New workflow project"))
                             .strong(),
@@ -493,6 +496,7 @@ impl GsdvGuiApp {
                     );
                     response.request_focus();
                     let request = WorkflowMutationRequest::AddProject {
+                        spec_path: spec_path.clone(),
                         project_key: key.clone(),
                     };
                     let error = self.workflow_mutation_key_error(&request);
@@ -523,10 +527,11 @@ impl GsdvGuiApp {
                         }
                     });
                     if next_dialog.is_some() {
-                        next_dialog = Some(AppDialog::WorkflowAddProject { key });
+                        next_dialog = Some(AppDialog::WorkflowAddProject { spec_path, key });
                     }
                 }
                 AppDialog::WorkflowAddTask {
+                    spec_path,
                     project_key,
                     mut key,
                 } => {
@@ -545,6 +550,7 @@ impl GsdvGuiApp {
                     );
                     response.request_focus();
                     let request = WorkflowMutationRequest::AddTask {
+                        spec_path: spec_path.clone(),
                         project_key: project_key.clone(),
                         task_key: key.clone(),
                     };
@@ -576,7 +582,11 @@ impl GsdvGuiApp {
                         }
                     });
                     if next_dialog.is_some() {
-                        next_dialog = Some(AppDialog::WorkflowAddTask { project_key, key });
+                        next_dialog = Some(AppDialog::WorkflowAddTask {
+                            spec_path,
+                            project_key,
+                            key,
+                        });
                     }
                 }
                 AppDialog::WorkflowAddStep {
@@ -645,7 +655,7 @@ impl GsdvGuiApp {
                     }
                 }
                 AppDialog::WorkflowRenameProject {
-                    project_key,
+                    project_path,
                     mut key,
                 } => {
                     ui.label(
@@ -654,7 +664,7 @@ impl GsdvGuiApp {
                     );
                     ui.add_space(12.0);
                     ui.label(section_label(i18n::text(self.app_language, "CURRENT")));
-                    ui.label(RichText::new(&project_key).color(theme::text()));
+                    ui.label(RichText::new(display_path(&project_path)).color(theme::text()));
                     ui.add_space(10.0);
                     ui.label(section_label(i18n::text(self.app_language, "KEY")));
                     let response = ui.add(
@@ -664,7 +674,7 @@ impl GsdvGuiApp {
                     );
                     response.request_focus();
                     let request = WorkflowMutationRequest::RenameProject {
-                        project_key: project_key.clone(),
+                        project_path: project_path.clone(),
                         new_key: key.clone(),
                     };
                     let error = self.workflow_mutation_key_error(&request);
@@ -695,7 +705,7 @@ impl GsdvGuiApp {
                         }
                     });
                     if next_dialog.is_some() {
-                        next_dialog = Some(AppDialog::WorkflowRenameProject { project_key, key });
+                        next_dialog = Some(AppDialog::WorkflowRenameProject { project_path, key });
                     }
                 }
                 AppDialog::WorkflowRenameTask {
@@ -2718,7 +2728,7 @@ pub(super) fn recent_helix_target_label(
 /// 生成 workflow 删除确认弹窗里的目标说明。
 fn workflow_delete_target_label(target: &WorkflowDeleteTarget) -> String {
     match target {
-        WorkflowDeleteTarget::Project { project_key } => format!("PROJECT {project_key}"),
+        WorkflowDeleteTarget::Project { project_key, .. } => format!("PROJECT {project_key}"),
         WorkflowDeleteTarget::Task { label, .. } => format!("TASK {label}"),
         WorkflowDeleteTarget::Step { title, .. } => format!("STEP {title}"),
     }
@@ -2727,9 +2737,11 @@ fn workflow_delete_target_label(target: &WorkflowDeleteTarget) -> String {
 /// 将 workflow 删除确认目标转换成文件修改请求。
 fn workflow_delete_target_request(target: &WorkflowDeleteTarget) -> WorkflowMutationRequest {
     match target {
-        WorkflowDeleteTarget::Project { project_key } => WorkflowMutationRequest::DeleteProject {
-            project_key: project_key.clone(),
-        },
+        WorkflowDeleteTarget::Project { project_path, .. } => {
+            WorkflowMutationRequest::DeleteProject {
+                project_path: project_path.clone(),
+            }
+        }
         WorkflowDeleteTarget::Task { task_path, .. } => WorkflowMutationRequest::DeleteTask {
             task_path: task_path.clone(),
         },

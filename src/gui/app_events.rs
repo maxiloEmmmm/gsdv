@@ -604,6 +604,7 @@ impl GsdvGuiApp {
                 index,
                 workspace_path,
                 remote_runtime_id,
+                scanned_sub_workflows,
                 result,
             } => {
                 self.apply_workflow_tree_loaded(
@@ -611,6 +612,7 @@ impl GsdvGuiApp {
                     index,
                     workspace_path,
                     remote_runtime_id,
+                    scanned_sub_workflows,
                     result,
                 );
             }
