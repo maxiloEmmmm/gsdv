@@ -94,6 +94,8 @@ pub struct WorkspaceViewData {
     pub remote: Option<RemoteWorkspaceConfig>,
     /// Remote 项目 Outline 是否折叠成 28px 恢复条。
     pub remote_outline_collapsed: bool,
+    /// 本地项目 Outline 面板是否折叠成 28px 恢复条。
+    pub outline_panel_collapsed: bool,
     /// Whether this workspace is included when focus filtering is enabled.
     pub focused: bool,
     pub name: String,
@@ -701,6 +703,9 @@ struct StoredWorkspace {
     /// Remote Outline 的 workspace 级持久折叠状态。
     #[serde(default)]
     remote_outline_collapsed: bool,
+    /// 本地 Outline 面板的 workspace 级持久折叠状态。
+    #[serde(default)]
+    outline_panel_collapsed: bool,
     /// Whether this workspace is marked as focused in the rail.
     #[serde(default)]
     focused: bool,
@@ -1359,6 +1364,7 @@ pub fn new_workspace(path: PathBuf, agent_kind: AgentKind) -> WorkspaceViewData 
             path: path.to_string_lossy().to_string(),
             remote: None,
             remote_outline_collapsed: false,
+            outline_panel_collapsed: false,
             focused: false,
             agent_kind: Some(agent_kind),
             agent_model: None,
@@ -1408,6 +1414,7 @@ fn new_remote_workspace_with_outline_state(
     WorkspaceViewData {
         remote: Some(config.clone()),
         remote_outline_collapsed,
+        outline_panel_collapsed: false,
         focused,
         name: config.name,
         path: identity.clone(),
@@ -1468,6 +1475,7 @@ pub fn save_workspace_store(
                 path: workspace.path.to_string_lossy().to_string(),
                 remote: workspace.remote.clone(),
                 remote_outline_collapsed: workspace.remote_outline_collapsed,
+                outline_panel_collapsed: workspace.outline_panel_collapsed,
                 focused: workspace.focused,
                 agent_kind: Some(workspace.agent_kind),
                 agent_model: workspace.agent_model.clone(),
@@ -1977,6 +1985,7 @@ fn build_workspace(
     WorkspaceViewData {
         remote: None,
         remote_outline_collapsed: false,
+        outline_panel_collapsed: stored.outline_panel_collapsed,
         focused: stored.focused,
         name: workspace_name(&path),
         path,

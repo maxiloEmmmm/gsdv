@@ -582,6 +582,21 @@ pub(super) fn remote_outline_collapse_button(ui: &mut Ui, expanded: bool) -> egu
     })
 }
 
+/// 绘制本地 Outline 面板的折叠或展开按钮。
+///
+/// 适用场景：展开标题栏和 28px 恢复条共用同一图标。
+/// 例：`expanded=false -> Expand outline`。
+pub(super) fn outline_panel_collapse_button(ui: &mut Ui, expanded: bool) -> egui::Response {
+    let hover_text = if expanded {
+        "Collapse outline"
+    } else {
+        "Expand outline"
+    };
+    rail_header_icon_button(ui, hover_text, |ui, center, color| {
+        paint_sidebar_toggle_icon(ui, center, color, expanded);
+    })
+}
+
 pub(super) fn rail_header_icon_button(
     ui: &mut Ui,
     hover_text: &'static str,
