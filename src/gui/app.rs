@@ -147,8 +147,8 @@ use app_input::{agent_tab_own_shortcut_pressed, read_reviewer_command, read_ui_c
 const SCREENSHOT_REQUEST_FILE: &str = "capture.request";
 const WORKSPACE_RAIL_WIDTH: f32 = 184.0;
 const COMPACT_WORKSPACE_RAIL_WIDTH: f32 = 58.0;
-/// Remote Outline 折叠后与 Agent col 相同的恢复条宽度。
-const COLLAPSED_REMOTE_OUTLINE_WIDTH: f32 = 28.0;
+/// Outline 折叠后与 Agent col 相同的恢复条宽度。
+const COLLAPSED_OUTLINE_WIDTH: f32 = 28.0;
 const RAIL_EDGE_INSET: f32 = 2.0;
 const BOTTOM_BAR_HEIGHT: f32 = 22.0;
 const AGENT_THEME_RESTART_DELAY: Duration = Duration::from_millis(900);
@@ -2832,6 +2832,7 @@ enum UiCommand {
     ToggleRecentMarkdownOutline,
     ToggleOutlineWorkflowTab,
     ToggleWorkflowQuickModal,
+    SetOutlinePanelCollapsed(bool),
     PasteRecentMarkdownDiffsToAgent,
     TranslateAgentInput,
     ApplyAgentInputTranslation,
@@ -2933,15 +2934,19 @@ impl GsdvGuiApp {
                 .show(ctx, |ui| self.workspace_rail(ui));
 
             if should_show_outline_panel(self.current_workspace()) {
-                let remote_outline_collapsed = self.current_workspace().is_some_and(|workspace| {
-                    workspace.remote.is_some() && workspace.remote_outline_collapsed
+                let outline_collapsed = self.current_workspace().is_some_and(|workspace| {
+                    if workspace.remote.is_some() {
+                        workspace.remote_outline_collapsed
+                    } else {
+                        workspace.outline_panel_collapsed
+                    }
                 });
-                let outline_width = if remote_outline_collapsed {
-                    COLLAPSED_REMOTE_OUTLINE_WIDTH
+                let outline_width = if outline_collapsed {
+                    COLLAPSED_OUTLINE_WIDTH
                 } else {
                     272.0
                 };
-                let frame = if remote_outline_collapsed {
+                let frame = if outline_collapsed {
                     collapsed_outline_panel_frame()
                 } else {
                     panel_frame()

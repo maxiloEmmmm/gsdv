@@ -101,6 +101,9 @@ impl GsdvGuiApp {
             UiCommand::ToggleRecentMarkdownOutline => self.toggle_recent_markdown_outline_dialog(),
             UiCommand::ToggleOutlineWorkflowTab => self.toggle_outline_workflow_tab(ctx),
             UiCommand::ToggleWorkflowQuickModal => self.toggle_workflow_quick_modal(ctx),
+            UiCommand::SetOutlinePanelCollapsed(collapsed) => {
+                self.set_outline_panel_collapsed(collapsed)
+            }
             UiCommand::PasteRecentMarkdownDiffsToAgent => {
                 self.paste_recent_markdown_diffs_to_agent(ctx);
             }
@@ -135,6 +138,22 @@ impl GsdvGuiApp {
     pub(super) fn toggle_app_fullscreen(&mut self, ctx: &egui::Context) {
         self.app_fullscreen = !self.app_fullscreen;
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(!self.app_fullscreen));
+        self.request_app_repaint();
+    }
+
+    /// 更新本地 Outline 面板折叠状态，并安排 workspace store 保存。
+    ///
+    /// 适用场景：egui 按钮先投递 AppEvent，再由统一 drain 更新渲染状态。
+    /// 例：`SetOutlinePanelCollapsed(true) -> 28px restore strip`。
+    fn set_outline_panel_collapsed(&mut self, collapsed: bool) {
+        let Some(workspace) = self.current_workspace_mut() else {
+            return;
+        };
+        if workspace.remote.is_some() || workspace.outline_panel_collapsed == collapsed {
+            return;
+        }
+        workspace.outline_panel_collapsed = collapsed;
+        self.mark_workspace_store_dirty();
         self.request_app_repaint();
     }
 

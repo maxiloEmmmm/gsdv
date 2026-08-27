@@ -417,6 +417,19 @@ impl GsdvGuiApp {
             self.remote_outline_panel(ui);
             return;
         }
+        let index = self.active_workspace;
+        if self
+            .workspaces
+            .get(index)
+            .is_some_and(|workspace| workspace.outline_panel_collapsed)
+        {
+            if outline_panel_collapse_button(ui, false).clicked() {
+                self.queue_app_event(AppEvent::InputUiCommand(
+                    UiCommand::SetOutlinePanelCollapsed(false),
+                ));
+            }
+            return;
+        }
         ui.vertical(|ui| {
             let mut workflow_header_dialog = None;
             let mut init_workflow_root = false;
@@ -485,6 +498,12 @@ impl GsdvGuiApp {
                     self.set_outline_panel_tab(ui.ctx(), OutlinePanelTab::Workflow);
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if outline_panel_collapse_button(ui, true).clicked() {
+                        self.queue_app_event(AppEvent::InputUiCommand(
+                            UiCommand::SetOutlinePanelCollapsed(true),
+                        ));
+                    }
+                    ui.add_space(4.0);
                     if active_tab == OutlinePanelTab::Outline
                         && subtle_icon_button(ui, i18n::text(self.app_language, "Add")).clicked()
                         && let Some(workspace) = self.current_workspace()

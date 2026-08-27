@@ -89,8 +89,19 @@ impl GsdvGuiApp {
         true
     }
 
-    /// 在普通 outline 和 workflow outline 之间切换，并同步右侧工作台。
+    /// 在可见侧栏中切换 tab；侧栏折叠时改为打开 workflow modal。
+    ///
+    /// 适用场景：普通状态 `Alt/Cmd+Z` 根据本地 Outline 状态选择 surface。
+    /// 例：`outline collapsed -> toggle WorkflowQuickModal`。
     pub(super) fn toggle_outline_workflow_tab(&mut self, ctx: &egui::Context) {
+        if self.current_workspace().is_some_and(|workspace| {
+            workspace.remote.is_none()
+                && workspace.route == Route::Workspace
+                && workspace.outline_panel_collapsed
+        }) {
+            self.toggle_workflow_quick_modal(ctx);
+            return;
+        }
         let Some(current_tab) = self.outline_panel_tabs.get(self.active_workspace).copied() else {
             return;
         };
