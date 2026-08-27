@@ -1177,20 +1177,12 @@ struct RecentHelixTarget {
 struct AgentStatusHookData {
     /// Agent 运行实例 id。
     agent_id: String,
-    /// Agent 类型名称。
-    agent: String,
     /// Agent 所属 workspace 绝对路径。
     workspace: String,
     /// Agent 当前状态字符串。
     status: String,
     /// 可选 session id。
     session_id: String,
-    /// 可选 turn id。
-    turn_id: String,
-    /// 可选 transcript path。
-    transcript_path: String,
-    /// 原始 hook event name。
-    hook_event_name: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

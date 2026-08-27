@@ -2006,7 +2006,7 @@ impl GsdvGuiApp {
                             settings_row(
                                 ui,
                                 i18n::text(language, "Agent status"),
-                                "~/.gsdv/agent-status.json",
+                                "live hook events (memory only)",
                             );
                             ui.add_space(12.0);
                             if language_settings_editor(ui, &mut self.app_language) {

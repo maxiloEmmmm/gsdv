@@ -1239,45 +1239,6 @@ impl GsdvGuiApp {
         }
     }
 
-    /// Merges background agent status data without replacing route UI state.
-    pub(super) fn merge_agent_status_refresh(&mut self, refreshed: Vec<WorkspaceViewData>) {
-        for refreshed_workspace in refreshed {
-            let Some(workspace) = self.workspaces.iter_mut().find(|workspace| {
-                workspace.path == refreshed_workspace.path
-                    && workspace.agent_kind == refreshed_workspace.agent_kind
-                    && workspace.agent_id == refreshed_workspace.agent_id
-            }) else {
-                continue;
-            };
-            workspace.activity = refreshed_workspace.activity;
-            workspace.session_id = refreshed_workspace.session_id;
-            workspace.subagents = refreshed_workspace.subagents;
-            let (rows, focus) = data::normalize_agent_rows(
-                workspace.agent_rows.clone(),
-                workspace.agent_focus,
-                &workspace.subagents,
-            );
-            workspace.agent_rows = rows;
-            workspace.agent_focus = focus;
-        }
-        for (index, workspace) in self.workspaces.iter().enumerate() {
-            let slots = agent_slots_for_workspace(workspace);
-            for slot_id in slots {
-                let Some(slot_workspace) = self.agent_metadata_for_slot(index, &slot_id) else {
-                    continue;
-                };
-                if let Some(hosts) = self.terminal_hosts.get_mut(index)
-                    && let Some(agent) = hosts
-                        .agents
-                        .get_mut(&slot_id)
-                        .and_then(|slot| slot.host.as_mut())
-                {
-                    agent.sync_workspace_metadata(&slot_workspace);
-                }
-            }
-        }
-    }
-
     /// Applies branch choice data returned by the reviewer background task.
     pub(super) fn apply_reviewer_branch_choices_result(
         &mut self,

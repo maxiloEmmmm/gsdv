@@ -4,16 +4,14 @@ use crate::gui::theme::ThemeMode;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::env;
-use std::fs::{self, File};
+use std::fs;
 use std::hash::{Hash, Hasher};
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const HOME_OUTLINE_ROOT: &str = "~";
 const HOME_OUTLINE_DIRS: [&str; 3] = [".codex", ".agents", ".claude"];
-const TRANSCRIPT_ABORT_CACHE_LIMIT: usize = 256;
 pub const BUILTIN_NO_PROXY: [&str; 2] = ["192.168.0.0/16", "127.0.0.1/8"];
 pub const DEFAULT_MAX_FRAME_RATE: u16 = 30;
 pub const MIN_MAX_FRAME_RATE: u16 = 5;
@@ -36,22 +34,6 @@ pub const MAX_REMOTE_SERVER_PORT: u16 = u16::MAX;
 /// Fixed Codex model provider option requested by the UI.
 pub const CODEX_MODEL_PROVIDER_OPENAI: &str = "openai";
 
-/// Cache key for Codex transcript aborted-turn checks.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct TranscriptAbortCacheKey {
-    /// Transcript file path from the status hook or Codex session lookup.
-    path: PathBuf,
-    /// Turn id whose aborted marker is being searched.
-    turn_id: String,
-    /// File length used to invalidate append-only transcript changes.
-    len: u64,
-    /// File modification time used to invalidate rewritten transcript changes.
-    modified: Option<SystemTime>,
-}
-
-/// Shared cache for expensive transcript scans.
-static TRANSCRIPT_ABORT_CACHE: OnceLock<Mutex<BTreeMap<TranscriptAbortCacheKey, bool>>> =
-    OnceLock::new();
 static STORE_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -235,25 +217,9 @@ pub struct SubagentViewData {
     pub agent_id: String,
     /// Runtime session id used for resume.
     pub session_id: Option<String>,
-    /// Last known activity from the shared agent status file.
+    /// Last known runtime activity from direct Agent hook events.
     #[serde(skip, default = "default_workspace_activity")]
     pub activity: WorkspaceActivity,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AgentWorkspaceStatus {
-    pub activity: WorkspaceActivity,
-    pub session_id: Option<String>,
-}
-
-/// Status indexes loaded from the shared agent status file.
-struct AgentStatusIndexes {
-    /// Latest status keyed by agent kind and workspace path.
-    by_path: BTreeMap<AgentKind, BTreeMap<PathBuf, AgentWorkspaceStatus>>,
-    /// Latest status keyed by agent kind and persisted agent id.
-    by_id: BTreeMap<AgentKind, BTreeMap<String, AgentWorkspaceStatus>>,
-    /// Status keyed by agent kind and runtime session id.
-    by_session: BTreeMap<AgentKind, BTreeMap<String, AgentWorkspaceStatus>>,
 }
 
 #[derive(Debug, Clone)]
@@ -768,36 +734,6 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Default, Deserialize)]
-struct AgentStatusFile {
-    #[serde(default)]
-    agents: BTreeMap<String, AgentStatusEntry>,
-    #[serde(default)]
-    sessions: BTreeMap<String, AgentStatusEntry>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct AgentStatusEntry {
-    #[serde(default)]
-    status: String,
-    #[serde(default)]
-    agent: Option<String>,
-    #[serde(default)]
-    agent_id: Option<String>,
-    #[serde(default)]
-    workspace: String,
-    #[serde(default)]
-    session_id: Option<String>,
-    #[serde(default)]
-    turn_id: Option<String>,
-    #[serde(default)]
-    transcript_path: Option<String>,
-    #[serde(default)]
-    started_at_ms: Option<u64>,
-    #[serde(default)]
-    updated_at_ms: Option<u64>,
-}
-
 /// 与主 workspace store 分离保存的 subagent sidecar 数据。
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct SubagentFile {
@@ -824,10 +760,7 @@ struct OutlineFavoritesFile {
 }
 
 pub fn load_initial_gui_data(default_agent_kind: AgentKind) -> InitialGuiData {
-    let mut stored = load_store();
-    prune_agent_statuses_to_store_sessions(&stored);
-    prune_store_sessions_to_status_file(&mut stored);
-    let statuses = load_agent_status_indexes();
+    let stored = load_store();
     let workspaces = stored
         .workspaces
         .into_iter()
@@ -842,14 +775,7 @@ pub fn load_initial_gui_data(default_agent_kind: AgentKind) -> InitialGuiData {
             }
             let path = PathBuf::from(&workspace.path);
             if path.is_dir() {
-                Some(build_workspace(
-                    path,
-                    workspace,
-                    &statuses.by_session,
-                    &statuses.by_id,
-                    &statuses.by_path,
-                    default_agent_kind,
-                ))
+                Some(build_workspace(path, workspace, default_agent_kind))
             } else {
                 None
             }
@@ -1284,80 +1210,7 @@ pub fn refresh_workspace_outline_parts(
     (workspace_path.to_path_buf(), outline, selected_file)
 }
 
-pub fn refresh_workspace_agent_statuses(workspaces: &mut [WorkspaceViewData]) -> bool {
-    let statuses = load_agent_status_indexes();
-    let mut changed = false;
-    for workspace in workspaces {
-        let status_by_session = workspace.session_id.as_deref().and_then(|session_id| {
-            statuses
-                .by_session
-                .get(&workspace.agent_kind)
-                .and_then(|statuses| statuses.get(session_id))
-        });
-        let status_by_id = statuses
-            .by_id
-            .get(&workspace.agent_kind)
-            .and_then(|statuses| statuses.get(&workspace.agent_id));
-        let status_by_path = statuses
-            .by_path
-            .get(&workspace.agent_kind)
-            .and_then(|statuses| statuses.get(&normalize_path(&workspace.path)));
-        let Some(status) = status_by_id.or(status_by_session).or(status_by_path) else {
-            continue;
-        };
-        if workspace.activity != status.activity {
-            workspace.activity = status.activity;
-            changed = true;
-        }
-        let status_session_id = status.session_id.as_ref().cloned();
-        if status_session_id.is_some() && workspace.session_id != status_session_id {
-            workspace.session_id = status_session_id;
-            changed = true;
-        }
-        if refresh_subagent_statuses(
-            &mut workspace.subagents,
-            &statuses.by_id,
-            &statuses.by_session,
-        ) {
-            changed = true;
-        }
-    }
-    changed
-}
-
-/// Refreshes subagent activity/session data from hook status indexes.
-fn refresh_subagent_statuses(
-    subagents: &mut [SubagentViewData],
-    statuses_by_id: &BTreeMap<AgentKind, BTreeMap<String, AgentWorkspaceStatus>>,
-    statuses_by_session: &BTreeMap<AgentKind, BTreeMap<String, AgentWorkspaceStatus>>,
-) -> bool {
-    let mut changed = false;
-    for subagent in subagents {
-        let status_by_id = statuses_by_id
-            .get(&subagent.agent_kind)
-            .and_then(|statuses| statuses.get(&subagent.agent_id));
-        let status_by_session = subagent.session_id.as_deref().and_then(|session_id| {
-            statuses_by_session
-                .get(&subagent.agent_kind)
-                .and_then(|statuses| statuses.get(session_id))
-        });
-        let Some(status) = status_by_id.or(status_by_session) else {
-            continue;
-        };
-        if subagent.activity != status.activity {
-            subagent.activity = status.activity;
-            changed = true;
-        }
-        if status.session_id.is_some() && subagent.session_id != status.session_id {
-            subagent.session_id = status.session_id.clone();
-            changed = true;
-        }
-    }
-    changed
-}
-
 pub fn new_workspace(path: PathBuf, agent_kind: AgentKind) -> WorkspaceViewData {
-    let statuses = load_agent_status_indexes();
     build_workspace(
         path.clone(),
         StoredWorkspace {
@@ -1380,9 +1233,6 @@ pub fn new_workspace(path: PathBuf, agent_kind: AgentKind) -> WorkspaceViewData 
             markdown_outline_collapsed: true,
             attached_outline_dirs: Vec::new(),
         },
-        &statuses.by_session,
-        &statuses.by_id,
-        &statuses.by_path,
         agent_kind,
     )
 }
@@ -1943,9 +1793,6 @@ fn split_no_proxy_entries(value: &str) -> impl Iterator<Item = String> + '_ {
 fn build_workspace(
     path: PathBuf,
     stored: StoredWorkspace,
-    statuses_by_session: &BTreeMap<AgentKind, BTreeMap<String, AgentWorkspaceStatus>>,
-    statuses_by_id: &BTreeMap<AgentKind, BTreeMap<String, AgentWorkspaceStatus>>,
-    statuses: &BTreeMap<AgentKind, BTreeMap<PathBuf, AgentWorkspaceStatus>>,
     default_agent_kind: AgentKind,
 ) -> WorkspaceViewData {
     let agent_kind = stored.agent_kind.unwrap_or(default_agent_kind);
@@ -1958,28 +1805,12 @@ fn build_workspace(
     let attached_outline_dirs = normalize_attached_outline_dirs(stored.attached_outline_dirs);
     let outline = build_outline(&path, &attached_outline_dirs);
     let selected_file = stored_selected_file.or_else(|| first_markdown_file(&outline));
-    let status_by_id = statuses_by_id
-        .get(&agent_kind)
-        .and_then(|statuses| statuses.get(&agent_id));
-    let status_by_session = stored.session_id.as_deref().and_then(|session_id| {
-        statuses_by_session
-            .get(&agent_kind)
-            .and_then(|statuses| statuses.get(session_id))
-    });
-    let status_by_path = statuses
-        .get(&agent_kind)
-        .and_then(|statuses| statuses.get(&normalize_path(&path)));
-    let status = status_by_id.or(status_by_session).or(status_by_path);
-    let activity = status
-        .map(|status| status.activity)
-        .unwrap_or(WorkspaceActivity::Unknown);
-    let session_id = status.and_then(|status| status.session_id.clone());
+    let session_id = stored.session_id.clone();
     let memo = load_workspace_memo(&path);
     let outline_favorites = load_workspace_outline_favorites(&path);
     let recent_markdowns = load_workspace_recent_markdowns(&path);
-    let (mut subagents, mut agent_rows, mut agent_focus) =
+    let (subagents, mut agent_rows, mut agent_focus) =
         load_workspace_agent_layout(&path, agent_kind);
-    refresh_subagent_statuses(&mut subagents, statuses_by_id, statuses_by_session);
     (agent_rows, agent_focus) = normalize_agent_rows(agent_rows, agent_focus, &subagents);
 
     WorkspaceViewData {
@@ -2000,7 +1831,7 @@ fn build_workspace(
         agent_work_dir: normalize_stored_agent_work_dir(stored.agent_work_dir),
         agent_id,
         session_id,
-        activity,
+        activity: WorkspaceActivity::Unknown,
         subagents,
         agent_rows,
         agent_focus,
@@ -2531,121 +2362,6 @@ fn load_store() -> StoreFile {
     serde_json::from_str(&content).unwrap_or_default()
 }
 
-fn prune_agent_statuses_to_store_sessions(store: &StoreFile) {
-    let Some(path) = agent_status_path() else {
-        return;
-    };
-    let Ok(content) = fs::read_to_string(&path) else {
-        return;
-    };
-    let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&content) else {
-        return;
-    };
-    let store_sessions = store
-        .workspaces
-        .iter()
-        .filter_map(|workspace| workspace.session_id.as_deref())
-        .filter(|session_id| !session_id.trim().is_empty())
-        .map(str::to_string)
-        .chain(store.workspaces.iter().flat_map(|workspace| {
-            let path = PathBuf::from(&workspace.path);
-            load_workspace_agent_layout(&path, workspace.agent_kind.unwrap_or_default())
-                .0
-                .into_iter()
-                .filter_map(|subagent| subagent.session_id)
-        }))
-        .collect::<HashSet<_>>();
-    let mut changed = false;
-
-    if let Some(sessions) = root
-        .get_mut("sessions")
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        let before = sessions.len();
-        sessions.retain(|session_id, _| store_sessions.contains(session_id.as_str()));
-        changed |= sessions.len() != before;
-    }
-    if let Some(agents) = root
-        .get_mut("agents")
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        let before = agents.len();
-        agents.retain(|_, entry| {
-            entry
-                .get("session_id")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|session_id| store_sessions.contains(session_id))
-        });
-        changed |= agents.len() != before;
-    }
-    if changed {
-        root["version"] = serde_json::Value::from(2);
-        if let Ok(content) = serde_json::to_string_pretty(&root) {
-            let _ = fs::write(path, format!("{content}\n"));
-        }
-    }
-}
-
-fn prune_store_sessions_to_status_file(store: &mut StoreFile) {
-    let Some(store_path) = gsdv_store_path() else {
-        return;
-    };
-    let Some(status_path) = agent_status_path() else {
-        clear_store_sessions(store, &store_path);
-        return;
-    };
-    let Ok(content) = fs::read_to_string(status_path) else {
-        clear_store_sessions(store, &store_path);
-        return;
-    };
-    let Ok(file) = serde_json::from_str::<AgentStatusFile>(&content) else {
-        clear_store_sessions(store, &store_path);
-        return;
-    };
-    let status_sessions = agent_status_entries(file)
-        .into_iter()
-        .filter_map(|entry| entry.session_id)
-        .filter(|session_id| !session_id.trim().is_empty())
-        .collect::<HashSet<_>>();
-    let mut changed = false;
-    for workspace in &mut store.workspaces {
-        let stale = workspace
-            .session_id
-            .as_deref()
-            .filter(|session_id| !session_id.trim().is_empty())
-            .is_some_and(|session_id| !status_sessions.contains(session_id));
-        if stale {
-            workspace.session_id = None;
-            changed = true;
-        }
-    }
-    if changed {
-        write_store_file(&store_path, store);
-    }
-}
-
-fn clear_store_sessions(store: &mut StoreFile, store_path: &Path) {
-    let mut changed = false;
-    for workspace in &mut store.workspaces {
-        if workspace.session_id.take().is_some() {
-            changed = true;
-        }
-    }
-    if changed {
-        write_store_file(store_path, store);
-    }
-}
-
-fn write_store_file(path: &Path, store: &StoreFile) {
-    let _guard = store_write_guard();
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    if let Ok(content) = serde_json::to_string_pretty(store) {
-        let _ = fs::write(path, format!("{content}\n"));
-    }
-}
-
 /// Serializes whole-store read-modify-write updates inside the app process.
 ///
 /// 触发条件：settings 保存和 workspace 保存都在后台线程里执行。
@@ -2656,325 +2372,6 @@ fn store_write_guard() -> std::sync::MutexGuard<'static, ()> {
         .get_or_init(|| Mutex::new(()))
         .lock()
         .expect("store write lock should not be poisoned")
-}
-
-/// Loads agent status once and builds all lookup indexes used by workspaces.
-fn load_agent_status_indexes() -> AgentStatusIndexes {
-    let Some(path) = agent_status_path() else {
-        return empty_agent_status_indexes();
-    };
-    let Ok(content) = fs::read_to_string(path) else {
-        return empty_agent_status_indexes();
-    };
-    let Ok(file) = serde_json::from_str::<AgentStatusFile>(&content) else {
-        return empty_agent_status_indexes();
-    };
-
-    let mut by_session = empty_agent_status_session_maps();
-    let mut by_id = empty_agent_status_id_maps();
-    let mut by_path = empty_agent_status_path_maps();
-    let mut id_order: BTreeMap<AgentKind, BTreeMap<String, u64>> = empty_agent_status_id_orders();
-    let mut path_order: BTreeMap<AgentKind, BTreeMap<PathBuf, u64>> =
-        empty_agent_status_path_orders();
-
-    for entry in agent_status_entries(file) {
-        let agent_kinds = agent_kinds_for_status_entry(&entry);
-        let session_id = entry
-            .session_id
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .map(str::to_string);
-        let agent_id = entry
-            .agent_id
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .map(str::to_string);
-        let workspace_path = (!entry.workspace.trim().is_empty())
-            .then(|| normalize_path(Path::new(&entry.workspace)));
-        let updated_at_ms = entry_status_order(&entry);
-        let status = agent_workspace_status_from_entry(entry);
-
-        for agent_kind in agent_kinds {
-            if let Some(session_id) = session_id.as_ref() {
-                by_session
-                    .entry(agent_kind)
-                    .or_default()
-                    .insert(session_id.clone(), status.clone());
-            }
-            if let Some(agent_id) = agent_id.as_ref() {
-                let replace = id_order
-                    .entry(agent_kind)
-                    .or_default()
-                    .get(agent_id)
-                    .is_none_or(|existing| updated_at_ms >= *existing);
-                if replace {
-                    id_order
-                        .entry(agent_kind)
-                        .or_default()
-                        .insert(agent_id.clone(), updated_at_ms);
-                    by_id
-                        .entry(agent_kind)
-                        .or_default()
-                        .insert(agent_id.clone(), status.clone());
-                }
-            }
-            if let Some(path) = workspace_path.as_ref() {
-                let replace = path_order
-                    .entry(agent_kind)
-                    .or_default()
-                    .get(path)
-                    .is_none_or(|existing| updated_at_ms >= *existing);
-                if replace {
-                    path_order
-                        .entry(agent_kind)
-                        .or_default()
-                        .insert(path.clone(), updated_at_ms);
-                    by_path
-                        .entry(agent_kind)
-                        .or_default()
-                        .insert(path.clone(), status.clone());
-                }
-            }
-        }
-    }
-
-    AgentStatusIndexes {
-        by_path,
-        by_id,
-        by_session,
-    }
-}
-
-/// Returns empty status indexes for missing or unreadable status files.
-fn empty_agent_status_indexes() -> AgentStatusIndexes {
-    AgentStatusIndexes {
-        by_path: empty_agent_status_path_maps(),
-        by_id: empty_agent_status_id_maps(),
-        by_session: empty_agent_status_session_maps(),
-    }
-}
-
-/// Creates one workspace-path status map per supported agent kind.
-fn empty_agent_status_path_maps() -> BTreeMap<AgentKind, BTreeMap<PathBuf, AgentWorkspaceStatus>> {
-    AgentKind::all()
-        .into_iter()
-        .map(|agent_kind| (agent_kind, BTreeMap::new()))
-        .collect()
-}
-
-/// Creates one agent-id status map per supported agent kind.
-fn empty_agent_status_id_maps() -> BTreeMap<AgentKind, BTreeMap<String, AgentWorkspaceStatus>> {
-    AgentKind::all()
-        .into_iter()
-        .map(|agent_kind| (agent_kind, BTreeMap::new()))
-        .collect()
-}
-
-/// Creates one session-id status map per supported agent kind.
-fn empty_agent_status_session_maps() -> BTreeMap<AgentKind, BTreeMap<String, AgentWorkspaceStatus>>
-{
-    AgentKind::all()
-        .into_iter()
-        .map(|agent_kind| (agent_kind, BTreeMap::new()))
-        .collect()
-}
-
-/// Creates timestamp order maps for agent-id status replacement.
-fn empty_agent_status_id_orders() -> BTreeMap<AgentKind, BTreeMap<String, u64>> {
-    AgentKind::all()
-        .into_iter()
-        .map(|agent_kind| (agent_kind, BTreeMap::new()))
-        .collect()
-}
-
-/// Creates timestamp order maps for workspace-path status replacement.
-fn empty_agent_status_path_orders() -> BTreeMap<AgentKind, BTreeMap<PathBuf, u64>> {
-    AgentKind::all()
-        .into_iter()
-        .map(|agent_kind| (agent_kind, BTreeMap::new()))
-        .collect()
-}
-
-/// Resolves which agent kinds should consume a status entry.
-fn agent_kinds_for_status_entry(entry: &AgentStatusEntry) -> Vec<AgentKind> {
-    let Some(entry_agent) = entry
-        .agent
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return AgentKind::all().to_vec();
-    };
-    AgentKind::all()
-        .into_iter()
-        .filter(|agent_kind| entry_agent.eq_ignore_ascii_case(agent_kind.env_name()))
-        .collect()
-}
-
-fn agent_status_entries(file: AgentStatusFile) -> Vec<AgentStatusEntry> {
-    let mut entries = Vec::new();
-    for (session_id, mut entry) in file.sessions {
-        if entry.session_id.as_deref().is_none_or(str::is_empty) {
-            entry.session_id = Some(session_id);
-        }
-        entries.push(entry);
-    }
-    for (agent_id, mut entry) in file.agents {
-        if entry.agent_id.as_deref().is_none_or(str::is_empty) {
-            entry.agent_id = Some(agent_id);
-        }
-        entries.push(entry);
-    }
-    entries
-}
-
-fn entry_status_order(entry: &AgentStatusEntry) -> u64 {
-    entry.started_at_ms.or(entry.updated_at_ms).unwrap_or(0)
-}
-
-fn agent_workspace_status_from_entry(entry: AgentStatusEntry) -> AgentWorkspaceStatus {
-    let session_id = entry
-        .session_id
-        .filter(|session_id| !session_id.trim().is_empty());
-    let turn_id = entry.turn_id.filter(|turn_id| !turn_id.trim().is_empty());
-    let transcript_path = entry
-        .transcript_path
-        .filter(|path| !path.trim().is_empty())
-        .map(PathBuf::from);
-    let mut activity = workspace_activity_from_status(&entry.status);
-    if activity == WorkspaceActivity::Busy
-        && codex_transcript_has_aborted_turn(
-            transcript_path.as_deref(),
-            session_id.as_deref(),
-            turn_id.as_deref(),
-        )
-    {
-        activity = WorkspaceActivity::Idle;
-    }
-    AgentWorkspaceStatus {
-        activity,
-        session_id,
-    }
-}
-
-fn workspace_activity_from_status(status: &str) -> WorkspaceActivity {
-    match status.trim().to_ascii_lowercase().as_str() {
-        "busy" => WorkspaceActivity::Busy,
-        "idle" => WorkspaceActivity::Idle,
-        _ => WorkspaceActivity::Unknown,
-    }
-}
-
-/// Checks Codex transcript data for an aborted marker for the active turn.
-fn codex_transcript_has_aborted_turn(
-    transcript_path: Option<&Path>,
-    session_id: Option<&str>,
-    turn_id: Option<&str>,
-) -> bool {
-    let Some(turn_id) = turn_id else {
-        return false;
-    };
-    if transcript_path.is_some_and(|path| transcript_contains_aborted_turn(path, turn_id)) {
-        return true;
-    }
-    session_id
-        .and_then(find_codex_transcript_path)
-        .is_some_and(|path| transcript_contains_aborted_turn(&path, turn_id))
-}
-
-/// Checks whether a transcript contains a Codex turn_aborted entry.
-fn transcript_contains_aborted_turn(path: &Path, turn_id: &str) -> bool {
-    let Ok(metadata) = fs::metadata(path) else {
-        return false;
-    };
-    let cache_key = TranscriptAbortCacheKey {
-        path: normalize_path(path),
-        turn_id: turn_id.to_string(),
-        len: metadata.len(),
-        modified: metadata.modified().ok(),
-    };
-    if let Some(cached) = transcript_abort_cache_lookup(&cache_key) {
-        return cached;
-    }
-
-    let found = transcript_file_contains_aborted_turn(path, turn_id);
-    transcript_abort_cache_store(cache_key, found);
-    found
-}
-
-/// Reads transcript lines incrementally while looking for an aborted turn.
-fn transcript_file_contains_aborted_turn(path: &Path, turn_id: &str) -> bool {
-    let Ok(file) = File::open(path) else {
-        return false;
-    };
-    let mut reader = BufReader::new(file);
-    let mut line = String::new();
-    loop {
-        line.clear();
-        let Ok(read) = reader.read_line(&mut line) else {
-            return false;
-        };
-        if read == 0 {
-            return false;
-        }
-        // Trigger: agent status is still busy while Codex may have aborted.
-        // Why not the normal status path: the hook can lag behind transcript.
-        // Prevents: reading a large jsonl transcript or allocating every line.
-        if !line.contains("turn_aborted") || !line.contains(turn_id) {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        let payload = value.get("payload").unwrap_or(&serde_json::Value::Null);
-        if payload.get("type").and_then(serde_json::Value::as_str) == Some("turn_aborted")
-            && payload.get("turn_id").and_then(serde_json::Value::as_str) == Some(turn_id)
-        {
-            return true;
-        }
-    }
-}
-
-/// Returns a cached transcript aborted-turn result when the file is unchanged.
-fn transcript_abort_cache_lookup(cache_key: &TranscriptAbortCacheKey) -> Option<bool> {
-    let cache = TRANSCRIPT_ABORT_CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
-    cache.lock().ok()?.get(cache_key).copied()
-}
-
-/// Stores a transcript aborted-turn result with a bounded cache size.
-fn transcript_abort_cache_store(cache_key: TranscriptAbortCacheKey, found: bool) {
-    let cache = TRANSCRIPT_ABORT_CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
-    let Ok(mut cache) = cache.lock() else {
-        return;
-    };
-    if cache.len() >= TRANSCRIPT_ABORT_CACHE_LIMIT {
-        cache.clear();
-    }
-    cache.insert(cache_key, found);
-}
-
-fn find_codex_transcript_path(session_id: &str) -> Option<PathBuf> {
-    let root = home_dir()?.join(".codex").join("sessions");
-    find_codex_transcript_path_in(&root, session_id)
-}
-
-fn find_codex_transcript_path_in(root: &Path, session_id: &str) -> Option<PathBuf> {
-    let entries = fs::read_dir(root).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if let Some(found) = find_codex_transcript_path_in(&path, session_id) {
-                return Some(found);
-            }
-        } else if path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.contains(session_id) && name.ends_with(".jsonl"))
-        {
-            return Some(path);
-        }
-    }
-    None
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
@@ -2999,13 +2396,6 @@ pub(crate) fn workspace_memo_path(workspace_path: &Path) -> Option<PathBuf> {
 /// Returns the standalone text file used for workspace terminal history.
 pub(crate) fn workspace_terminal_history_path(workspace_path: &Path) -> Option<PathBuf> {
     Some(workspace_store_dir(workspace_path)?.join("terminal.txt"))
-}
-
-/// Returns the shared agent status file path used by hooks and the GUI.
-pub fn agent_status_path() -> Option<PathBuf> {
-    env::var_os("GSDV_AGENT_STATUS_PATH")
-        .map(PathBuf::from)
-        .or_else(|| home_dir().map(|home| home.join(".gsdv").join("agent-status.json")))
 }
 
 #[cfg(test)]

@@ -291,7 +291,8 @@ impl GsdvGuiApp {
         let activity = workspace_activity_from_hook_status(&status.status);
         let workspace_path = PathBuf::from(&status.workspace);
         let normalized_workspace = workspace_path.canonicalize().unwrap_or(workspace_path);
-        let mut changed = false;
+        let mut render_changed = false;
+        let mut session_changed = false;
         for workspace in &mut self.workspaces {
             if let Some(subagent) = workspace
                 .subagents
@@ -300,13 +301,14 @@ impl GsdvGuiApp {
             {
                 if subagent.activity != activity {
                     subagent.activity = activity;
-                    changed = true;
+                    render_changed = true;
                 }
                 if !status.session_id.is_empty()
                     && subagent.session_id.as_deref() != Some(status.session_id.as_str())
                 {
                     subagent.session_id = Some(status.session_id.clone());
-                    changed = true;
+                    render_changed = true;
+                    session_changed = true;
                 }
                 continue;
             }
@@ -320,17 +322,20 @@ impl GsdvGuiApp {
             }
             if workspace.activity != activity {
                 workspace.activity = activity;
-                changed = true;
+                render_changed = true;
             }
             if !status.session_id.is_empty()
                 && workspace.session_id.as_deref() != Some(status.session_id.as_str())
             {
                 workspace.session_id = Some(status.session_id.clone());
-                changed = true;
+                render_changed = true;
+                session_changed = true;
             }
         }
-        if changed {
+        if session_changed {
             self.mark_workspace_store_dirty();
+        }
+        if render_changed {
             self.request_app_repaint();
         }
     }
