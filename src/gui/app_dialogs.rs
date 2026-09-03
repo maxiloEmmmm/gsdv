@@ -113,6 +113,7 @@ impl GsdvGuiApp {
         let mut close_workspace = None;
         let mut close_agent_column = None;
         let mut close_agent_subagent = None;
+        let mut rename_subagent = None;
         let mut close_agent_row = None;
         let mut add_subagent = None;
         let mut restart_agent = None;
@@ -120,6 +121,7 @@ impl GsdvGuiApp {
         let mut set_agent_model = None;
         let mut set_agent_model_provider = None;
         let mut set_agent_work_dir = None;
+        let mut set_agent_helix_work_dir = None;
         let mut confirm_theme_switch = None;
         let mut restart_agent_without_resume = false;
         let mut start_codex_auth = false;
@@ -161,11 +163,13 @@ impl GsdvGuiApp {
                 AppDialog::WorkflowMergeSteps { .. } => Vec2::new(500.0, 260.0),
                 AppDialog::WorkflowDeleteConfirm { .. } => Vec2::new(500.0, 260.0),
                 AppDialog::AddSubagent { .. } => Vec2::new(460.0, 580.0),
+                AppDialog::RenameSubagent { .. } => Vec2::new(520.0, 240.0),
                 AppDialog::RestartAgent { .. } => Vec2::new(500.0, 260.0),
                 AppDialog::SwitchAgent { .. } => Vec2::new(520.0, 280.0),
                 AppDialog::SetAgentModel { .. }
                 | AppDialog::SetAgentModelProvider { .. }
-                | AppDialog::SetAgentWorkDir { .. } => Vec2::new(520.0, 260.0),
+                | AppDialog::SetAgentWorkDir { .. }
+                | AppDialog::SetAgentHelixWorkDir { .. } => Vec2::new(520.0, 260.0),
                 AppDialog::ConfirmThemeSwitch { .. } => Vec2::new(460.0, 250.0),
                 AppDialog::AgentExitedAbnormally { .. } => Vec2::new(620.0, 340.0),
                 AppDialog::Help => Vec2::new(760.0, 640.0),
@@ -1203,6 +1207,53 @@ impl GsdvGuiApp {
                         }
                     });
                 }
+                AppDialog::RenameSubagent {
+                    index,
+                    id,
+                    mut name,
+                } => {
+                    let workspace = self.workspaces.get(index);
+                    let subagent_exists = workspace.is_some_and(|workspace| {
+                        workspace
+                            .subagents
+                            .iter()
+                            .any(|subagent| subagent.id == id)
+                    });
+                    ui.label(
+                        RichText::new(i18n::text(self.app_language, "Rename subagent")).strong(),
+                    );
+                    if let Some(workspace) = workspace {
+                        ui.label(muted(&workspace.name));
+                    }
+                    ui.add_space(12.0);
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut name)
+                            .hint_text(i18n::text(self.app_language, "subagent name"))
+                            .desired_width(f32::INFINITY),
+                    );
+                    if response.changed() {
+                        next_dialog = Some(AppDialog::RenameSubagent {
+                            index,
+                            id: id.clone(),
+                            name: name.clone(),
+                        });
+                    }
+                    ui.add_space(14.0);
+                    let mut save_requested = response.has_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if primary_action(ui, i18n::text(self.app_language, "Rename")).clicked() {
+                            save_requested = true;
+                        }
+                        if secondary_action(ui, i18n::text(self.app_language, "Cancel")).clicked() {
+                            next_dialog = None;
+                        }
+                    });
+                    if save_requested && subagent_exists && !name.trim().is_empty() {
+                        rename_subagent = Some((index, id, name));
+                        next_dialog = None;
+                    }
+                }
                 AppDialog::CloseAgentRow { index, row_index } => {
                     let workspace = self.workspaces.get(index);
                     let agent_count = workspace
@@ -1268,6 +1319,7 @@ impl GsdvGuiApp {
                     mut agent_effort,
                     mut agent_fast_mode,
                     mut agent_work_dir,
+                    mut helix_work_dir,
                     mut session_id,
                 } => {
                     let workspace = self.workspaces.get(index);
@@ -1296,6 +1348,7 @@ impl GsdvGuiApp {
                             agent_effort: agent_effort.clone(),
                             agent_fast_mode,
                             agent_work_dir: agent_work_dir.clone(),
+                            helix_work_dir: helix_work_dir.clone(),
                             session_id: session_id.clone(),
                         });
                     }
@@ -1330,6 +1383,7 @@ impl GsdvGuiApp {
                             agent_effort: agent_effort.clone(),
                             agent_fast_mode,
                             agent_work_dir: agent_work_dir.clone(),
+                            helix_work_dir: helix_work_dir.clone(),
                             session_id: session_id.clone(),
                         });
                     }
@@ -1355,6 +1409,7 @@ impl GsdvGuiApp {
                             agent_effort: agent_effort.clone(),
                             agent_fast_mode,
                             agent_work_dir: agent_work_dir.clone(),
+                            helix_work_dir: helix_work_dir.clone(),
                             session_id: session_id.clone(),
                         });
                     }
@@ -1384,6 +1439,7 @@ impl GsdvGuiApp {
                                 agent_effort: agent_effort.clone(),
                                 agent_fast_mode,
                                 agent_work_dir: agent_work_dir.clone(),
+                                helix_work_dir: helix_work_dir.clone(),
                                 session_id: session_id.clone(),
                             });
                         }
@@ -1426,6 +1482,7 @@ impl GsdvGuiApp {
                             agent_effort: agent_effort.clone(),
                             agent_fast_mode,
                             agent_work_dir: agent_work_dir.clone(),
+                            helix_work_dir: helix_work_dir.clone(),
                             session_id: session_id.clone(),
                         });
                     }
@@ -1463,6 +1520,7 @@ impl GsdvGuiApp {
                                 agent_effort: agent_effort.clone(),
                                 agent_fast_mode,
                                 agent_work_dir: agent_work_dir.clone(),
+                                helix_work_dir: helix_work_dir.clone(),
                                 session_id: session_id.clone(),
                             });
                         }
@@ -1489,6 +1547,33 @@ impl GsdvGuiApp {
                             agent_effort: agent_effort.clone(),
                             agent_fast_mode,
                             agent_work_dir: agent_work_dir.clone(),
+                            helix_work_dir: helix_work_dir.clone(),
+                            session_id: session_id.clone(),
+                        });
+                    }
+                    ui.add_space(10.0);
+                    ui.label(section_label(i18n::text(
+                        self.app_language,
+                        "CODE WORK-DIR (OPTIONAL)",
+                    )));
+                    let helix_work_dir_response = ui.add(
+                        egui::TextEdit::singleline(&mut helix_work_dir)
+                            .hint_text(i18n::text(self.app_language, "extra path lookup for Code"))
+                            .desired_width(f32::INFINITY),
+                    );
+                    if helix_work_dir_response.changed() {
+                        next_dialog = Some(AppDialog::AddSubagent {
+                            index,
+                            column_id: column_id.clone(),
+                            name: name.clone(),
+                            agent_kind,
+                            agent_model: agent_model.clone(),
+                            agent_model_provider: agent_model_provider.clone(),
+                            model_providers: model_providers.clone(),
+                            agent_effort: agent_effort.clone(),
+                            agent_fast_mode,
+                            agent_work_dir: agent_work_dir.clone(),
+                            helix_work_dir: helix_work_dir.clone(),
                             session_id: session_id.clone(),
                         });
                     }
@@ -1514,6 +1599,7 @@ impl GsdvGuiApp {
                             agent_effort: agent_effort.clone(),
                             agent_fast_mode,
                             agent_work_dir: agent_work_dir.clone(),
+                            helix_work_dir: helix_work_dir.clone(),
                             session_id: session_id.clone(),
                         });
                     }
@@ -1523,6 +1609,7 @@ impl GsdvGuiApp {
                         && (response.has_focus()
                             || model_response.has_focus()
                             || work_dir_response.has_focus()
+                            || helix_work_dir_response.has_focus()
                             || session_response.has_focus())
                         && ui.input(|input| input.key_pressed(egui::Key::Enter));
                     let mut create_requested = enter_create;
@@ -1571,6 +1658,14 @@ impl GsdvGuiApp {
                                 trimmed_agent_work_dir,
                             )))
                         };
+                        let trimmed_helix_work_dir = helix_work_dir.trim();
+                        let helix_work_dir = if trimmed_helix_work_dir.is_empty() {
+                            None
+                        } else {
+                            data::normalize_stored_helix_work_dir(Some(PathBuf::from(
+                                trimmed_helix_work_dir,
+                            )))
+                        };
                         add_subagent = Some((
                             index,
                             column_id.clone(),
@@ -1584,6 +1679,7 @@ impl GsdvGuiApp {
                                 .then_some(agent_fast_mode)
                                 .flatten(),
                             agent_work_dir,
+                            helix_work_dir,
                             session_id,
                         ));
                         next_dialog = None;
@@ -1873,6 +1969,91 @@ impl GsdvGuiApp {
                     });
                     if save_requested {
                         set_agent_work_dir = Some((index, slot, work_dir));
+                        next_dialog = None;
+                    }
+                }
+                AppDialog::SetAgentHelixWorkDir {
+                    index,
+                    slot,
+                    mut work_dir,
+                } => {
+                    let workspace = self.agent_metadata_for_slot(index, &slot);
+                    ui.label(
+                        RichText::new(i18n::text(self.app_language, "Code work-dir")).strong(),
+                    );
+                    if let Some(workspace) = workspace.as_ref() {
+                        ui.label(muted(&format!(
+                            "{} · {}",
+                            workspace.agent_kind.title(),
+                            workspace.name
+                        )));
+                    }
+                    ui.add_space(12.0);
+                    ui.label(section_label(i18n::text(
+                        self.app_language,
+                        "CODE WORK-DIR (OPTIONAL)",
+                    )));
+                    let mut picked_work_dir = None;
+                    let response = ui
+                        .horizontal(|ui| {
+                            let response = ui.add(
+                                egui::TextEdit::singleline(&mut work_dir)
+                                    .hint_text(i18n::text(
+                                        self.app_language,
+                                        "extra path lookup for Code",
+                                    ))
+                                    .desired_width((ui.available_width() - 96.0).max(160.0)),
+                            );
+                            if secondary_action(ui, i18n::text(self.app_language, "Choose..."))
+                                .clicked()
+                            {
+                                let start_dir = work_dir_dialog_start_dir(
+                                    &work_dir,
+                                    workspace.as_ref().map(|workspace| workspace.path.as_path()),
+                                );
+                                let mut dialog = rfd::FileDialog::new().set_title(i18n::text(
+                                    self.app_language,
+                                    "Code work-dir",
+                                ));
+                                if let Some(start_dir) = start_dir {
+                                    dialog = dialog.set_directory(start_dir);
+                                }
+                                if let Some(path) = dialog.pick_folder() {
+                                    picked_work_dir = Some(path.to_string_lossy().to_string());
+                                }
+                            }
+                            response
+                        })
+                        .inner;
+                    if let Some(path) = picked_work_dir {
+                        work_dir = path;
+                        next_dialog = Some(AppDialog::SetAgentHelixWorkDir {
+                            index,
+                            slot: slot.clone(),
+                            work_dir: work_dir.clone(),
+                        });
+                    }
+                    if response.changed() {
+                        next_dialog = Some(AppDialog::SetAgentHelixWorkDir {
+                            index,
+                            slot: slot.clone(),
+                            work_dir: work_dir.clone(),
+                        });
+                    }
+                    ui.add_space(14.0);
+                    let enter_save = response.has_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    let mut save_requested = enter_save;
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if primary_action(ui, i18n::text(self.app_language, "Save")).clicked() {
+                            save_requested = true;
+                        }
+                        if secondary_action(ui, i18n::text(self.app_language, "Cancel")).clicked() {
+                            next_dialog = None;
+                        }
+                    });
+                    if save_requested {
+                        set_agent_helix_work_dir = Some((index, slot, work_dir));
                         next_dialog = None;
                     }
                 }
@@ -2284,6 +2465,9 @@ impl GsdvGuiApp {
         if let Some((index, id)) = close_agent_subagent {
             self.remove_subagent(ctx, index, &id);
         }
+        if let Some((index, id, name)) = rename_subagent {
+            self.rename_subagent(index, &id, name);
+        }
         if let Some((index, row_index)) = close_agent_row {
             self.remove_agent_row(ctx, index, row_index);
         }
@@ -2297,6 +2481,7 @@ impl GsdvGuiApp {
             agent_effort,
             agent_fast_mode,
             agent_work_dir,
+            helix_work_dir,
             session_id,
         )) = add_subagent
         {
@@ -2311,6 +2496,7 @@ impl GsdvGuiApp {
                 agent_effort,
                 agent_fast_mode,
                 agent_work_dir,
+                helix_work_dir,
                 session_id,
             );
         }
@@ -2328,6 +2514,9 @@ impl GsdvGuiApp {
         }
         if let Some((index, slot, work_dir)) = set_agent_work_dir {
             self.set_agent_slot_work_dir(ctx, index, slot, work_dir);
+        }
+        if let Some((index, slot, work_dir)) = set_agent_helix_work_dir {
+            self.set_agent_slot_helix_work_dir(index, slot, work_dir);
         }
         if let Some(mode) = confirm_theme_switch {
             self.apply_theme_switch(ctx, mode);
@@ -2676,6 +2865,7 @@ fn app_dialog_title(dialog: &AppDialog, language: AppLanguage) -> &str {
         AppDialog::CloseWorkspace { .. } => "Close Workspace",
         AppDialog::CloseAgentColumn { .. } => "Close Agent Column",
         AppDialog::CloseAgentSubagent { .. } => "Close Subagent",
+        AppDialog::RenameSubagent { .. } => "Rename subagent",
         AppDialog::CloseAgentRow { .. } => "Close Agent Row",
         AppDialog::AddSubagent { .. } => "Add Subagent",
         AppDialog::RestartAgent { .. } => "Restart Agent",
@@ -2683,6 +2873,7 @@ fn app_dialog_title(dialog: &AppDialog, language: AppLanguage) -> &str {
         AppDialog::SetAgentModel { .. } => "Agent model",
         AppDialog::SetAgentModelProvider { .. } => "Agent model provider",
         AppDialog::SetAgentWorkDir { .. } => "Agent work-dir",
+        AppDialog::SetAgentHelixWorkDir { .. } => "Code work-dir",
         AppDialog::ConfirmThemeSwitch { .. } => "Switch Theme",
         AppDialog::AgentExitedAbnormally { .. } => "Agent Exited",
         AppDialog::Help => "Help",

@@ -84,6 +84,8 @@ pub struct TerminalWorkspaceMetadata {
     pub agent_fast_mode: Option<bool>,
     /// Optional per-agent working directory override.
     pub agent_work_dir: Option<PathBuf>,
+    /// Optional per-agent Helix lookup directory.
+    pub helix_work_dir: Option<PathBuf>,
     /// Stable hook id exported to Agent child processes.
     pub agent_id: String,
     /// Last known resumable Agent session id.
@@ -120,6 +122,7 @@ impl TerminalWorkspaceMetadata {
             agent_effort: workspace.agent_effort.clone(),
             agent_fast_mode: workspace.agent_fast_mode,
             agent_work_dir: workspace.agent_work_dir.clone(),
+            helix_work_dir: workspace.helix_work_dir.clone(),
             agent_id: workspace.agent_id.clone(),
             session_id: workspace.session_id.clone(),
             activity: workspace.activity,
@@ -138,6 +141,7 @@ impl TerminalWorkspaceMetadata {
         metadata.agent_effort = subagent.agent_effort.clone();
         metadata.agent_fast_mode = subagent.agent_fast_mode;
         metadata.agent_work_dir = subagent.agent_work_dir.clone();
+        metadata.helix_work_dir = subagent.helix_work_dir.clone();
         metadata.agent_id = subagent.agent_id.clone();
         metadata.session_id = subagent.session_id.clone();
         metadata.activity = subagent.activity;
@@ -477,6 +481,8 @@ pub trait TerminalHost {
 pub struct GuiTerminalHost {
     kind: TerminalSurfaceKind,
     workspace_root: PathBuf,
+    /// Relative Agent output paths are checked against these roots in order.
+    terminal_output_roots: Vec<PathBuf>,
     workspace_name: String,
     agent_title: String,
     session_id: Option<String>,
@@ -1116,6 +1122,7 @@ impl GuiTerminalHost {
         Ok(Self {
             kind,
             workspace_root: workspace.path.clone(),
+            terminal_output_roots: terminal_output_search_roots(workspace),
             workspace_name: workspace.name.clone(),
             agent_title: workspace.agent_kind.title().to_string(),
             session_id: workspace.session_id.clone(),
@@ -1183,6 +1190,7 @@ impl GuiTerminalHost {
         Ok(Self {
             kind: TerminalSurfaceKind::Helix,
             workspace_root: spec.workdir.clone(),
+            terminal_output_roots: vec![spec.workdir.clone()],
             workspace_name: workspace.name.clone(),
             agent_title: String::new(),
             session_id: None,
@@ -1211,6 +1219,9 @@ impl GuiTerminalHost {
             self.session_id = workspace.session_id.clone();
         }
         self.activity = workspace.activity;
+        if self.kind == TerminalSurfaceKind::Agent {
+            self.terminal_output_roots = terminal_output_search_roots(workspace);
+        }
         if self.kind == TerminalSurfaceKind::Agent {
             let title = workspace.agent_kind.title();
             if self.agent_title != title {
@@ -1369,6 +1380,7 @@ impl GuiTerminalHost {
                 response.rect,
                 &response,
                 &self.workspace_root,
+                &self.terminal_output_roots,
             )
         } else {
             None
@@ -3009,6 +3021,7 @@ fn terminal_output_click(
     rect: Rect,
     response: &egui::Response,
     workspace_root: &Path,
+    output_roots: &[PathBuf],
 ) -> Option<TerminalOutputClick> {
     if !response.clicked_by(PointerButton::Primary)
         || response.double_clicked()
@@ -3021,7 +3034,7 @@ fn terminal_output_click(
         return Some(TerminalOutputClick::Url(matched.url));
     }
     let matched = terminal_file_match_at_pos(backend, rect, pos, workspace_root)?;
-    let path = resolve_terminal_file_path(workspace_root, &matched.path);
+    let path = resolve_terminal_file_path_from_roots(workspace_root, &matched.path, output_roots);
     terminal_output_click_for_resolved_path(path, matched.line, matched.end_line)
 }
 
@@ -3989,6 +4002,47 @@ fn resolve_terminal_file_path(workspace_root: &Path, path: &Path) -> PathBuf {
     } else {
         workspace_root.join(path)
     }
+}
+
+/// Resolves an Agent output path using Agent, Helix, then workspace roots.
+fn resolve_terminal_file_path_from_roots(
+    workspace_root: &Path,
+    path: &Path,
+    output_roots: &[PathBuf],
+) -> PathBuf {
+    if expand_terminal_home_path(path).is_some() || path.is_absolute() {
+        return resolve_terminal_file_path(workspace_root, path);
+    }
+    let mut first_candidate = None;
+    for root in output_roots
+        .iter()
+        .chain(std::iter::once(&workspace_root.to_path_buf()))
+    {
+        let candidate = root.join(path);
+        first_candidate.get_or_insert_with(|| candidate.clone());
+        if candidate.is_file() || candidate.is_dir() {
+            return candidate;
+        }
+    }
+    first_candidate.unwrap_or_else(|| workspace_root.join(path))
+}
+
+/// Builds ordered roots used for resolving relative Agent output paths.
+fn terminal_output_search_roots(workspace: &TerminalWorkspaceMetadata) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for root in [
+        workspace.agent_work_dir.as_ref(),
+        workspace.helix_work_dir.as_ref(),
+        Some(&workspace.path),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !roots.iter().any(|current| current == root) {
+            roots.push(root.clone());
+        }
+    }
+    roots
 }
 
 /// Expands shell-style home paths emitted by terminal output.

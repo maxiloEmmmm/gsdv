@@ -736,6 +736,7 @@ impl GsdvGuiApp {
         agent_effort: Option<String>,
         agent_fast_mode: Option<bool>,
         agent_work_dir: Option<PathBuf>,
+        helix_work_dir: Option<PathBuf>,
         session_id: Option<String>,
     ) {
         let Some(workspace) = self.workspaces.get_mut(index) else {
@@ -750,6 +751,7 @@ impl GsdvGuiApp {
             agent_effort,
             agent_fast_mode,
             agent_work_dir,
+            helix_work_dir,
             session_id,
         );
         let slot = AgentSlotId::Subagent(subagent.id.clone());
@@ -959,6 +961,30 @@ impl GsdvGuiApp {
         if let Some(states) = self.agent_busy_watchdogs.get_mut(index) {
             states.remove(&slot);
         }
+        self.persist_workspaces();
+        self.request_app_repaint();
+    }
+
+    /// Renames one non-primary Agent tab and persists its sidecar state.
+    pub(super) fn rename_subagent(&mut self, index: usize, id: &str, name: String) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        let Some(workspace) = self.workspaces.get_mut(index) else {
+            return;
+        };
+        let Some(subagent) = workspace
+            .subagents
+            .iter_mut()
+            .find(|subagent| subagent.id == id)
+        else {
+            return;
+        };
+        if subagent.name == name {
+            return;
+        }
+        subagent.name = name.to_string();
         self.persist_workspaces();
         self.request_app_repaint();
     }

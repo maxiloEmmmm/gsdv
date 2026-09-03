@@ -339,6 +339,52 @@ impl GsdvGuiApp {
         );
     }
 
+    /// Updates one Agent slot Helix lookup directory without changing its Agent cwd.
+    pub(super) fn set_agent_slot_helix_work_dir(
+        &mut self,
+        index: usize,
+        slot: AgentSlotId,
+        work_dir: String,
+    ) {
+        let trimmed_work_dir = work_dir.trim();
+        let next_work_dir = normalized_agent_work_dir_value(&work_dir);
+        if !trimmed_work_dir.is_empty() && next_work_dir.is_none() {
+            self.push_toast(
+                i18n::text(self.app_language, "Directory not found"),
+                theme::warning(),
+            );
+            return;
+        }
+        if self.agent_slot_helix_work_dir(index, &slot) == next_work_dir {
+            return;
+        }
+        let Some(workspace) = self.workspaces.get_mut(index) else {
+            return;
+        };
+        match &slot {
+            AgentSlotId::Main => workspace.helix_work_dir = next_work_dir.clone(),
+            AgentSlotId::Subagent(id) => {
+                let Some(subagent) = workspace
+                    .subagents
+                    .iter_mut()
+                    .find(|subagent| &subagent.id == id)
+                else {
+                    return;
+                };
+                subagent.helix_work_dir = next_work_dir.clone();
+            }
+        }
+        self.persist_workspaces();
+        self.push_toast(
+            if next_work_dir.is_some() {
+                i18n::text(self.app_language, "Code work-dir set")
+            } else {
+                i18n::text(self.app_language, "Code work-dir override cleared")
+            },
+            theme::success(),
+        );
+    }
+
     /// Updates one agent slot effort override without clearing its session id.
     pub(super) fn set_agent_slot_effort(
         &mut self,
@@ -471,6 +517,23 @@ impl GsdvGuiApp {
                 .iter()
                 .find(|subagent| &subagent.id == id)
                 .and_then(|subagent| subagent.agent_work_dir.clone()),
+        }
+    }
+
+    /// Returns the configured Helix lookup directory for one Agent slot.
+    pub(super) fn agent_slot_helix_work_dir(
+        &self,
+        index: usize,
+        slot: &AgentSlotId,
+    ) -> Option<PathBuf> {
+        let workspace = self.workspaces.get(index)?;
+        match slot {
+            AgentSlotId::Main => workspace.helix_work_dir.clone(),
+            AgentSlotId::Subagent(id) => workspace
+                .subagents
+                .iter()
+                .find(|subagent| &subagent.id == id)
+                .and_then(|subagent| subagent.helix_work_dir.clone()),
         }
     }
 

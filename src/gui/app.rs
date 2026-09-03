@@ -2123,6 +2123,8 @@ struct AgentSurfaceSnapshot {
     agent_fast_mode: Option<bool>,
     /// Optional main Agent working directory override.
     agent_work_dir: Option<PathBuf>,
+    /// Optional main Agent Helix lookup directory.
+    helix_work_dir: Option<PathBuf>,
     /// Main Agent session id shown in the tab menu.
     session_id: Option<String>,
     /// Main Agent activity shown by tab chrome.
@@ -2144,6 +2146,7 @@ impl AgentSurfaceSnapshot {
             agent_effort: workspace.agent_effort.clone(),
             agent_fast_mode: workspace.agent_fast_mode,
             agent_work_dir: workspace.agent_work_dir.clone(),
+            helix_work_dir: workspace.helix_work_dir.clone(),
             session_id: workspace.session_id.clone(),
             activity: workspace.activity,
         }
@@ -2425,6 +2428,11 @@ enum AppDialog {
         index: usize,
         id: String,
     },
+    RenameSubagent {
+        index: usize,
+        id: String,
+        name: String,
+    },
     CloseAgentRow {
         index: usize,
         row_index: usize,
@@ -2440,6 +2448,7 @@ enum AppDialog {
         agent_effort: String,
         agent_fast_mode: Option<bool>,
         agent_work_dir: String,
+        helix_work_dir: String,
         session_id: String,
     },
     RestartAgent {
@@ -2463,6 +2472,11 @@ enum AppDialog {
         model_providers: Vec<String>,
     },
     SetAgentWorkDir {
+        index: usize,
+        slot: AgentSlotId,
+        work_dir: String,
+    },
+    SetAgentHelixWorkDir {
         index: usize,
         slot: AgentSlotId,
         work_dir: String,
@@ -2733,6 +2747,14 @@ enum AgentTabAction {
     SetWorkDir {
         slot: AgentSlotId,
         work_dir: String,
+    },
+    SetHelixWorkDir {
+        slot: AgentSlotId,
+        work_dir: String,
+    },
+    RenameSubagent {
+        id: String,
+        name: String,
     },
     CopySessionId(String),
     SetMarkdownOutlineCollapsed(bool),
