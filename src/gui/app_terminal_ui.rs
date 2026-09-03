@@ -225,7 +225,12 @@ impl GsdvGuiApp {
         if let Some(output) = host_output
             && let Some(click) = output.output_click
         {
-            self.handle_terminal_output_click(ui.ctx(), click, output.output_click_copy_only);
+            self.handle_terminal_output_click(
+                ui.ctx(),
+                click,
+                output.output_click_copy_only,
+                self.agent_slot_helix_work_dir(self.active_workspace, &agent_slot),
+            );
         }
         if let Some(exit) = agent_exit
             && self.active_app_dialog().is_none()
@@ -392,7 +397,12 @@ impl GsdvGuiApp {
         if let Some(output) = host_output
             && let Some(click) = output.output_click
         {
-            self.handle_terminal_output_click(ui.ctx(), click, output.output_click_copy_only);
+            self.handle_terminal_output_click(
+                ui.ctx(),
+                click,
+                output.output_click_copy_only,
+                self.agent_slot_helix_work_dir(self.active_workspace, &agent_slot),
+            );
         }
         if let Some(exit) = agent_exit
             && self.active_app_dialog().is_none()
@@ -407,6 +417,7 @@ impl GsdvGuiApp {
         ctx: &egui::Context,
         click: TerminalOutputClick,
         copy_only: bool,
+        helix_work_dir: Option<PathBuf>,
     ) {
         if copy_only {
             self.copy_terminal_output_click(ctx, &click);
@@ -414,10 +425,15 @@ impl GsdvGuiApp {
         }
         match click {
             TerminalOutputClick::PathCandidate(click) => {
-                self.spawn_terminal_output_path_classify_task(ctx, self.active_workspace, click);
+                self.spawn_terminal_output_path_classify_task(
+                    ctx,
+                    self.active_workspace,
+                    click,
+                    helix_work_dir,
+                );
             }
             TerminalOutputClick::FileLine(click) => {
-                self.open_terminal_file_line(ctx, click);
+                self.open_terminal_file_line(ctx, click, helix_work_dir);
             }
             TerminalOutputClick::RevealPath(path) => {
                 self.spawn_reveal_path_task(ctx, path);
@@ -452,13 +468,21 @@ impl GsdvGuiApp {
         &mut self,
         ctx: &egui::Context,
         click: TerminalOutputClick,
+        helix_work_dir: Option<PathBuf>,
     ) {
         match click {
-            TerminalOutputClick::FileLine(click) => self.open_terminal_file_line(ctx, click),
+            TerminalOutputClick::FileLine(click) => {
+                self.open_terminal_file_line(ctx, click, helix_work_dir)
+            }
             TerminalOutputClick::RevealPath(path) => self.spawn_reveal_path_task(ctx, path),
             TerminalOutputClick::Url(url) => self.open_terminal_url_in_browser(&url),
             TerminalOutputClick::PathCandidate(click) => {
-                self.spawn_terminal_output_path_classify_task(ctx, self.active_workspace, click);
+                self.spawn_terminal_output_path_classify_task(
+                    ctx,
+                    self.active_workspace,
+                    click,
+                    helix_work_dir,
+                );
             }
         }
     }
@@ -1316,6 +1340,7 @@ impl GsdvGuiApp {
         &mut self,
         ctx: &egui::Context,
         click: TerminalFileLineClick,
+        helix_work_dir: Option<PathBuf>,
     ) {
         let Some((file, target)) = self.terminal_file_line_click_target(&click) else {
             return;
@@ -1327,7 +1352,7 @@ impl GsdvGuiApp {
             self.open_terminal_markdown_file(file);
             return;
         }
-        self.open_terminal_file_line_in_helix(ctx, click, file, target);
+        self.open_terminal_file_line_in_helix(ctx, click, file, target, helix_work_dir);
     }
 
     /// Opens a clicked Agent terminal Markdown file in the native editor.
@@ -1349,6 +1374,7 @@ impl GsdvGuiApp {
         click: TerminalFileLineClick,
         file: std::path::PathBuf,
         target: String,
+        helix_work_dir: Option<PathBuf>,
     ) {
         let Some(workspace_dir) = self
             .current_workspace()
@@ -1363,6 +1389,7 @@ impl GsdvGuiApp {
             workspace_dir,
             file,
             click.line,
+            helix_work_dir,
         );
     }
 

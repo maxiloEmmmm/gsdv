@@ -897,13 +897,19 @@ impl GsdvGuiApp {
         workspace_dir: PathBuf,
         file: PathBuf,
         line: usize,
+        helix_work_dir: Option<PathBuf>,
     ) {
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
         let repaint_controller = self.repaint_controller.clone();
         self.background_runtime.spawn(async move {
             let spec = tokio::task::spawn_blocking(move || HelixLaunchSpec {
-                workdir: terminal_file_helix_workdir(&workspace_dir, &file),
+                // 触发条件：Agent 输出文件被点击且配置了 Code work-dir。
+                // 不能只使用文件所在仓库：用户可能需要从指定目录加载编辑器上下文。
+                // 防止回归：未配置时保留原有仓库根目录回退行为。
+                workdir: helix_work_dir
+                    .filter(|path| path.is_dir())
+                    .unwrap_or_else(|| terminal_file_helix_workdir(&workspace_dir, &file)),
                 file: Some(file),
                 line: Some(line),
             })
@@ -924,6 +930,7 @@ impl GsdvGuiApp {
         ctx: &egui::Context,
         workspace_index: usize,
         click: TerminalFileLineClick,
+        helix_work_dir: Option<PathBuf>,
     ) {
         let tx = self.app_event_tx.clone();
         let repaint_ctx = ctx.clone();
@@ -936,6 +943,7 @@ impl GsdvGuiApp {
                 let _ = tx.send(AppEvent::TerminalOutputPathClassified {
                     workspace_index,
                     click,
+                    helix_work_dir,
                 });
             }
             repaint_controller.request_repaint(&repaint_ctx);
