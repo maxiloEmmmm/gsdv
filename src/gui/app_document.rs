@@ -160,8 +160,8 @@ impl GsdvGuiApp {
                     .unwrap_or_else(|| "untitled.md".to_string());
                 self.set_active_app_dialog(Some(AppDialog::RenamePath { path, name }));
             }
-            OutlineAction::DeleteMarkdown(path) => {
-                self.set_active_app_dialog(Some(AppDialog::DeleteMarkdown { path }));
+            OutlineAction::Delete { path, is_dir } => {
+                self.set_active_app_dialog(Some(AppDialog::DeletePath { path, is_dir }));
             }
             OutlineAction::CopyAbsolute(path) => {
                 let absolute = self.resolve_outline_target(&path);
@@ -401,20 +401,6 @@ impl GsdvGuiApp {
         }
     }
 
-    /// 删除后移除最近访问 Markdown 记录。
-    pub(super) fn remove_recent_markdown_path(&mut self, index: usize, path: &Path) {
-        let Some(workspace) = self.workspaces.get_mut(index) else {
-            return;
-        };
-        let before = workspace.recent_markdowns.len();
-        workspace
-            .recent_markdowns
-            .retain(|entry| entry.path != path);
-        if workspace.recent_markdowns.len() != before {
-            self.mark_workspace_store_dirty();
-        }
-    }
-
     /// 生成最近访问 Markdown modal 使用的 outline tree。
     pub(super) fn recent_markdown_outline_nodes(&self) -> Vec<OutlineNode> {
         let Some(workspace) = self.current_workspace() else {
@@ -489,12 +475,32 @@ impl GsdvGuiApp {
         });
     }
 
-    pub(super) fn delete_markdown_file(&mut self, path: PathBuf) {
+    /// Deletes a non-root outline file or directory after confirmation.
+    ///
+    /// Example: `src/old.md, false` -> asynchronous file deletion task.
+    pub(super) fn delete_outline_path(&mut self, path: PathBuf, is_dir: bool) {
         let absolute = self.resolve_outline_target(&path);
-        self.spawn_file_mutation_task(FileMutationTask::DeleteMarkdown {
+        let is_outline_root = self.current_workspace().is_some_and(|workspace| {
+            absolute == workspace.path
+                || crate::home::home_dir().as_deref() == Some(absolute.as_path())
+                || workspace
+                    .attached_outline_dirs
+                    .iter()
+                    .any(|attached| attached == &absolute)
+        });
+        if is_outline_root {
+            self.set_active_app_dialog(Some(AppDialog::Message {
+                title: i18n::text(self.app_language, "Delete Failed").to_string(),
+                message: i18n::text(self.app_language, "Cannot delete an outline root.")
+                    .to_string(),
+            }));
+            return;
+        }
+        self.spawn_file_mutation_task(FileMutationTask::DeletePath {
             index: self.active_workspace,
             path,
             absolute,
+            is_dir,
         });
     }
 

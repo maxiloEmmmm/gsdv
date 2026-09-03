@@ -145,6 +145,10 @@ fn chinese_text(source: &'static str) -> &'static str {
         "Create New Markdown File" => "新建 Markdown 文件",
         "Create New Folder" => "新建文件夹",
         "Delete markdown file?" => "删除 Markdown 文件？",
+        "Delete folder?" => "删除文件夹？",
+        "Deleted item" => "项目已删除",
+        "Delete Failed" => "删除失败",
+        "Cannot delete an outline root." => "不能删除 outline 根目录。",
         "Close workspace?" => "关闭工作区？",
         "This workspace no longer exists." => "这个工作区已不存在。",
         "This removes the workspace from gsdv and deletes its workspace memo file under ~/.gsdv/workspaces/<workspace-hash>/memo.md. The project directory itself is not deleted." => {
@@ -721,6 +725,10 @@ fn japanese_text(source: &'static str) -> &'static str {
         "Create New Markdown File" => "Markdown ファイルを作成",
         "Create New Folder" => "フォルダを作成",
         "Delete markdown file?" => "Markdown ファイルを削除しますか？",
+        "Delete folder?" => "フォルダを削除しますか？",
+        "Deleted item" => "項目を削除しました",
+        "Delete Failed" => "削除に失敗しました",
+        "Cannot delete an outline root." => "outline のルートは削除できません。",
         "Close workspace?" => "ワークスペースを閉じますか？",
         "This workspace no longer exists." => "このワークスペースは存在しません。",
         "This removes the workspace from gsdv and deletes its workspace memo file under ~/.gsdv/workspaces/<workspace-hash>/memo.md. The project directory itself is not deleted." => {

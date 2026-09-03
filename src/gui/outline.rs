@@ -23,8 +23,8 @@ pub(crate) enum OutlineAction {
     RemoveAttachedDirectory(PathBuf),
     /// 重命名路径。
     Rename(PathBuf),
-    /// 删除 Markdown 文件。
-    DeleteMarkdown(PathBuf),
+    /// 删除普通文件或目录；Root 节点不会生成此动作。
+    Delete { path: PathBuf, is_dir: bool },
     /// 复制绝对路径。
     CopyAbsolute(PathBuf),
     /// 复制 outline 相对路径。
@@ -638,6 +638,17 @@ fn outline_dir_menu(
         *action = Some(OutlineAction::CreateFolder(dir.to_path_buf()));
         ui.close_menu();
     }
+    if root_kind.is_none()
+        && ui
+            .button(RichText::new(i18n::text(language, "Delete folder")).color(theme::danger()))
+            .clicked()
+    {
+        *action = Some(OutlineAction::Delete {
+            path: dir.to_path_buf(),
+            is_dir: true,
+        });
+        ui.close_menu();
+    }
     if ui
         .button(i18n::text(language, "Reveal in Finder"))
         .clicked()
@@ -721,7 +732,10 @@ fn outline_file_menu(
         .button(RichText::new(i18n::text(language, "Delete markdown")).color(theme::danger()))
         .clicked()
     {
-        *action = Some(OutlineAction::DeleteMarkdown(path.to_path_buf()));
+        *action = Some(OutlineAction::Delete {
+            path: path.to_path_buf(),
+            is_dir: false,
+        });
         ui.close_menu();
     }
 }

@@ -2299,10 +2299,11 @@ enum FileMutationResult {
         new_relative: PathBuf,
         result: Result<(), String>,
     },
-    /// Markdown deletion result.
-    DeleteMarkdown {
+    /// File or directory deletion result.
+    DeletePath {
         index: usize,
         path: PathBuf,
+        is_dir: bool,
         result: Result<(), String>,
     },
 }
@@ -2327,11 +2328,12 @@ enum FileMutationTask {
         old_relative: PathBuf,
         new_relative: PathBuf,
     },
-    /// Delete one Markdown file.
-    DeleteMarkdown {
+    /// Delete one file or directory.
+    DeletePath {
         index: usize,
         path: PathBuf,
         absolute: PathBuf,
+        is_dir: bool,
     },
 }
 
@@ -2415,8 +2417,9 @@ enum AppDialog {
         path: PathBuf,
         name: String,
     },
-    DeleteMarkdown {
+    DeletePath {
         path: PathBuf,
+        is_dir: bool,
     },
     CloseWorkspace {
         index: usize,

@@ -109,7 +109,7 @@ impl GsdvGuiApp {
         let mut create_markdown = None;
         let mut create_folder = None;
         let mut rename_path = None;
-        let mut delete_markdown = None;
+        let mut delete_path = None;
         let mut close_workspace = None;
         let mut close_agent_column = None;
         let mut close_agent_subagent = None;
@@ -1006,14 +1006,18 @@ impl GsdvGuiApp {
                         next_dialog = Some(AppDialog::RenamePath { path, name });
                     }
                 }
-                AppDialog::DeleteMarkdown { path } => {
+                AppDialog::DeletePath { path, is_dir } => {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("!").size(30.0).color(theme::danger()));
                         ui.vertical(|ui| {
                             ui.label(
                                 RichText::new(i18n::text(
                                     self.app_language,
-                                    "Delete markdown file?",
+                                    if is_dir {
+                                        "Delete folder?"
+                                    } else {
+                                        "Delete markdown file?"
+                                    },
                                 ))
                                 .strong(),
                             );
@@ -1023,7 +1027,7 @@ impl GsdvGuiApp {
                     ui.add_space(18.0);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if primary_action(ui, i18n::text(self.app_language, "Delete")).clicked() {
-                            delete_markdown = Some(path.clone());
+                            delete_path = Some((path.clone(), is_dir));
                             next_dialog = None;
                         }
                         if secondary_action(ui, i18n::text(self.app_language, "Cancel")).clicked() {
@@ -2453,8 +2457,8 @@ impl GsdvGuiApp {
         if let Some((path, name)) = rename_path {
             self.rename_path(path, name);
         }
-        if let Some(path) = delete_markdown {
-            self.delete_markdown_file(path);
+        if let Some((path, is_dir)) = delete_path {
+            self.delete_outline_path(path, is_dir);
         }
         if let Some(index) = close_workspace {
             self.close_workspace(ctx, index);
@@ -2861,7 +2865,7 @@ fn app_dialog_title(dialog: &AppDialog, language: AppLanguage) -> &str {
         AppDialog::CreateMarkdown { .. } => "Create Markdown",
         AppDialog::CreateFolder { .. } => "Create Folder",
         AppDialog::RenamePath { .. } => "Rename",
-        AppDialog::DeleteMarkdown { .. } => "Confirm Delete",
+        AppDialog::DeletePath { .. } => "Confirm Delete",
         AppDialog::CloseWorkspace { .. } => "Close Workspace",
         AppDialog::CloseAgentColumn { .. } => "Close Agent Column",
         AppDialog::CloseAgentSubagent { .. } => "Close Subagent",
