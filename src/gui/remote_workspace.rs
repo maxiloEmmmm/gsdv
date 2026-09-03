@@ -103,6 +103,8 @@ pub struct RemoteProjectSnapshot {
     pub agent_fast_mode: Option<bool>,
     /// Agent 工作目录覆盖。
     pub agent_work_dir: Option<PathBuf>,
+    /// Agent 输出路径的 Helix 查找目录覆盖。
+    pub helix_work_dir: Option<PathBuf>,
     /// 主 agent 稳定 ID。
     pub agent_id: String,
     /// 主 agent resume session ID。
@@ -147,6 +149,8 @@ pub struct RemoteLayoutPayload {
     pub agent_fast_mode: Option<bool>,
     /// 主 agent 工作目录覆盖。
     pub agent_work_dir: Option<PathBuf>,
+    /// 主 agent 输出路径的 Helix 查找目录覆盖。
+    pub helix_work_dir: Option<PathBuf>,
     /// 最新 subagent 配置。
     pub subagents: Vec<SubagentViewData>,
     /// 最新 Agent 行布局。
@@ -1387,6 +1391,7 @@ fn project_snapshot(
         agent_effort: string_field(workspace, "agent_effort"),
         agent_fast_mode: workspace.get("agent_fast_mode").and_then(Value::as_bool),
         agent_work_dir: string_field(workspace, "agent_work_dir").map(PathBuf::from),
+        helix_work_dir: string_field(workspace, "helix_work_dir").map(PathBuf::from),
         agent_id: string_field(workspace, "agent_id")
             .unwrap_or_else(|| format!("remote-{}", crate::gui::data::workspace_store_key(&path))),
         session_id: string_field(workspace, "session_id"),

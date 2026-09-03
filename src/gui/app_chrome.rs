@@ -147,6 +147,8 @@ pub(super) fn agent_slot_context_menu(
     current_agent_effort: Option<&str>,
     current_agent_fast_mode: Option<bool>,
     current_agent_work_dir: Option<&Path>,
+    current_agent_helix_work_dir: Option<&Path>,
+    current_agent_name: Option<&str>,
     current_session_id: Option<&str>,
     action: &mut Option<AgentTabAction>,
     language: AppLanguage,
@@ -191,6 +193,29 @@ pub(super) fn agent_slot_context_menu(
                 .map(|path| path.to_string_lossy().to_string())
                 .unwrap_or_default(),
         });
+        ui.close_menu();
+    }
+    if ui
+        .button(i18n::text(language, "Set Code work-dir"))
+        .clicked()
+    {
+        *action = Some(AgentTabAction::SetHelixWorkDir {
+            slot: slot.clone(),
+            work_dir: current_agent_helix_work_dir
+                .map(|path| path.to_string_lossy().to_string())
+                .unwrap_or_default(),
+        });
+        ui.close_menu();
+    }
+    if let Some(name) = current_agent_name
+        && ui.button(i18n::text(language, "Rename subagent")).clicked()
+    {
+        if let AgentSlotId::Subagent(id) = &slot {
+            *action = Some(AgentTabAction::RenameSubagent {
+                id: id.clone(),
+                name: name.to_string(),
+            });
+        }
         ui.close_menu();
     }
     ui.menu_button(i18n::text(language, "Effort"), |ui| {

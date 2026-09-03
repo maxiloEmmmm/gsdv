@@ -93,6 +93,8 @@ pub struct WorkspaceViewData {
     pub agent_fast_mode: Option<bool>,
     /// Per-workspace main agent working directory override.
     pub agent_work_dir: Option<PathBuf>,
+    /// Per-workspace Helix lookup directory used for Agent output paths.
+    pub helix_work_dir: Option<PathBuf>,
     pub agent_id: String,
     pub session_id: Option<String>,
     pub activity: WorkspaceActivity,
@@ -213,6 +215,9 @@ pub struct SubagentViewData {
     /// Per-subagent working directory override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_work_dir: Option<PathBuf>,
+    /// Per-subagent Helix lookup directory used for Agent output paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub helix_work_dir: Option<PathBuf>,
     /// Stable hook id used to route status/session events.
     pub agent_id: String,
     /// Runtime session id used for resume.
@@ -687,6 +692,8 @@ struct StoredWorkspace {
     agent_fast_mode: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     agent_work_dir: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    helix_work_dir: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     agent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1225,6 +1232,7 @@ pub fn new_workspace(path: PathBuf, agent_kind: AgentKind) -> WorkspaceViewData 
             agent_effort: None,
             agent_fast_mode: None,
             agent_work_dir: None,
+            helix_work_dir: None,
             agent_id: None,
             session_id: None,
             selected_file: None,
@@ -1274,6 +1282,7 @@ fn new_remote_workspace_with_outline_state(
         agent_effort: None,
         agent_fast_mode: None,
         agent_work_dir: None,
+        helix_work_dir: None,
         agent_id: new_agent_id(&identity),
         session_id: None,
         activity: WorkspaceActivity::Unknown,
@@ -1339,6 +1348,7 @@ pub fn save_workspace_store(
                     workspace.agent_fast_mode,
                 ),
                 agent_work_dir: normalize_stored_agent_work_dir(workspace.agent_work_dir.clone()),
+                helix_work_dir: normalize_stored_agent_work_dir(workspace.helix_work_dir.clone()),
                 agent_id: Some(workspace.agent_id.clone()),
                 session_id: workspace.session_id.clone(),
                 selected_file: workspace
@@ -1422,6 +1432,11 @@ pub fn normalize_stored_agent_work_dir(work_dir: Option<PathBuf>) -> Option<Path
         .filter(|path| path.is_dir())
 }
 
+/// Returns a normalized existing directory used to resolve Agent output paths for Helix.
+pub fn normalize_stored_helix_work_dir(work_dir: Option<PathBuf>) -> Option<PathBuf> {
+    normalize_stored_agent_work_dir(work_dir)
+}
+
 /// Reads model provider names from the user's Codex config.
 pub fn load_codex_model_provider_names() -> Vec<String> {
     let Some(path) = home_dir().map(|home| home.join(".codex").join("config.toml")) else {
@@ -1493,6 +1508,7 @@ pub fn new_subagent(
     agent_effort: Option<String>,
     agent_fast_mode: Option<bool>,
     agent_work_dir: Option<PathBuf>,
+    helix_work_dir: Option<PathBuf>,
     session_id: Option<String>,
 ) -> SubagentViewData {
     let id = format!("sub-{}-{:x}", now_ms(), stable_state_key(Path::new(&name)));
@@ -1509,6 +1525,7 @@ pub fn new_subagent(
         agent_effort,
         agent_fast_mode: normalize_stored_agent_fast_mode(agent_kind, agent_fast_mode),
         agent_work_dir: normalize_stored_agent_work_dir(agent_work_dir),
+        helix_work_dir: normalize_stored_helix_work_dir(helix_work_dir),
         session_id,
         activity: WorkspaceActivity::Unknown,
     }
@@ -1565,6 +1582,7 @@ fn load_workspace_agent_layout(
             subagent.agent_fast_mode =
                 normalize_stored_agent_fast_mode(subagent.agent_kind, subagent.agent_fast_mode);
             subagent.agent_work_dir = normalize_stored_agent_work_dir(subagent.agent_work_dir);
+            subagent.helix_work_dir = normalize_stored_helix_work_dir(subagent.helix_work_dir);
             subagent.activity = WorkspaceActivity::Unknown;
             subagent
         })
@@ -1829,6 +1847,7 @@ fn build_workspace(
         agent_effort: normalize_stored_agent_effort(agent_kind, stored.agent_effort),
         agent_fast_mode: normalize_stored_agent_fast_mode(agent_kind, stored.agent_fast_mode),
         agent_work_dir: normalize_stored_agent_work_dir(stored.agent_work_dir),
+        helix_work_dir: normalize_stored_helix_work_dir(stored.helix_work_dir),
         agent_id,
         session_id,
         activity: WorkspaceActivity::Unknown,

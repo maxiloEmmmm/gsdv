@@ -619,6 +619,7 @@ impl GsdvGuiApp {
                     agent_effort: String::new(),
                     agent_fast_mode: None,
                     agent_work_dir: String::new(),
+                    helix_work_dir: String::new(),
                     session_id: String::new(),
                 }));
             }
@@ -641,6 +642,7 @@ impl GsdvGuiApp {
                     agent_effort: String::new(),
                     agent_fast_mode: None,
                     agent_work_dir: String::new(),
+                    helix_work_dir: String::new(),
                     session_id: String::new(),
                 }));
             }
@@ -664,6 +666,7 @@ impl GsdvGuiApp {
                     agent_effort: String::new(),
                     agent_fast_mode: None,
                     agent_work_dir: String::new(),
+                    helix_work_dir: String::new(),
                     session_id: String::new(),
                 }));
             }
@@ -772,6 +775,21 @@ impl GsdvGuiApp {
                     index: self.active_workspace,
                     slot,
                     work_dir,
+                }));
+            }
+            AgentTabAction::SetHelixWorkDir { slot, work_dir } => {
+                self.set_active_agent_slot(self.active_workspace, slot.clone());
+                self.set_active_app_dialog(Some(AppDialog::SetAgentHelixWorkDir {
+                    index: self.active_workspace,
+                    slot,
+                    work_dir,
+                }));
+            }
+            AgentTabAction::RenameSubagent { id, name } => {
+                self.set_active_app_dialog(Some(AppDialog::RenameSubagent {
+                    index: self.active_workspace,
+                    id,
+                    name,
                 }));
             }
             AgentTabAction::CopySessionId(session_id) => {

@@ -393,6 +393,7 @@ impl GsdvGuiApp {
             agent_effort: workspace.agent_effort.clone(),
             agent_fast_mode: workspace.agent_fast_mode,
             agent_work_dir: workspace.agent_work_dir.clone(),
+            helix_work_dir: workspace.helix_work_dir.clone(),
             subagents: workspace.subagents.clone(),
             rows: workspace.agent_rows.clone(),
             focus: workspace.agent_focus,
@@ -409,6 +410,7 @@ impl GsdvGuiApp {
             project.snapshot.agent_effort = workspace.agent_effort.clone();
             project.snapshot.agent_fast_mode = workspace.agent_fast_mode;
             project.snapshot.agent_work_dir = workspace.agent_work_dir.clone();
+            project.snapshot.helix_work_dir = workspace.helix_work_dir.clone();
             project.snapshot.session_id = workspace.session_id.clone();
             project.snapshot.subagents = payload.subagents;
             project.snapshot.rows = payload.rows;
@@ -453,6 +455,7 @@ impl GsdvGuiApp {
             workspace.agent_effort = snapshot.agent_effort.clone();
             workspace.agent_fast_mode = snapshot.agent_fast_mode;
             workspace.agent_work_dir = snapshot.agent_work_dir.clone();
+            workspace.helix_work_dir = snapshot.helix_work_dir.clone();
             workspace.agent_id = snapshot.agent_id.clone();
             workspace.session_id = snapshot.session_id.clone();
             workspace.subagents = snapshot.subagents.clone();
@@ -489,6 +492,7 @@ impl GsdvGuiApp {
             agent_effort: workspace.agent_effort.clone(),
             agent_fast_mode: workspace.agent_fast_mode,
             agent_work_dir: workspace.agent_work_dir.clone(),
+            helix_work_dir: workspace.helix_work_dir.clone(),
             subagents: workspace.subagents.clone(),
             rows: workspace.agent_rows.clone(),
             focus: workspace.agent_focus,
@@ -813,6 +817,7 @@ fn remote_project_terminal_metadata(
         agent_effort: project.agent_effort.clone(),
         agent_fast_mode: project.agent_fast_mode,
         agent_work_dir: project.agent_work_dir.clone(),
+        helix_work_dir: project.helix_work_dir.clone(),
         agent_id: project.agent_id.clone(),
         session_id: project.session_id.clone(),
         activity: WorkspaceActivity::Unknown,
