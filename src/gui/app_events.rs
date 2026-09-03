@@ -926,9 +926,10 @@ impl GsdvGuiApp {
             AppEvent::TerminalOutputPathClassified {
                 workspace_index,
                 click,
+                helix_work_dir,
             } => {
                 if workspace_index == self.active_workspace {
-                    self.apply_classified_terminal_output_click(ctx, click);
+                    self.apply_classified_terminal_output_click(ctx, click, helix_work_dir);
                 }
             }
             AppEvent::HelixBinaryChecked { available } => {

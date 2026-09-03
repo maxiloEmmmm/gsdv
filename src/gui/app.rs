@@ -1897,6 +1897,7 @@ enum AppEvent {
     TerminalOutputPathClassified {
         workspace_index: usize,
         click: TerminalOutputClick,
+        helix_work_dir: Option<PathBuf>,
     },
     /// Helix 可执行文件可用性检查完成。
     HelixBinaryChecked { available: bool },
