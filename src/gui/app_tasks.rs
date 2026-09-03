@@ -645,17 +645,25 @@ impl GsdvGuiApp {
                         result,
                     }
                 }
-                FileMutationTask::DeleteMarkdown {
+                FileMutationTask::DeletePath {
                     index,
                     path,
                     absolute,
+                    is_dir,
                 } => {
-                    let result = tokio::fs::remove_file(absolute)
-                        .await
-                        .map_err(|error| error.to_string());
-                    FileMutationResult::DeleteMarkdown {
+                    // 触发条件：outline 目录节点确认删除。
+                    // 不能统一调用 remove_file：目录需要递归删除，文件则不应误删目录内容。
+                    // 防止副作用：保持文件和目录删除语义分离，避免删除操作直接失败或越界。
+                    let result = if is_dir {
+                        tokio::fs::remove_dir_all(absolute).await
+                    } else {
+                        tokio::fs::remove_file(absolute).await
+                    }
+                    .map_err(|error| error.to_string());
+                    FileMutationResult::DeletePath {
                         index,
                         path,
+                        is_dir,
                         result,
                     }
                 }

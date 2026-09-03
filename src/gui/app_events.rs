@@ -1367,31 +1367,47 @@ impl GsdvGuiApp {
                     message: error,
                 })),
             },
-            FileMutationResult::DeleteMarkdown {
+            FileMutationResult::DeletePath {
                 index,
                 path,
+                is_dir,
                 result,
             } => match result {
                 Ok(()) => {
-                    if let Some(document) = self.documents.get_mut(index)
-                        && document.path.as_ref() == Some(&path)
-                    {
+                    let mut removed_recent_markdowns = false;
+                    let deleted_selected_file = self
+                        .documents
+                        .get(index)
+                        .and_then(|document| document.path.as_ref())
+                        .is_some_and(|selected| {
+                            selected == &path || (is_dir && selected.starts_with(&path))
+                        });
+                    if deleted_selected_file && let Some(document) = self.documents.get_mut(index) {
                         *document = DocumentState::default();
                     }
-                    if let Some(workspace) = self.workspaces.get_mut(index)
-                        && workspace.selected_file.as_ref() == Some(&path)
-                    {
-                        workspace.selected_file = None;
+                    if let Some(workspace) = self.workspaces.get_mut(index) {
+                        if workspace.selected_file.as_ref().is_some_and(|selected| {
+                            selected == &path || (is_dir && selected.starts_with(&path))
+                        }) {
+                            workspace.selected_file = None;
+                        }
+                        let before = workspace.recent_markdowns.len();
+                        workspace.recent_markdowns.retain(|entry| {
+                            entry.path != path && (!is_dir || !entry.path.starts_with(&path))
+                        });
+                        removed_recent_markdowns = workspace.recent_markdowns.len() != before;
                     }
-                    self.remove_recent_markdown_path(index, &path);
+                    if removed_recent_markdowns {
+                        self.mark_workspace_store_dirty();
+                    }
                     self.spawn_outline_refresh_tasks(ctx, BTreeSet::from([index]));
                     self.push_toast(
-                        i18n::text(self.app_language, "Deleted markdown file"),
+                        i18n::text(self.app_language, "Deleted item"),
                         theme::success(),
                     );
                 }
                 Err(error) => self.set_active_app_dialog(Some(AppDialog::Message {
-                    title: i18n::text(self.app_language, "Delete Markdown Failed").to_string(),
+                    title: i18n::text(self.app_language, "Delete Failed").to_string(),
                     message: error,
                 })),
             },
