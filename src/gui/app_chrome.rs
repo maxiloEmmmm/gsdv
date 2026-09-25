@@ -138,9 +138,12 @@ pub(super) fn agent_slot_tab_button(
 }
 
 /// 绘制 main/subagent 槽位右键菜单，动作始终绑定被点击的槽位。
+///
+/// 适用场景：Agent tab 右键操作。示例：running -> `Stop(slot)`。
 pub(super) fn agent_slot_context_menu(
     ui: &mut Ui,
     slot: AgentSlotId,
+    manually_stopped: bool,
     current_agent_kind: AgentKind,
     current_agent_model: Option<&str>,
     current_agent_model_provider: Option<&str>,
@@ -153,6 +156,22 @@ pub(super) fn agent_slot_context_menu(
     action: &mut Option<AgentTabAction>,
     language: AppLanguage,
 ) {
+    let process_action = if manually_stopped {
+        (
+            i18n::text(language, "Start agent"),
+            AgentTabAction::Start(slot.clone()),
+        )
+    } else {
+        (
+            i18n::text(language, "Stop agent"),
+            AgentTabAction::Stop(slot.clone()),
+        )
+    };
+    if ui.button(process_action.0).clicked() {
+        *action = Some(process_action.1);
+        ui.close_menu();
+    }
+    ui.separator();
     if let Some(session_id) = current_session_id {
         if ui.button(i18n::text(language, "Copy session ID")).clicked() {
             *action = Some(AgentTabAction::CopySessionId(session_id.to_string()));

@@ -802,6 +802,9 @@ impl GsdvGuiApp {
                 });
             if let Some(project) = project {
                 let slot = project.agents.entry(key.agent_slot).or_default();
+                if slot.manually_stopped {
+                    return;
+                }
                 match result {
                     Ok(host) => {
                         slot.host = Some(host);
@@ -819,6 +822,9 @@ impl GsdvGuiApp {
             Ok(host) => match key.kind {
                 TerminalSurfaceKind::Agent => {
                     let slot = hosts.agents.entry(key.agent_slot).or_default();
+                    if slot.manually_stopped {
+                        return;
+                    }
                     slot.host = Some(host);
                     slot.error = None;
                 }
@@ -833,7 +839,10 @@ impl GsdvGuiApp {
             },
             Err(error) => match key.kind {
                 TerminalSurfaceKind::Agent => {
-                    hosts.agents.entry(key.agent_slot).or_default().error = Some(error)
+                    let slot = hosts.agents.entry(key.agent_slot).or_default();
+                    if !slot.manually_stopped {
+                        slot.error = Some(error);
+                    }
                 }
                 TerminalSurfaceKind::Workspace => hosts.workspace_error = Some(error),
                 TerminalSurfaceKind::Helix => hosts.helix_error = Some(error),

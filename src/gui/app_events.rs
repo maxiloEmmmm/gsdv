@@ -141,9 +141,13 @@ impl GsdvGuiApp {
             default_terminal_input_target(workspace, workspace_terminal_open, reviewer_helix_open)
         };
         let focused_agent_slot = self.focused_agent_slot(active_workspace);
-        if terminal_input_target == Some(TerminalSurfaceKind::Agent) && focused_agent_slot.is_none()
-        {
-            terminal_input_target = None;
+        if terminal_input_target == Some(TerminalSurfaceKind::Agent) {
+            let agent_can_receive_input = focused_agent_slot
+                .as_ref()
+                .is_some_and(|slot| !self.agent_slot_manually_stopped(active_workspace, slot));
+            if !agent_can_receive_input {
+                terminal_input_target = None;
+            }
         }
         let terminal_surface_owns_input = terminal_input_target.is_some()
             && !active_app_dialog_open
@@ -911,6 +915,20 @@ impl GsdvGuiApp {
                 if spawned {
                     self.queue_app_event(AppEvent::SyncTerminalEventRepaintFlags);
                 }
+            }
+            AppEvent::AgentStopRequested {
+                workspace_index,
+                agent_slot,
+            } => {
+                self.stop_agent_slot(workspace_index, agent_slot);
+                self.queue_app_event(AppEvent::SyncTerminalEventRepaintFlags);
+            }
+            AppEvent::AgentStartRequested {
+                workspace_index,
+                agent_slot,
+            } => {
+                self.start_agent_slot(ctx, workspace_index, agent_slot);
+                self.queue_app_event(AppEvent::SyncTerminalEventRepaintFlags);
             }
             AppEvent::TerminalRuntime(event) => {
                 self.apply_terminal_runtime_event(ctx, event);

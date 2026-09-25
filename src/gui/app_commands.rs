@@ -728,6 +728,18 @@ impl GsdvGuiApp {
             AgentTabAction::EqualizeRows => {
                 self.equalize_agent_rows(self.active_workspace);
             }
+            AgentTabAction::Start(slot) => {
+                self.queue_app_event(AppEvent::AgentStartRequested {
+                    workspace_index: self.active_workspace,
+                    agent_slot: slot,
+                });
+            }
+            AgentTabAction::Stop(slot) => {
+                self.queue_app_event(AppEvent::AgentStopRequested {
+                    workspace_index: self.active_workspace,
+                    agent_slot: slot,
+                });
+            }
             AgentTabAction::Restart(slot) => {
                 self.set_active_app_dialog(Some(AppDialog::RestartAgent {
                     index: self.active_workspace,

@@ -1200,6 +1200,8 @@ struct AgentHostSlot {
     host: Option<GuiTerminalHost>,
     /// Last spawn error for this slot.
     error: Option<String>,
+    /// Whether the user stopped this Agent for the current app run.
+    manually_stopped: bool,
 }
 
 #[derive(Default)]
@@ -1885,6 +1887,20 @@ enum AppEvent {
     TerminalHostSpawned {
         key: TerminalSpawnKey,
         result: Result<GuiTerminalHost, String>,
+    },
+    /// 用户请求立即停止一个 Agent 进程，但保留 tab 和会话配置。
+    AgentStopRequested {
+        /// Agent 所属 workspace 的当前索引。
+        workspace_index: usize,
+        /// 需要停止的 main 或 subagent 槽位。
+        agent_slot: AgentSlotId,
+    },
+    /// 用户请求重新启动一个手动停止的 Agent 进程。
+    AgentStartRequested {
+        /// Agent 所属 workspace 的当前索引。
+        workspace_index: usize,
+        /// 需要启动的 main 或 subagent 槽位。
+        agent_slot: AgentSlotId,
     },
     /// terminal runtime 投递的粗粒度 UI 状态通知。
     TerminalRuntime(TerminalRuntimeEvent),
@@ -2727,6 +2743,10 @@ enum AgentTabAction {
         row_index: usize,
     },
     EqualizeRows,
+    /// 启动保留在界面中的停止态 Agent。
+    Start(AgentSlotId),
+    /// 立即停止 Agent 进程但保留 tab 和会话配置。
+    Stop(AgentSlotId),
     Restart(AgentSlotId),
     Switch {
         slot: AgentSlotId,
