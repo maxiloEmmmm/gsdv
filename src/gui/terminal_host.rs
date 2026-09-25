@@ -1651,6 +1651,13 @@ impl GuiTerminalHost {
         self.backend.write_bytes(vec![0x03]);
     }
 
+    /// 立即关闭 PTY runtime，由底层 PTY drop 终止对应子进程。
+    ///
+    /// 适用场景：用户从 Agent tab 主动停止进程。示例：运行中 -> stopped。
+    pub fn stop_process(&self) {
+        self.backend.shutdown();
+    }
+
     /// 终端重新可见时写入延迟的 OSC52 剪贴板文本。
     fn flush_pending_clipboard_text(&mut self, ctx: &egui::Context) {
         let pending = self
@@ -2414,6 +2421,9 @@ fn terminal_mouse_position(pos: Pos2, rect: Rect, size: TerminalSize) -> (usize,
     (col.max(1), line.max(1))
 }
 
+/// 编码传统终端控制键，供未被快捷键和 kitty 专用路径处理的按键使用。
+///
+/// 示例：`Shift+Left` -> `ESC[1;2D`，`Left` -> `ESC[D`。
 fn key_event_sequence(key: Key, modifiers: Modifiers) -> Option<&'static str> {
     if modifiers.mac_cmd {
         return None;
@@ -2423,6 +2433,17 @@ fn key_event_sequence(key: Key, modifiers: Modifiers) -> Option<&'static str> {
         Key::Tab => Some("\t"),
         Key::Backspace => Some("\x7f"),
         Key::Escape => Some("\x1b"),
+        // Codex 用 Shift+Left 打开 queued follow-up input；裸 Left 会丢失修饰键。
+        // 仅处理纯 Shift，避免改变 App 已保留或尚未定义的组合键行为。
+        Key::ArrowLeft
+            if modifiers.shift
+                && !modifiers.ctrl
+                && !modifiers.alt
+                && !modifiers.command
+                && !modifiers.mac_cmd =>
+        {
+            Some("\x1b[1;2D")
+        }
         Key::ArrowUp => Some("\x1b[A"),
         Key::ArrowDown => Some("\x1b[B"),
         Key::ArrowRight => Some("\x1b[C"),

@@ -1748,10 +1748,16 @@ impl GsdvGuiApp {
         match tab {
             data::AgentColumnSlot::Main => {
                 let slot = AgentSlotId::Main;
+                let manually_stopped =
+                    self.agent_slot_manually_stopped(self.active_workspace, &slot);
                 let response = agent_slot_tab_button(
                     ui,
                     "main",
-                    workspace.activity,
+                    if manually_stopped {
+                        WorkspaceActivity::Unknown
+                    } else {
+                        workspace.activity
+                    },
                     active_slot == &slot,
                     &self.repaint_controller,
                 );
@@ -1759,6 +1765,7 @@ impl GsdvGuiApp {
                     agent_slot_context_menu(
                         ui,
                         slot.clone(),
+                        manually_stopped,
                         workspace.agent_kind,
                         workspace.agent_model.as_deref(),
                         workspace.agent_model_provider.as_deref(),
@@ -1785,10 +1792,16 @@ impl GsdvGuiApp {
                     return;
                 };
                 let slot = AgentSlotId::Subagent(id.clone());
+                let manually_stopped =
+                    self.agent_slot_manually_stopped(self.active_workspace, &slot);
                 let response = agent_slot_tab_button(
                     ui,
                     &subagent.name,
-                    subagent.activity,
+                    if manually_stopped {
+                        WorkspaceActivity::Unknown
+                    } else {
+                        subagent.activity
+                    },
                     active_slot == &slot,
                     &self.repaint_controller,
                 );
@@ -1796,6 +1809,7 @@ impl GsdvGuiApp {
                     agent_slot_context_menu(
                         ui,
                         slot.clone(),
+                        manually_stopped,
                         subagent.agent_kind,
                         subagent.agent_model.as_deref(),
                         subagent.agent_model_provider.as_deref(),

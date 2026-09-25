@@ -31,6 +31,30 @@ fn terminal_pending_panel(ui: &mut Ui, message: &str) {
     });
 }
 
+/// 绘制手动停止后的 Agent 占位区，并返回用户是否请求重新开启。
+///
+/// 适用场景：tab 保留但 PTY 已停止。示例：点击“开启 Agent” -> true。
+fn agent_stopped_panel(ui: &mut Ui, language: AppLanguage) -> bool {
+    let mut start_requested = false;
+    ui.centered_and_justified(|ui| {
+        ui.vertical_centered(|ui| {
+            ui.label(muted(i18n::text(language, "Agent is stopped.")));
+            ui.add_space(10.0);
+            start_requested = ui
+                .add_sized(
+                    [132.0, 34.0],
+                    Button::new(
+                        RichText::new(i18n::text(language, "Start agent")).color(Color32::WHITE),
+                    )
+                    .fill(theme::primary())
+                    .stroke(Stroke::NONE),
+                )
+                .clicked();
+        });
+    });
+    start_requested
+}
+
 /// 绘制 remote WebSocket 占用 Agent terminal 时的本地占位。
 fn terminal_remote_connected_panel(ui: &mut Ui) -> bool {
     let mut reclaim = false;
@@ -246,6 +270,18 @@ impl GsdvGuiApp {
         agent_slot: AgentSlotId,
         grid_menu: Option<AgentGridMenuContext<'_>>,
     ) {
+        if self.agent_slot_manually_stopped(self.active_workspace, &agent_slot) {
+            if self.focused_agent_slot(self.active_workspace).as_ref() == Some(&agent_slot) {
+                self.active_agent_terminal_rect = None;
+            }
+            if agent_stopped_panel(ui, self.app_language) {
+                self.queue_app_event(AppEvent::AgentStartRequested {
+                    workspace_index: self.active_workspace,
+                    agent_slot,
+                });
+            }
+            return;
+        }
         self.ensure_agent_terminal_host(ui.ctx(), self.active_workspace, &agent_slot);
         let focused_slot = self.focused_agent_slot(self.active_workspace);
         let slot_accepts_input = focused_slot.as_ref() == Some(&agent_slot);
@@ -883,6 +919,9 @@ impl GsdvGuiApp {
             return;
         };
         let slot = hosts.agents.entry(slot_id.clone()).or_default();
+        if slot.manually_stopped {
+            return;
+        }
         if exited {
             slot.host = None;
         }
@@ -1107,6 +1146,9 @@ impl GsdvGuiApp {
                     return;
                 };
                 let slot = hosts.agents.entry(slot_id.clone()).or_default();
+                if slot.manually_stopped {
+                    return;
+                }
                 if exited {
                     slot.host = None;
                 }

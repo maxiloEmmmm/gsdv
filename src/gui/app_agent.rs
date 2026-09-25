@@ -93,6 +93,66 @@ impl GsdvGuiApp {
         }
     }
 
+    /// 返回 Agent 是否被用户手动停止，仅用于本次应用运行期间。
+    ///
+    /// 适用场景：tab 和内容区选择停止态 UI。示例：stopped slot -> true。
+    pub(super) fn agent_slot_manually_stopped(&self, index: usize, slot: &AgentSlotId) -> bool {
+        self.terminal_hosts
+            .get(index)
+            .and_then(|hosts| hosts.agents.get(slot))
+            .is_some_and(|host_slot| host_slot.manually_stopped)
+    }
+
+    /// 立即停止 Agent 进程，同时保留 tab、配置和 session id。
+    ///
+    /// 适用场景：用户点击 tab 右键菜单。示例：running -> stopped panel。
+    pub(super) fn stop_agent_slot(&mut self, index: usize, slot: AgentSlotId) {
+        if !self.agent_slot_exists(index, &slot) {
+            return;
+        }
+        self.mark_agent_slot_idle_after_terminal_exit(index, &slot);
+        if let Some(hosts) = self.terminal_hosts.get_mut(index) {
+            let host_slot = hosts.agents.entry(slot.clone()).or_default();
+            host_slot.manually_stopped = true;
+            host_slot.error = None;
+            if let Some(host) = host_slot.host.take() {
+                host.stop_process();
+            }
+        }
+        if let Some(states) = self.agent_busy_watchdogs.get_mut(index) {
+            states.remove(&slot);
+        }
+        self.agent_input_translation_in_flight
+            .remove(&(index, slot.clone()));
+        if index == self.active_workspace && self.focused_agent_slot(index).as_ref() == Some(&slot)
+        {
+            self.clear_agent_input_translation_state();
+            self.active_agent_terminal_rect = None;
+        }
+        self.request_app_repaint();
+    }
+
+    /// 重新启动手动停止的 Agent，并沿用已有 session id。
+    ///
+    /// 适用场景：用户点击停止占位区按钮。示例：stopped -> starting。
+    pub(super) fn start_agent_slot(
+        &mut self,
+        ctx: &egui::Context,
+        index: usize,
+        slot: AgentSlotId,
+    ) {
+        if !self.agent_slot_exists(index, &slot) {
+            return;
+        }
+        if let Some(hosts) = self.terminal_hosts.get_mut(index) {
+            let host_slot = hosts.agents.entry(slot.clone()).or_default();
+            host_slot.manually_stopped = false;
+            host_slot.error = None;
+        }
+        self.ensure_agent_terminal_host(ctx, index, &slot);
+        self.request_app_repaint();
+    }
+
     /// Clears an agent slot session when a restart should not resume.
     pub(super) fn clear_agent_slot_session(
         &mut self,
