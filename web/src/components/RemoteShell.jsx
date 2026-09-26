@@ -559,6 +559,19 @@ export default defineComponent({
       }
 
       if (message.type === "ping") {
+        const nextSequence = message.sequence;
+        if (
+          !Number.isFinite(nextSequence) ||
+          !Number.isFinite(tab.sequence) ||
+          nextSequence !== tab.sequence + 1
+        ) {
+          reconnectCurrentAgent(tab);
+          return;
+        }
+        // 触发条件：服务端心跳递增了连接序号。
+        // 不能只回 pong：下一条 append 会被误判为断档。
+        // 防止回归：Web tab 重连时清空已有 Agent 内容。
+        tab.sequence = nextSequence;
         socket.send(JSON.stringify({ type: "pong", sequence: message.sequence }));
       }
     }
@@ -617,12 +630,13 @@ export default defineComponent({
     }
 
     /**
-     * Reconnects after a sequence gap so the server can send a fresh snapshot.
+     * Reconnects after an output or heartbeat sequence gap for a fresh snapshot.
+     * Example: sequence 1 then 3 -> reconnect.
      */
     function reconnectCurrentAgent(tab) {
       tab.error = "Terminal stream sequence changed; reconnecting.";
       closeAgentSocket(tab);
-      // 触发条件：append sequence 不是当前 sequence + 1。
+      // 触发条件：append/ping sequence 不是当前 sequence + 1。
       // 不能直接继续 append：缺失的行无法从 append-only 协议恢复。
       // 防止回归：输出丢包后页面仍显示为貌似正常的半截日志。
       tab.reconnectTimer = window.setTimeout(() => {

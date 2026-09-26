@@ -115,7 +115,7 @@ impl GsdvGuiApp {
             let host_slot = hosts.agents.entry(slot.clone()).or_default();
             host_slot.manually_stopped = true;
             host_slot.error = None;
-            if let Some(host) = host_slot.host.take() {
+            if let Some(mut host) = host_slot.host.take() {
                 host.stop_process();
             }
         }

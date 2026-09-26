@@ -1654,7 +1654,7 @@ impl GuiTerminalHost {
     /// 立即关闭 PTY runtime，由底层 PTY drop 终止对应子进程。
     ///
     /// 适用场景：用户从 Agent tab 主动停止进程。示例：运行中 -> stopped。
-    pub fn stop_process(&self) {
+    pub fn stop_process(&mut self) {
         self.backend.shutdown();
     }
 
