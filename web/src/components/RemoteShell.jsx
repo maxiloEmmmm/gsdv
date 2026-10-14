@@ -8,6 +8,9 @@ import { defineComponent, nextTick, onBeforeUnmount, onMounted, ref } from "vue"
 const MAX_TERMINAL_ROWS = 500;
 const MAX_TERMINAL_COLS = 500;
 const MAX_TERMINAL_VISIBLE_ROWS = 200;
+const TERMINAL_BOTTOM_THRESHOLD_PX = 2;
+// Matches the server's per-message limit for interactive terminal wheel input.
+const MAX_TERMINAL_SCROLL_LINES = 50;
 const REMOTE_SHELL_VIEWPORT_HEIGHT_VAR = "--remote-shell-viewport-height";
 /**
  * Fallback palette used before the first Rust terminal snapshot arrives.
@@ -218,6 +221,12 @@ export default defineComponent({
         reconnectTimer: 0,
         lastResizeKey: "",
         closing: false,
+        // Whether ordinary terminal history follows new output.
+        followOutput: true,
+        // Last native scroll position saved for this tab.
+        scrollTop: 0,
+        // Whether the server's interactive terminal consumes wheel input.
+        terminalScroll: false,
       };
     }
 
@@ -233,6 +242,9 @@ export default defineComponent({
      */
     function clearTerminal(tab, message) {
       tab.rows = [];
+      tab.terminalScroll = false;
+      tab.followOutput = true;
+      tab.scrollTop = 0;
       tab.cols = 0;
       tab.cursor = null;
       tab.sequence = null;
@@ -461,30 +473,135 @@ export default defineComponent({
 
     /**
      * Scrolls the terminal output after Vue has rendered new rows.
+     * Example: a following tab receives output -> scroll its viewport to bottom.
      */
-    function scrollTerminalToBottom() {
+    function scrollTerminalToBottom(tab = activeTab()) {
       cancelTerminalScroll();
       scrollFrame.value = window.requestAnimationFrame(() => {
         scrollFrame.value = 0;
         const output = terminalOutputElement.value;
-        if (output) {
+        if (output && tab?.followOutput && activeTabId.value === tab.id) {
           output.scrollTop = output.scrollHeight;
+          tab.scrollTop = output.scrollTop;
+          tab.followOutput = true;
         }
       });
     }
 
     /**
-     * Checks whether new terminal output should stay pinned to the bottom.
+     * Checks whether the terminal viewport is currently at the bottom.
+     * Example: remaining scroll distance 1px -> true.
      */
-    function terminalShouldFollowOutput() {
-      const output = terminalOutputElement.value;
-      if (!output) {
-        return true;
-      }
+    function terminalViewportAtBottom(output) {
       if (output.scrollHeight <= output.clientHeight) {
         return true;
       }
-      return output.scrollTop + output.clientHeight >= output.scrollHeight;
+      return (
+        output.scrollHeight - output.scrollTop - output.clientHeight <=
+        TERMINAL_BOTTOM_THRESHOLD_PX
+      );
+    }
+
+    /**
+     * Checks whether new output for one tab should remain pinned to the bottom.
+     * Example: a tab paused by wheel-up -> false.
+     */
+    function terminalShouldFollowOutput(tab) {
+      return tab?.followOutput ?? true;
+    }
+
+    /**
+     * Records native terminal scrolling and resumes following at the bottom.
+     * Example: scrollTop 120 above the bottom -> save 120 and pause following.
+     */
+    function handleTerminalScroll() {
+      const output = terminalOutputElement.value;
+      const tab = activeTab();
+      if (!output || !tab) {
+        return;
+      }
+      tab.scrollTop = output.scrollTop;
+      tab.followOutput = terminalViewportAtBottom(output);
+      if (!tab.followOutput) {
+        cancelTerminalScroll();
+      }
+    }
+
+    /**
+     * Routes interactive wheel input to the agent, or scrolls local history.
+     * Example: terminal deltaMode=line, deltaY=-3 -> send scroll lines=3.
+     */
+    function handleTerminalWheel(event) {
+      if (event.ctrlKey || !Number.isFinite(event.deltaY) || event.deltaY === 0) {
+        return;
+      }
+      const tab = activeTab();
+      const output = terminalOutputElement.value;
+      if (tab?.terminalScroll && output) {
+        if (tab.socket?.readyState !== WebSocket.OPEN) {
+          return;
+        }
+        // Interactive TUIs expose only one screen, so native DOM scrolling has
+        // no history to move. Forward wheel lines using the desktop PTY path.
+        event.preventDefault();
+        const lineHeight = Number.parseFloat(
+          window.getComputedStyle(output).lineHeight,
+        );
+        let deltaLines = event.deltaY;
+        if (event.deltaMode !== WheelEvent.DOM_DELTA_LINE) {
+          deltaLines /= lineHeight;
+          if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) {
+            deltaLines *= output.clientHeight;
+          }
+        }
+        const lines = -Math.sign(deltaLines) * Math.min(
+          MAX_TERMINAL_SCROLL_LINES,
+          Math.max(1, Math.round(Math.abs(deltaLines))),
+        );
+        tab.socket.send(JSON.stringify({ type: "scroll", lines }));
+        return;
+      }
+      if (event.deltaY > 0) {
+        return;
+      }
+      if (tab) {
+        tab.followOutput = false;
+      }
+      cancelTerminalScroll();
+    }
+
+    /**
+     * Stops delayed auto-scroll before a mobile swipe can move the viewport.
+     * Example: touchstart at the bottom -> do not snap back during swipe-up.
+     */
+    function handleTerminalTouchStart() {
+      const tab = activeTab();
+      if (tab) {
+        tab.followOutput = false;
+      }
+      cancelTerminalScroll();
+    }
+
+    /**
+     * Reconciles terminal follow state after a touch gesture finishes.
+     * Example: touchend back at the bottom -> resume following new output.
+     */
+    function handleTerminalTouchEnd() {
+      handleTerminalScroll();
+    }
+
+    /**
+     * Restores a tab's history position after its terminal DOM is redrawn.
+     * Example: scrollTop 240 before snapshot -> scrollTop 240 after snapshot.
+     */
+    function restoreTerminalScroll(tab, scrollTop = tab?.scrollTop ?? 0) {
+      cancelTerminalScroll();
+      const output = terminalOutputElement.value;
+      if (!output || !tab || activeTabId.value !== tab.id) {
+        return;
+      }
+      output.scrollTop = scrollTop;
+      tab.scrollTop = output.scrollTop;
     }
 
     /**
@@ -582,18 +699,24 @@ export default defineComponent({
     function applySnapshotMessage(tab, message) {
       const rows = Array.isArray(message.rows) ? message.rows : [];
       const isActive = activeTabId.value === tab.id;
-      const followOutput = isActive ? terminalShouldFollowOutput() : false;
+      const followOutput = isActive ? terminalShouldFollowOutput(tab) : false;
+      const scrollTop = isActive
+        ? terminalOutputElement.value?.scrollTop ?? tab.scrollTop
+        : tab.scrollTop;
       tab.rows = trimTerminalRows(rows);
       tab.cols = Number.isFinite(message.cols) ? message.cols : 0;
       tab.cursor = message.cursor ?? null;
       tab.palette = terminalPalette(message.palette);
+      tab.terminalScroll = message.terminal_scroll === true;
       tab.sequence = Number.isFinite(message.sequence) ? message.sequence : null;
       tab.status = "Agent terminal connected.";
       tab.error = "";
       if (isActive) {
         renderTerminalRows(tab.rows);
         if (followOutput) {
-          scrollTerminalToBottom();
+          scrollTerminalToBottom(tab);
+        } else {
+          restoreTerminalScroll(tab, scrollTop);
         }
       }
       refreshTabs();
@@ -616,14 +739,35 @@ export default defineComponent({
 
       const rows = Array.isArray(message.rows) ? message.rows : [];
       const isActive = activeTabId.value === tab.id;
-      const followOutput = isActive ? terminalShouldFollowOutput() : false;
-      tab.rows = trimTerminalRows(tab.rows.concat(rows));
+      const followOutput = isActive ? terminalShouldFollowOutput(tab) : false;
+      const scrollTop = isActive
+        ? terminalOutputElement.value?.scrollTop ?? tab.scrollTop
+        : tab.scrollTop;
+      const previousRowCount = tab.rows.length;
+      const combinedRows = tab.rows.concat(rows);
+      const removedRowCount = Math.max(
+        0,
+        combinedRows.length - MAX_TERMINAL_ROWS,
+      );
+      tab.rows = trimTerminalRows(combinedRows);
       tab.sequence = nextSequence;
       tab.cursor = message.cursor ?? tab.cursor;
       if (isActive) {
-        renderTerminalRows(tab.rows);
+        const removedHeight = appendTerminalRows(
+          rows,
+          removedRowCount,
+          previousRowCount,
+        );
+        if (removedHeight === null) {
+          renderTerminalRows(tab.rows);
+        }
         if (followOutput) {
-          scrollTerminalToBottom();
+          scrollTerminalToBottom(tab);
+        } else {
+          restoreTerminalScroll(
+            tab,
+            Math.max(0, scrollTop - (removedHeight ?? 0)),
+          );
         }
       }
       refreshTabs();
@@ -1045,6 +1189,40 @@ export default defineComponent({
     }
 
     /**
+     * Appends protocol-guaranteed new rows and returns removed DOM height.
+     * Example: 2 new rows and no trim -> append 2 nodes and return 0.
+     */
+    function appendTerminalRows(rows, removedRowCount, previousRowCount) {
+      const output = terminalOutputElement.value;
+      if (!output || output.childElementCount !== previousRowCount) {
+        return null;
+      }
+
+      // 触发条件：browser buffer 达到 500 行后仍收到 append。
+      // 不能替换整棵 DOM：移动端正在进行的原生滚动手势会被浏览器取消。
+      // 防止回归：持续输出时仍可稳定上划查看历史内容。
+      const removedExistingRows = Math.min(
+        removedRowCount,
+        previousRowCount,
+      );
+      let removedHeight = 0;
+      for (let index = 0; index < removedExistingRows; index += 1) {
+        const firstRow = output.firstElementChild;
+        if (firstRow) {
+          removedHeight += firstRow.getBoundingClientRect().height;
+          firstRow.remove();
+        }
+      }
+      const removedNewRows = Math.max(0, removedRowCount - previousRowCount);
+      const fragment = document.createDocumentFragment();
+      for (const row of rows.slice(removedNewRows)) {
+        fragment.appendChild(terminalRowNode(row));
+      }
+      output.appendChild(fragment);
+      return removedHeight;
+    }
+
+    /**
      * Renders terminal empty/status text outside Vue render.
      */
     function renderTerminalEmpty(message) {
@@ -1079,10 +1257,17 @@ export default defineComponent({
      * Activates one open browser tab without opening duplicate sockets.
      */
     function activateAgentTab(tabId) {
+      handleTerminalScroll();
+      cancelTerminalScroll();
       activeTabId.value = tabId;
       const tab = activeTab();
       nextTick(() => {
         renderActiveTerminal();
+        if (terminalShouldFollowOutput(tab)) {
+          scrollTerminalToBottom(tab);
+        } else {
+          restoreTerminalScroll(tab);
+        }
         sendTerminalResize(tab);
         if (draftInputElement.value && tab) {
           draftInputElement.value.value = tab.draft;
@@ -1106,8 +1291,14 @@ export default defineComponent({
         const next = nextTabs[Math.max(0, index - 1)] ?? nextTabs[index] ?? null;
         activeTabId.value = next?.id ?? null;
         nextTick(() => {
+          const active = activeTab();
           renderActiveTerminal();
-          sendTerminalResize(activeTab());
+          if (terminalShouldFollowOutput(active)) {
+            scrollTerminalToBottom(active);
+          } else {
+            restoreTerminalScroll(active);
+          }
+          sendTerminalResize(active);
         });
       }
     }
@@ -1351,7 +1542,15 @@ export default defineComponent({
         ) : null}
 
         <main class="remote-shell__terminal" aria-label="Agent terminal output">
-          <div class="remote-shell__terminal-output" ref={terminalOutputElement} />
+          <div
+            class="remote-shell__terminal-output"
+            ref={terminalOutputElement}
+            onScroll={handleTerminalScroll}
+            onWheel={handleTerminalWheel}
+            onTouchstart={handleTerminalTouchStart}
+            onTouchend={handleTerminalTouchEnd}
+            onTouchcancel={handleTerminalTouchEnd}
+          />
           {terminalBanner ? (
             <div class="remote-shell__terminal-banner">
               {terminalBanner}

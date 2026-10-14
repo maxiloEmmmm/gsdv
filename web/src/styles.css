@@ -196,6 +196,9 @@ textarea {
   margin: 0;
   padding: 12px;
   overflow: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-x pan-y pinch-zoom;
+  -webkit-overflow-scrolling: touch;
   border: 1px solid var(--remote-terminal-muted);
   border-radius: 8px;
   background: var(--remote-terminal-bg);
