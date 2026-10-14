@@ -36,6 +36,8 @@ const REMOTE_AGENT_START_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 const REMOTE_AGENT_RESIZE_MAX_COLS: u16 = 500;
 /// Remote resize 允许的最大 terminal 行数。
 const REMOTE_AGENT_RESIZE_MAX_ROWS: u16 = 200;
+/// 单次滚轮请求最多移动的行数，限制 PTY 输入量。
+const REMOTE_AGENT_SCROLL_MAX_LINES: i32 = 50;
 
 /// 内嵌 remote 前端静态资源。
 struct RemoteWebAsset {
@@ -83,6 +85,8 @@ enum RemoteApiRequest {
     AgentOutputSubscribe(RemoteAgentTarget),
     /// 按浏览器视口调整目标 agent terminal grid。
     AgentResize(RemoteAgentResize),
+    /// 将 Web 交互式终端滚轮交给目标 agent。
+    AgentScroll(RemoteAgentScroll),
 }
 
 /// remote API 调用处理结果。
@@ -161,6 +165,17 @@ struct RemoteAgentResize {
     rows: u16,
 }
 
+/// 当前输出会话发起的交互式终端滚轮请求。
+#[derive(Debug, Clone)]
+struct RemoteAgentScroll {
+    /// Agent 操作目标。
+    target: RemoteAgentTarget,
+    /// 连接绑定的会话 id，用于拒绝已断开的旧请求。
+    session_id: u64,
+    /// 正数向上，负数向下。
+    lines: i32,
+}
+
 /// Agent 输出 WebSocket query 参数。
 #[derive(Debug, Clone, Deserialize)]
 struct RemoteAgentOutputQuery {
@@ -204,6 +219,8 @@ struct RemoteAgentOutputSnapshotMessage {
     cursor: crate::gui::terminal_host::TerminalRemoteCursor,
     /// 当前 terminal 默认调色板。
     palette: crate::gui::terminal_host::TerminalRemotePalette,
+    /// 是否把滚轮转发给当前 TUI，而不是滚动浏览器历史。
+    terminal_scroll: bool,
 }
 
 /// Agent 输出 WebSocket append 消息。
@@ -240,6 +257,8 @@ struct RemoteAgentOutputClientMessage {
     cols: Option<u16>,
     /// resize 消息携带的 terminal 行数。
     rows: Option<u16>,
+    /// scroll 消息携带的有符号滚动行数。
+    lines: Option<i32>,
 }
 
 /// HTTP JSON 图片输入请求。
@@ -421,6 +440,7 @@ impl GsdvGuiApp {
                 self.handle_remote_agent_output_subscribe(ctx, target)
             }
             RemoteApiRequest::AgentResize(input) => self.handle_remote_agent_resize(ctx, input),
+            RemoteApiRequest::AgentScroll(input) => self.handle_remote_agent_scroll(input),
         }
     }
 
@@ -548,6 +568,19 @@ impl GsdvGuiApp {
                 state,
             },
         ))
+    }
+
+    /// 在 AppEvent drain 中处理当前 Web 会话的交互式终端滚轮。
+    /// 例：lines=3 -> 复用桌面终端上滚三行的处理。
+    fn handle_remote_agent_scroll(&mut self, input: RemoteAgentScroll) -> RemoteApiResult {
+        let Some((workspace_index, slot_id)) = self.remote_agent_slot(&input.target) else {
+            return RemoteApiResult::Err(remote_not_found());
+        };
+        let Some(host) = self.remote_agent_host_mut(workspace_index, &slot_id) else {
+            return RemoteApiResult::Err(remote_not_found());
+        };
+        host.scroll_remote(input.session_id, input.lines);
+        RemoteApiResult::Ok(RemoteApiPayload::AgentOk)
     }
 
     /// 处理 remote agent terminal resize。
@@ -1025,6 +1058,17 @@ async fn run_remote_agent_output_socket(
                     dispatch_remote_agent_resize(&state, target.clone(), cols, rows).await;
                     continue;
                 }
+                if let Some(lines) = remote_agent_output_scroll_message(&message) {
+                    let _ = dispatch_remote_api_request_once(
+                        state.clone(),
+                        RemoteApiRequest::AgentScroll(RemoteAgentScroll {
+                            target: target.clone(),
+                            session_id: subscription.session_id,
+                            lines,
+                        }),
+                    ).await;
+                    continue;
+                }
                 if matches!(message, Message::Close(_)) {
                     return;
                 }
@@ -1081,6 +1125,7 @@ async fn send_remote_agent_output_snapshot(
         rows: snapshot.rows,
         cursor: snapshot.cursor,
         palette: snapshot.palette,
+        terminal_scroll: snapshot.terminal_scroll,
     };
     send_remote_agent_output_json(socket, &message).await
 }
@@ -1146,6 +1191,23 @@ fn remote_agent_output_resize_message(message: &Message) -> Option<(u16, u16)> {
         return None;
     }
     Some((cols, rows))
+}
+
+/// 解析有界滚轮请求，忽略零值、越界值及其他消息。
+/// 例：{"type":"scroll","lines":3} -> Some(3)。
+fn remote_agent_output_scroll_message(message: &Message) -> Option<i32> {
+    let Message::Text(text) = message else {
+        return None;
+    };
+    let message = serde_json::from_str::<RemoteAgentOutputClientMessage>(text.as_str()).ok()?;
+    let lines = message.lines?;
+    if message.message_type != "scroll"
+        || lines == 0
+        || !(-REMOTE_AGENT_SCROLL_MAX_LINES..=REMOTE_AGENT_SCROLL_MAX_LINES).contains(&lines)
+    {
+        return None;
+    }
+    Some(lines)
 }
 
 /// Converts a remote API error into an HTTP response.

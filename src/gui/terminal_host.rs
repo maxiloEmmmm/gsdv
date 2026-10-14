@@ -366,6 +366,8 @@ pub struct TerminalRemoteOutputState {
     output_sequence: u64,
     /// 上次已发送的 terminal 行签名。
     row_signatures: Vec<TerminalRemoteRowSignature>,
+    /// 上次告知 Web 的终端滚轮转发状态。
+    terminal_scroll: bool,
 }
 
 /// Remote terminal 当前完整输出快照。
@@ -379,6 +381,8 @@ pub struct TerminalRemoteSnapshot {
     pub cursor: TerminalRemoteCursor,
     /// 当前主题下 remote Web 应使用的 terminal 调色板。
     pub palette: TerminalRemotePalette,
+    /// 当前 TUI 是否要求 Web 将滚轮交给 PTY。
+    pub terminal_scroll: bool,
 }
 
 /// Remote terminal append-only 增量输出。
@@ -589,6 +593,7 @@ impl TerminalRemoteOutputSource {
         let state = TerminalRemoteOutputState {
             output_sequence: *self.output_rx.borrow(),
             row_signatures: terminal_remote_row_signatures(&snapshot.rows),
+            terminal_scroll: snapshot.terminal_scroll,
         };
         (snapshot, state)
     }
@@ -617,12 +622,20 @@ impl TerminalRemoteOutputSource {
 
         let snapshot = terminal_remote_snapshot(self);
         let next_signatures = terminal_remote_row_signatures(&snapshot.rows);
-        if next_signatures == state.row_signatures {
+        let mode_changed = snapshot.terminal_scroll != state.terminal_scroll;
+        if next_signatures == state.row_signatures && !mode_changed {
             return TerminalRemoteUpdate::Unchanged;
         }
 
-        let start = terminal_remote_append_start(&state.row_signatures, &next_signatures);
+        // 全屏 TUI 滚动的是应用内部视图，不能把新画面追加成浏览器历史。
+        // 模式切换也必须发 snapshot，避免 Web 继续使用旧滚轮路由。
+        let start = if snapshot.terminal_scroll || mode_changed {
+            None
+        } else {
+            terminal_remote_append_start(&state.row_signatures, &next_signatures)
+        };
         state.row_signatures = next_signatures;
+        state.terminal_scroll = snapshot.terminal_scroll;
         if let Some(start) = start
             && start < snapshot.rows.len()
         {
@@ -937,6 +950,28 @@ impl TerminalBackend {
         } else {
             term.grid_mut().scroll_display(Scroll::Delta(delta));
         }
+    }
+
+    /// Scrolls a remote Web terminal using the active terminal input mode.
+    /// Example: mouse-reporting mode and delta=2 -> two SGR wheel-up reports.
+    fn scroll_remote(&mut self, delta: i32) {
+        if delta == 0 {
+            return;
+        }
+        let mode = *self.term.lock().mode();
+        if !mode.intersects(TermMode::MOUSE_MODE) {
+            self.scroll(delta);
+            return;
+        }
+
+        let event_code = if delta > 0 { 64 } else { 65 };
+        let col = usize::from(self.size.cols).div_ceil(2).max(1);
+        let line = usize::from(self.size.lines).div_ceil(2).max(1);
+        let mut bytes = Vec::new();
+        for _ in 0..delta.unsigned_abs() {
+            terminal_mouse_report_at_cell(&mut bytes, event_code, col, line, mode);
+        }
+        self.write_bytes(bytes);
     }
 }
 
@@ -1304,6 +1339,21 @@ impl GuiTerminalHost {
         // 防止回归：浏览器已发送尺寸但 WS 订阅迟迟不刷新 snapshot。
         self.remote_output_tx
             .send_modify(|sequence| *sequence = sequence.wrapping_add(1));
+    }
+
+    /// 将当前 Web 会话的全屏滚轮交给现有终端输入路径。
+    /// 例：当前会话、delta=3 -> 与桌面上滚三行一致。
+    pub fn scroll_remote(&mut self, session_id: u64, delta: i32) {
+        if !self
+            .remote_session
+            .as_ref()
+            .is_some_and(|session| session.session_id == session_id)
+        {
+            return;
+        }
+        // 请求排队期间可能退出 TUI 或被桌面抢占。
+        // backend 会重新读取 mode，按鼠标报告或 alternate scroll 编码。
+        self.backend.scroll_remote(delta);
     }
 
     pub fn take_abnormal_agent_exit(&mut self) -> Option<AgentProcessExit> {
@@ -2386,6 +2436,18 @@ fn terminal_mouse_report(
 ) {
     let event_code = event_code | terminal_mouse_modifier_bits(modifiers);
     let (col, line) = terminal_mouse_position(pos, rect, size);
+    terminal_mouse_report_at_cell(bytes, event_code, col, line, mode);
+}
+
+/// Encodes one terminal mouse report at a resolved one-based cell position.
+/// Example: SGR wheel-up at column 10, row 5 -> ESC [ < 64 ; 10 ; 5 M.
+fn terminal_mouse_report_at_cell(
+    bytes: &mut Vec<u8>,
+    event_code: u8,
+    col: usize,
+    line: usize,
+    mode: TermMode,
+) {
     if mode.contains(TermMode::SGR_MOUSE) {
         let suffix = if event_code & 3 == 3 { 'm' } else { 'M' };
         bytes.extend_from_slice(
@@ -3332,7 +3394,8 @@ fn terminal_remote_snapshot(source: &TerminalRemoteOutputSource) -> TerminalRemo
             .saturating_sub(TERMINAL_REMOTE_EXPORT_LINES.saturating_sub(1))
             .max(top_line.0),
     );
-    let start = Point::new(export_top, grid.last_column());
+    // iter_from 会先前进再返回 cell；从上一行末尾开始才包含首行。
+    let start = Point::new(Line(export_top.0.saturating_sub(1)), grid.last_column());
 
     for indexed in grid.iter_from(start) {
         let line = indexed.point.line.0;
@@ -3373,6 +3436,10 @@ fn terminal_remote_snapshot(source: &TerminalRemoteOutputSource) -> TerminalRemo
             shape: terminal_remote_cursor_shape(content.cursor.shape),
         },
         palette: terminal_remote_palette(mode),
+        terminal_scroll: term.mode().intersects(TermMode::MOUSE_MODE)
+            || term
+                .mode()
+                .contains(TermMode::ALTERNATE_SCROLL | TermMode::ALT_SCREEN),
     }
 }
 
