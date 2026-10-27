@@ -785,6 +785,14 @@ impl GsdvGuiApp {
         key: TerminalSpawnKey,
         result: Result<GuiTerminalHost, String>,
     ) {
+        if self
+            .workspaces
+            .get(key.index)
+            .is_some_and(|workspace| workspace.remote.is_some())
+            && !self.remote_workspace_is_enabled(key.index)
+        {
+            return;
+        }
         let current_path_matches = self
             .workspaces
             .get(key.index)

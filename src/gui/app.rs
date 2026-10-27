@@ -423,6 +423,8 @@ struct GsdvGuiApp {
     terminal_hosts: Vec<WorkspaceTerminalHosts>,
     /// 与 workspaces 对齐的 SSH Remote Workspace 运行时状态。
     remote_workspaces: Vec<Option<RemoteWorkspaceRuntime>>,
+    /// 当前进程内 Remote Workspace 是否启用；不持久化，重启后默认开启。
+    remote_enabled: Vec<bool>,
     /// 每个 workspace 最近通过 Agent 文件行打开过的 Helix 目标。
     recent_agent_helix_targets: Vec<Vec<RecentHelixTarget>>,
     /// Active agent terminal slot for each workspace.
@@ -893,6 +895,11 @@ impl GsdvGuiApp {
                     .map(RemoteWorkspaceRuntime::disconnected)
             })
             .collect();
+        let remote_enabled = value
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.remote.is_some())
+            .collect();
         let recent_agent_helix_targets = (0..value.workspaces.len()).map(|_| Vec::new()).collect();
         let active_agent_slots = (0..value.workspaces.len())
             .map(|_| AgentSlotId::Main)
@@ -941,6 +948,7 @@ impl GsdvGuiApp {
             reviewer_diff_selected_rows,
             terminal_hosts,
             remote_workspaces,
+            remote_enabled,
             recent_agent_helix_targets,
             active_agent_slots,
             agent_busy_watchdogs,
@@ -2697,6 +2705,7 @@ enum OutlineFavoriteScope {
 enum WorkspaceRailAction {
     Switch(usize),
     ToggleFocus(usize),
+    ToggleRemote(usize),
     Close(usize),
     ToggleFocusFilter,
     ChangeDirectory(usize),

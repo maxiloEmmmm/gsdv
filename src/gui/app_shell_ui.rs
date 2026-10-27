@@ -219,6 +219,21 @@ impl GsdvGuiApp {
                         }
                         if workspace.remote.is_some()
                             && ui
+                                .button(
+                                    if self.remote_enabled.get(index).copied().unwrap_or(true) {
+                                        "Disable remote"
+                                    } else {
+                                        "Enable remote"
+                                    },
+                                )
+                                .clicked()
+                        {
+                            rail_action = Some(WorkspaceRailAction::ToggleRemote(index));
+                            ui.close_menu();
+                        }
+                        if workspace.remote.is_some()
+                            && self.remote_enabled.get(index).copied().unwrap_or(true)
+                            && ui
                                 .button(i18n::text(self.app_language, "Restart agents"))
                                 .clicked()
                         {
@@ -339,6 +354,21 @@ impl GsdvGuiApp {
                             ui.close_menu();
                         }
                         if workspace.remote.is_some()
+                            && ui
+                                .button(
+                                    if self.remote_enabled.get(index).copied().unwrap_or(true) {
+                                        "Disable remote"
+                                    } else {
+                                        "Enable remote"
+                                    },
+                                )
+                                .clicked()
+                        {
+                            rail_action = Some(WorkspaceRailAction::ToggleRemote(index));
+                            ui.close_menu();
+                        }
+                        if workspace.remote.is_some()
+                            && self.remote_enabled.get(index).copied().unwrap_or(true)
                             && ui
                                 .button(i18n::text(self.app_language, "Restart agents"))
                                 .clicked()
@@ -540,6 +570,14 @@ impl GsdvGuiApp {
     /// 适用场景：Remote 模式替代 Markdown/Workflow outline。例：点击项目 -> 切换 Agent 网格。
     fn remote_outline_panel(&mut self, ui: &mut Ui) {
         let index = self.active_workspace;
+        if !self.remote_workspace_is_enabled(index) {
+            ui.vertical_centered(|ui| {
+                if ui.button("Enable remote").clicked() {
+                    self.toggle_remote_workspace(ui.ctx(), index);
+                }
+            });
+            return;
+        }
         if self
             .workspaces
             .get(index)
