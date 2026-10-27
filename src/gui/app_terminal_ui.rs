@@ -1119,6 +1119,14 @@ impl GsdvGuiApp {
         if workspace_index >= self.terminal_hosts.len() {
             return;
         }
+        if self
+            .workspaces
+            .get(workspace_index)
+            .is_some_and(|workspace| workspace.remote.is_some())
+            && !self.remote_workspace_is_enabled(workspace_index)
+        {
+            return;
+        }
         if kind == TerminalSurfaceKind::Helix {
             return;
         };
@@ -1282,6 +1290,14 @@ impl GsdvGuiApp {
             return;
         }
         let workspace_index = self.active_workspace;
+        if self
+            .workspaces
+            .get(workspace_index)
+            .is_some_and(|workspace| workspace.remote.is_some())
+            && !self.remote_workspace_is_enabled(workspace_index)
+        {
+            return;
+        }
         let Some(workspace) = self
             .workspaces
             .get(workspace_index)

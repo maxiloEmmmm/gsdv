@@ -3,56 +3,154 @@
 use super::*;
 
 impl GsdvGuiApp {
+    /// 切换单个 SSH Remote Workspace 的运行时连接开关。
+    ///
+    /// 适用场景：workspace rail 右键菜单。关闭只释放本进程连接和 terminal，
+    /// 不修改远端配置或 workspace 持久数据；开启会生成新的 runtime id，
+    /// 让旧后台事件自然失效。
+    pub(super) fn toggle_remote_workspace(&mut self, ctx: &egui::Context, index: usize) {
+        let Some(workspace) = self.workspaces.get(index) else {
+            return;
+        };
+        if workspace.remote.is_none() {
+            return;
+        }
+        let enabled = self.remote_enabled.get(index).copied().unwrap_or(true);
+        if enabled {
+            if let Some(slot) = self.remote_enabled.get_mut(index) {
+                *slot = false;
+            }
+            self.pending_terminal_spawns
+                .retain(|key| key.index != index);
+            if let Some(hosts) = self.terminal_hosts.get_mut(index) {
+                *hosts = WorkspaceTerminalHosts::default();
+            }
+            if let Some(runtime) = self.remote_workspaces.get_mut(index).and_then(Option::take) {
+                for project in runtime.projects {
+                    drop(project.agents);
+                }
+            }
+            if let Some(open) = self.workspace_terminal_drawers.get_mut(index) {
+                *open = false;
+            }
+            if let Some(open) = self.reviewer_helix_drawers.get_mut(index) {
+                *open = false;
+            }
+            if let Some(state) = self.workflow_states.get_mut(index) {
+                *state = WorkflowUiState::default();
+            }
+            if let Some(dialog) = self.workflow_quick_overlay_dialogs.get_mut(index) {
+                *dialog = None;
+            }
+            if index == self.active_workspace
+                && matches!(
+                    self.active_app_dialog(),
+                    Some(AppDialog::WorkflowQuickModal)
+                )
+            {
+                self.set_active_app_dialog(None);
+            }
+        } else {
+            if let Some(slot) = self.remote_enabled.get_mut(index) {
+                *slot = true;
+            }
+            let Some(config) = self
+                .workspaces
+                .get(index)
+                .and_then(|workspace| workspace.remote.as_ref())
+                .cloned()
+            else {
+                return;
+            };
+            self.remote_workspaces[index] = Some(RemoteWorkspaceRuntime::disconnected(&config));
+            self.spawn_remote_workspace_load(ctx, index);
+        }
+        self.queue_app_event(AppEvent::SyncTerminalEventRepaintFlags);
+        self.request_app_repaint();
+    }
+
+    /// 判断 Remote Workspace 是否处于允许连接和启动 terminal 的状态。
+    ///
+    /// 适用场景：后台事件、刷新和 terminal spawn 的统一闸门。
+    /// 例：关闭状态 -> `false`。
+    pub(super) fn remote_workspace_is_enabled(&self, index: usize) -> bool {
+        self.workspaces
+            .get(index)
+            .is_some_and(|workspace| workspace.remote.is_some())
+            && self.remote_enabled.get(index).copied().unwrap_or(true)
+    }
+
     /// 为持久化 Remote Workspace 各执行一次直接 SSH 加载。
     ///
     /// 适用场景：启动 gsdv -> 读取远端 Outline，不保留后台健康检查。
     pub(super) fn start_remote_workspace_loads(&self, ctx: &egui::Context) {
-        for (index, runtime) in self.remote_workspaces.iter().enumerate() {
-            let Some(runtime) = runtime else {
-                continue;
-            };
-            let Some(config) = self
-                .workspaces
+        for index in 0..self.remote_workspaces.len() {
+            if self
+                .remote_workspaces
                 .get(index)
-                .and_then(|workspace| workspace.remote.clone())
-            else {
+                .and_then(Option::as_ref)
+                .is_none()
+            {
                 continue;
-            };
-            let id = runtime.id;
-            let tx = self.app_event_tx.clone();
-            let repaint_ctx = ctx.clone();
-            let repaint_controller = self.repaint_controller.clone();
-            self.background_runtime.spawn(async move {
-                let result = tokio::task::spawn_blocking(move || {
-                    let shell = remote_workspace::detect_remote_shell(&config)?;
-                    let snapshot = remote_workspace::load_remote_snapshot(&config, shell)?;
-                    Ok::<_, anyhow::Error>((shell, snapshot))
-                })
-                .await;
-                match result {
-                    Ok(Ok((shell, snapshot))) => {
-                        let _ = tx.send(AppEvent::RemoteWorkspaceConnected {
-                            id,
-                            shell,
-                            snapshot,
-                        });
-                    }
-                    Ok(Err(error)) => {
-                        let _ = tx.send(AppEvent::RemoteWorkspaceConnectionLost {
-                            id,
-                            error: error.to_string(),
-                        });
-                    }
-                    Err(error) => {
-                        let _ = tx.send(AppEvent::RemoteWorkspaceConnectionLost {
-                            id,
-                            error: error.to_string(),
-                        });
-                    }
-                }
-                repaint_controller.request_repaint(&repaint_ctx);
-            });
+            }
+            if !self.remote_workspace_is_enabled(index) {
+                continue;
+            }
+            self.spawn_remote_workspace_load(ctx, index);
         }
+    }
+
+    /// 后台加载一个已开启 Remote Workspace 的远端快照。
+    ///
+    /// 适用场景：应用启动或用户点击“开启 Remote”。例：新 runtime -> SSH 快照事件。
+    fn spawn_remote_workspace_load(&self, ctx: &egui::Context, index: usize) {
+        if !self.remote_workspace_is_enabled(index) {
+            return;
+        }
+        let Some(runtime) = self.remote_workspaces.get(index).and_then(Option::as_ref) else {
+            return;
+        };
+        let Some(config) = self
+            .workspaces
+            .get(index)
+            .and_then(|workspace| workspace.remote.clone())
+        else {
+            return;
+        };
+        let id = runtime.id;
+        let tx = self.app_event_tx.clone();
+        let repaint_ctx = ctx.clone();
+        let repaint_controller = self.repaint_controller.clone();
+        self.background_runtime.spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                let shell = remote_workspace::detect_remote_shell(&config)?;
+                let snapshot = remote_workspace::load_remote_snapshot(&config, shell)?;
+                Ok::<_, anyhow::Error>((shell, snapshot))
+            })
+            .await;
+            match result {
+                Ok(Ok((shell, snapshot))) => {
+                    let _ = tx.send(AppEvent::RemoteWorkspaceConnected {
+                        id,
+                        shell,
+                        snapshot,
+                    });
+                }
+                Ok(Err(error)) => {
+                    let _ = tx.send(AppEvent::RemoteWorkspaceConnectionLost {
+                        id,
+                        error: error.to_string(),
+                    });
+                }
+                Err(error) => {
+                    let _ = tx.send(AppEvent::RemoteWorkspaceConnectionLost {
+                        id,
+                        error: error.to_string(),
+                    });
+                }
+            }
+            repaint_controller.request_repaint(&repaint_ctx);
+        });
     }
 
     /// 后台验证新 Remote 配置并加载首份远端快照。
@@ -161,6 +259,9 @@ impl GsdvGuiApp {
             return;
         }
         let _old_runtime = self.remote_workspaces.get_mut(index).and_then(Option::take);
+        if let Some(enabled) = self.remote_enabled.get_mut(index) {
+            *enabled = true;
+        }
         self.terminal_hosts[index].agents.clear();
         self.workspaces[index].name = config.name.clone();
         self.workspaces[index].remote = Some(config.clone());
@@ -186,6 +287,9 @@ impl GsdvGuiApp {
         let Some(index) = self.remote_workspace_index(id) else {
             return;
         };
+        if !self.remote_workspace_is_enabled(index) {
+            return;
+        }
         let was_disconnected = self
             .remote_workspaces
             .get(index)
@@ -263,6 +367,9 @@ impl GsdvGuiApp {
         let Some(index) = self.remote_workspace_index(id) else {
             return;
         };
+        if !self.remote_workspace_is_enabled(index) {
+            return;
+        }
         if let Some(runtime) = self
             .remote_workspaces
             .get_mut(index)
@@ -282,6 +389,12 @@ impl GsdvGuiApp {
         id: u64,
         result: Result<RemoteWorkspaceSnapshot, String>,
     ) {
+        let Some(index) = self.remote_workspace_index(id) else {
+            return;
+        };
+        if !self.remote_workspace_is_enabled(index) {
+            return;
+        }
         match result {
             Ok(snapshot) => {
                 let shell = self
@@ -323,6 +436,9 @@ impl GsdvGuiApp {
         workspace_index: usize,
         project_index: usize,
     ) {
+        if !self.remote_workspace_is_enabled(workspace_index) {
+            return;
+        }
         let current_project = self
             .remote_workspaces
             .get(workspace_index)
@@ -474,6 +590,9 @@ impl GsdvGuiApp {
     /// 适用场景：复用现有 persist_workspaces 调用点。例：移动 tab -> 后台 helper 保存。
     pub(super) fn spawn_active_remote_layout_save(&self, ctx: &egui::Context) {
         let index = self.active_workspace;
+        if !self.remote_workspace_is_enabled(index) {
+            return;
+        }
         let Some(workspace) = self
             .workspaces
             .get(index)
@@ -506,6 +625,9 @@ impl GsdvGuiApp {
     ///
     /// 适用场景：Workspace Rail 切换。例：Local -> Remote 后读取一次。
     pub(super) fn spawn_remote_workspace_refresh(&self, ctx: &egui::Context, index: usize) {
+        if !self.remote_workspace_is_enabled(index) {
+            return;
+        }
         let Some(runtime) = self.remote_workspaces.get(index).and_then(Option::as_ref) else {
             return;
         };
@@ -555,6 +677,9 @@ impl GsdvGuiApp {
     ///
     /// 适用场景：首次选中或切换项目。例：每个未折叠列 active_slot -> 直接 SSH。
     fn spawn_visible_remote_agents(&mut self, ctx: &egui::Context, index: usize) {
+        if !self.remote_workspace_is_enabled(index) {
+            return;
+        }
         let slots = self
             .workspaces
             .get(index)
@@ -580,6 +705,9 @@ impl GsdvGuiApp {
     ///
     /// 适用场景：项目 A 可见、项目 B 后台运行时主连接断开。例：重连 -> B 后台 resume。
     fn spawn_background_remote_agents(&mut self, ctx: &egui::Context, index: usize) {
+        if !self.remote_workspace_is_enabled(index) {
+            return;
+        }
         let Some(workspace) = self.workspaces.get(index) else {
             return;
         };
@@ -642,6 +770,9 @@ impl GsdvGuiApp {
     /// 适用场景：Remote rail 右键重启所有活跃 Agent。
     /// 例：项目 A 当前可见、项目 B 后台缓存 -> 两边已有 host 的 Agent 都 resume。
     pub(super) fn restart_remote_workspace_agents(&mut self, ctx: &egui::Context, index: usize) {
+        if !self.remote_workspace_is_enabled(index) {
+            return;
+        }
         if !self
             .workspaces
             .get(index)
@@ -732,6 +863,9 @@ impl GsdvGuiApp {
     ///
     /// 适用场景：项目点击后。例：过滤列表下标 1 -> 原始 store_index 3。
     fn spawn_remote_active_save(&self, index: usize, project_index: usize, ctx: &egui::Context) {
+        if !self.remote_workspace_is_enabled(index) {
+            return;
+        }
         let Some(runtime) = self.remote_workspaces.get(index).and_then(Option::as_ref) else {
             return;
         };
@@ -758,6 +892,9 @@ impl GsdvGuiApp {
         + Send
         + 'static,
     ) {
+        if !self.remote_workspace_is_enabled(self.active_workspace) {
+            return;
+        }
         let Some(config) = self
             .workspaces
             .get(self.active_workspace)

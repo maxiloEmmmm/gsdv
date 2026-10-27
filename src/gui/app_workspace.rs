@@ -78,6 +78,7 @@ impl GsdvGuiApp {
         match action {
             WorkspaceRailAction::Switch(index) => self.switch_workspace(index),
             WorkspaceRailAction::ToggleFocus(index) => self.toggle_workspace_focus(index),
+            WorkspaceRailAction::ToggleRemote(index) => self.toggle_remote_workspace(ctx, index),
             WorkspaceRailAction::ToggleFocusFilter => self.toggle_workspace_focus_filter(),
             WorkspaceRailAction::Close(index) => self.request_close_workspace(index),
             WorkspaceRailAction::ChangeDirectory(index) => {
@@ -273,6 +274,11 @@ impl GsdvGuiApp {
         self.reviewer_diff_selected_rows.push(None);
         self.terminal_hosts.push(WorkspaceTerminalHosts::default());
         self.remote_workspaces.push(None);
+        self.remote_enabled.push(
+            self.workspaces
+                .last()
+                .is_some_and(|workspace| workspace.remote.is_some()),
+        );
         self.recent_agent_helix_targets.push(Vec::new());
         self.active_agent_slots.push(AgentSlotId::Main);
         self.agent_busy_watchdogs.push(BTreeMap::from([(
@@ -578,6 +584,7 @@ impl GsdvGuiApp {
         self.reviewer_diff_selected_rows.remove(index);
         self.terminal_hosts.remove(index);
         self.remote_workspaces.remove(index);
+        self.remote_enabled.remove(index);
         self.recent_agent_helix_targets.remove(index);
         self.active_agent_slots.remove(index);
         self.agent_busy_watchdogs.remove(index);
@@ -618,6 +625,7 @@ impl GsdvGuiApp {
                 .workspaces
                 .get(index)
                 .is_some_and(|workspace| workspace.remote.is_some())
+                && self.remote_workspace_is_enabled(index)
                 && let Some(ctx) = self.app_repaint_ctx.clone()
             {
                 self.spawn_remote_workspace_refresh(&ctx, index);
