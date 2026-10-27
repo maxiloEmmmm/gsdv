@@ -61,15 +61,31 @@ fixture="$(jq -Rs . <<'JS'
   window.wheelFixture = {
     // Captured terminal requests and current emulated terminal mode.
     messages: [], alternate: true, offset: 0, timer: 0, socket: null,
+    connectionCount: 0, snapshotCount: 0, patchCount: 0,
+    // Builds one terminal row. Example: index 3 -> row containing current offset.
+    row(index,count) {
+      return {line_index:index-count+12,runs:[{
+        text:`row ${index} offset ${this.offset}`,fg:"#111827",bg:"#ffffff"
+      }]};
+    },
     // Emits one screen or normal scrollback. Example: alternate=true -> 12 rows.
     emit() {
       const count = this.alternate ? 12 : 500;
+      this.snapshotCount+=1;
       this.socket.onmessage?.({data:JSON.stringify({
         type:"snapshot",sequence:++this.socket.sequence,cols:80,
+        screen_rows:this.alternate?12:24,
         terminal_scroll:this.alternate,
-        rows:Array.from({length:count},(_,i)=>({line_index:i-count+12,runs:[{
-          text:`row ${i} offset ${this.offset}`,fg:"#111827",bg:"#ffffff"
-        }]}))
+        rows:Array.from({length:count},(_,i)=>this.row(i,count))
+      })});
+    },
+    // Emits an in-place TUI update. Example: scroll -> patch 12 visible rows.
+    patch() {
+      const count=12;
+      this.patchCount+=1;
+      this.socket.onmessage?.({data:JSON.stringify({
+        type:"patch",sequence:++this.socket.sequence,
+        rows:Array.from({length:count},(_,i)=>({index:i,row:this.row(i,count)}))
       })});
     }
   };
@@ -80,6 +96,7 @@ fixture="$(jq -Rs . <<'JS'
     // Opens a fixture connection. Example: new WebSocket -> initial snapshot.
     constructor() {
       wheelFixture.socket=this;
+      wheelFixture.connectionCount+=1;
       setTimeout(()=>{this.onopen?.();wheelFixture.emit();},20);
     }
     // Responds to scroll input with a new visible screen. Example: +3 -> offset 3.
@@ -88,10 +105,12 @@ fixture="$(jq -Rs . <<'JS'
       if(message.type!=="scroll") return;
       wheelFixture.messages.push(message);
       wheelFixture.offset+=message.lines;
-      wheelFixture.emit();
+      if(wheelFixture.alternate) wheelFixture.patch(); else wheelFixture.emit();
     }
     // Closes only the mock socket. Example: close -> readyState 3.
     close() { this.readyState=3; }
+    // Simulates an unexpected server/network close. Example: live -> onclose.
+    serverClose() { this.readyState=3;this.onclose?.({code:1006,reason:""}); }
   };
 })();
 JS
@@ -110,12 +129,37 @@ evaluate '(async()=>{
   const out=document.querySelector(".remote-shell__terminal-output");
   if(out.scrollHeight!==out.clientHeight) throw new Error("fixture should fit one screen");
 })()'
-cdp Input.dispatchMouseEvent '{"type":"mouseWheel","x":320,"y":240,"deltaX":0,"deltaY":-120}'
 evaluate '(async()=>{
+  wheelFixture.messages=[];
+  wheelFixture.patchCount=0;
+  const out=document.querySelector(".remote-shell__terminal-output");
+  let fullRebuilds=0;
+  const originalReplaceChildren=out.replaceChildren.bind(out);
+  out.replaceChildren=(...nodes)=>{fullRebuilds+=1;return originalReplaceChildren(...nodes);};
+  const rect=out.getBoundingClientRect();
+  out.dispatchEvent(new WheelEvent("wheel",{
+    bubbles:true,cancelable:true,deltaMode:WheelEvent.DOM_DELTA_PIXEL,deltaY:-1,
+    clientX:rect.right-8,clientY:rect.bottom-8
+  }));
+  await new Promise(r=>setTimeout(r,50));
+  if(wheelFixture.messages.length!==1) throw new Error("first fractional wheel did not respond immediately");
+  wheelFixture.messages=[];
+  await new Promise(r=>setTimeout(r,150));
+  wheelFixture.patchCount=0;
+  for(let i=0;i<12;i++) out.dispatchEvent(new WheelEvent("wheel",{
+    bubbles:true,cancelable:true,deltaMode:WheelEvent.DOM_DELTA_PIXEL,deltaY:-4,
+    clientX:rect.right-8,clientY:rect.bottom-8
+  }));
   await new Promise(r=>setTimeout(r,200));
-  if(!(wheelFixture.messages.at(-1)?.lines>0)) throw new Error("up wheel never reached agent");
+  if(wheelFixture.messages.length!==1) throw new Error(`fine wheel was not frame-coalesced: ${wheelFixture.messages.length}`);
+  const scroll=wheelFixture.messages[0];
+  if(!(scroll.lines>0&&scroll.lines<12)) throw new Error(`fine wheel was amplified: ${scroll.lines}`);
+  if(!(scroll.col>60&&scroll.row>8)) throw new Error(`pointer cell was not preserved: ${scroll.col},${scroll.row}`);
+  if(wheelFixture.patchCount!==1) throw new Error(`scroll did not use row patch: ${wheelFixture.patchCount}`);
+  if(fullRebuilds!==0) throw new Error(`scroll rebuilt full terminal DOM: ${fullRebuilds}`);
   if(!document.querySelector(".remote-shell__terminal-output").textContent.includes(`offset ${wheelFixture.offset}`)) throw new Error("scroll response was not rendered");
 })()'
+evaluate 'wheelFixture.messages=[]'
 cdp Input.dispatchMouseEvent '{"type":"mouseWheel","x":320,"y":240,"deltaX":0,"deltaY":120}'
 evaluate '(async()=>{
   await new Promise(r=>setTimeout(r,200));
@@ -134,4 +178,17 @@ evaluate '(async()=>{
   if(out.scrollHeight-out.clientHeight-out.scrollTop<500) throw new Error("streaming output blocked native scrolling");
   if(wheelFixture.messages.length) throw new Error("normal history sent PTY input");
 })()'
-printf 'PASS: interactive wheel forwarding, response rendering, streaming native history\n'
+evaluate '(async()=>{
+  const oldSocket=wheelFixture.socket;
+  const oldConnections=wheelFixture.connectionCount;
+  oldSocket.serverClose();
+  await new Promise(r=>setTimeout(r,700));
+  if(wheelFixture.connectionCount!==oldConnections+1) throw new Error("unexpected close did not reconnect");
+  if(wheelFixture.socket===oldSocket) throw new Error("reconnect reused closed socket");
+  if(document.querySelector(".remote-shell__tab-state")?.textContent==="dis") throw new Error("tab remained dis after reconnect");
+  const beforeClose=wheelFixture.connectionCount;
+  document.querySelector(".remote-shell__tab-close").click();
+  await new Promise(r=>setTimeout(r,700));
+  if(wheelFixture.connectionCount!==beforeClose) throw new Error("closed tab reconnected in background");
+})()'
+printf 'PASS: smooth row patches, wheel routing, native history, disconnect recovery, explicit close\n'
