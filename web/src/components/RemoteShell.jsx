@@ -11,6 +11,9 @@ const MAX_TERMINAL_VISIBLE_ROWS = 200;
 const TERMINAL_BOTTOM_THRESHOLD_PX = 2;
 // Matches the server's per-message limit for interactive terminal wheel input.
 const MAX_TERMINAL_SCROLL_LINES = 50;
+const TERMINAL_WHEEL_GESTURE_IDLE_MS = 120;
+const AGENT_RECONNECT_BASE_DELAY_MS = 400;
+const AGENT_RECONNECT_MAX_DELAY_MS = 8000;
 const REMOTE_SHELL_VIEWPORT_HEIGHT_VAR = "--remote-shell-viewport-height";
 /**
  * Fallback palette used before the first Rust terminal snapshot arrives.
@@ -47,6 +50,8 @@ export default defineComponent({
     const terminalOutputElement = ref(null);
     const imageInputElement = ref(null);
     const scrollFrame = ref(0);
+    let terminalWheelFrame = 0;
+    let terminalWheelTab = null;
     let terminalResizeHandler = null;
     let visualViewportHandler = null;
     let visualViewportSyncTimers = [];
@@ -211,6 +216,7 @@ export default defineComponent({
         title: agent.title,
         rows: [],
         cols: 0,
+        gridRows: 0,
         cursor: null,
         palette: { ...DEFAULT_TERMINAL_PALETTE },
         sequence: null,
@@ -219,6 +225,7 @@ export default defineComponent({
         draft: "",
         socket: null,
         reconnectTimer: 0,
+        reconnectAttempt: 0,
         lastResizeKey: "",
         closing: false,
         // Whether ordinary terminal history follows new output.
@@ -227,6 +234,14 @@ export default defineComponent({
         scrollTop: 0,
         // Whether the server's interactive terminal consumes wheel input.
         terminalScroll: false,
+        // Fractional interactive wheel input waiting for a frame-sized send.
+        pendingWheelLines: 0,
+        // Last pointer cell used by terminal mouse-reporting applications.
+        pendingWheelCell: null,
+        // Timer that separates two trackpad or mouse wheel gestures.
+        wheelGestureTimer: 0,
+        // Whether the current wheel gesture already received immediate feedback.
+        wheelGestureActive: false,
       };
     }
 
@@ -246,6 +261,7 @@ export default defineComponent({
       tab.followOutput = true;
       tab.scrollTop = 0;
       tab.cols = 0;
+      tab.gridRows = 0;
       tab.cursor = null;
       tab.sequence = null;
       tab.error = "";
@@ -266,6 +282,17 @@ export default defineComponent({
       if (tab.reconnectTimer !== 0) {
         window.clearTimeout(tab.reconnectTimer);
         tab.reconnectTimer = 0;
+      }
+      if (terminalWheelTab === tab) {
+        cancelInteractiveTerminalScroll(tab);
+      } else {
+        if (tab.wheelGestureTimer !== 0) {
+          window.clearTimeout(tab.wheelGestureTimer);
+          tab.wheelGestureTimer = 0;
+        }
+        tab.pendingWheelLines = 0;
+        tab.pendingWheelCell = null;
+        tab.wheelGestureActive = false;
       }
       tab.closing = closing;
       if (tab.socket) {
@@ -293,6 +320,27 @@ export default defineComponent({
         window.cancelAnimationFrame(scrollFrame.value);
         scrollFrame.value = 0;
       }
+    }
+
+    /**
+     * Drops queued interactive wheel input when its tab or socket is leaving.
+     * Example: close active tab -> no delayed scroll reaches the next agent.
+     */
+    function cancelInteractiveTerminalScroll(tab = terminalWheelTab) {
+      if (terminalWheelFrame !== 0) {
+        window.cancelAnimationFrame(terminalWheelFrame);
+        terminalWheelFrame = 0;
+      }
+      if (tab) {
+        if (tab.wheelGestureTimer !== 0) {
+          window.clearTimeout(tab.wheelGestureTimer);
+          tab.wheelGestureTimer = 0;
+        }
+        tab.pendingWheelLines = 0;
+        tab.pendingWheelCell = null;
+        tab.wheelGestureActive = false;
+      }
+      terminalWheelTab = null;
     }
 
     /**
@@ -528,6 +576,116 @@ export default defineComponent({
     }
 
     /**
+     * Resolves a browser pointer to the one-based PTY cell under it.
+     * Example: bottom-right pointer in an 80x24 terminal -> col 80, row 24.
+     */
+    function terminalPointerCell(event, output, tab) {
+      const rect = output.getBoundingClientRect();
+      const style = window.getComputedStyle(output);
+      const paddingLeft = Number.parseFloat(style.paddingLeft) || 0;
+      const paddingRight = Number.parseFloat(style.paddingRight) || 0;
+      const paddingTop = Number.parseFloat(style.paddingTop) || 0;
+      const paddingBottom = Number.parseFloat(style.paddingBottom) || 0;
+      const left = rect.left + paddingLeft;
+      const top = rect.top + paddingTop;
+      const width = Math.max(
+        1,
+        output.clientWidth - paddingLeft - paddingRight,
+      );
+      const height = Math.max(
+        1,
+        output.clientHeight - paddingTop - paddingBottom,
+      );
+      const cols = Math.max(1, tab.cols || 1);
+      const rows = Math.max(1, tab.gridRows || tab.rows.length || 1);
+      const x = Math.min(
+        width - Number.EPSILON,
+        Math.max(0, event.clientX - left),
+      );
+      const y = Math.min(
+        height - Number.EPSILON,
+        Math.max(0, event.clientY - top),
+      );
+      return {
+        col: Math.min(cols, Math.floor((x / width) * cols) + 1),
+        row: Math.min(rows, Math.floor((y / height) * rows) + 1),
+      };
+    }
+
+    /**
+     * Sends at most one accumulated interactive scroll request per paint frame.
+     * Example: twelve 0.2-line events -> one 2-line request with 0.4 retained.
+     */
+    function flushInteractiveTerminalScroll(tab) {
+      terminalWheelFrame = 0;
+      terminalWheelTab = null;
+      if (
+        activeTabId.value !== tab.id ||
+        !tab.terminalScroll ||
+        tab.socket?.readyState !== WebSocket.OPEN
+      ) {
+        tab.pendingWheelLines = 0;
+        tab.pendingWheelCell = null;
+        return;
+      }
+      const wholeLines = Math.trunc(tab.pendingWheelLines);
+      if (wholeLines === 0) {
+        terminalWheelTab = tab;
+        return;
+      }
+      const lines =
+        Math.sign(wholeLines) *
+        Math.min(MAX_TERMINAL_SCROLL_LINES, Math.abs(wholeLines));
+      tab.pendingWheelLines -= lines;
+      const cell = tab.pendingWheelCell;
+      tab.socket.send(JSON.stringify({ type: "scroll", lines, ...cell }));
+      if (Math.abs(tab.pendingWheelLines) >= 1) {
+        scheduleInteractiveTerminalScroll(tab);
+      }
+    }
+
+    /**
+     * Coalesces interactive wheel work onto the next browser paint frame.
+     * Example: repeated trackpad events in one frame -> one WebSocket message.
+     */
+    function scheduleInteractiveTerminalScroll(tab) {
+      if (terminalWheelFrame !== 0) {
+        return;
+      }
+      terminalWheelTab = tab;
+      terminalWheelFrame = window.requestAnimationFrame(() =>
+        flushInteractiveTerminalScroll(tab),
+      );
+    }
+
+    /**
+     * Accumulates one wheel event while guaranteeing immediate gesture feedback.
+     * Example: first 0.2-line event -> one line now; later events stay fractional.
+     */
+    function queueInteractiveTerminalScroll(tab, deltaLines, pointerCell) {
+      if (tab.wheelGestureTimer !== 0) {
+        window.clearTimeout(tab.wheelGestureTimer);
+      }
+      if (!tab.wheelGestureActive && Math.abs(deltaLines) < 1) {
+        // 触控板或高分辨率鼠标的首个 delta 可能远小于一行。
+        // 等累计满一行才发送会表现为“手停后才动”，每个事件都取整又会过快。
+        tab.pendingWheelLines = -Math.sign(deltaLines);
+      } else {
+        tab.pendingWheelLines -= deltaLines;
+      }
+      tab.wheelGestureActive = true;
+      tab.pendingWheelCell = pointerCell;
+      tab.wheelGestureTimer = window.setTimeout(() => {
+        tab.wheelGestureTimer = 0;
+        tab.wheelGestureActive = false;
+        if (Math.abs(tab.pendingWheelLines) < 1) {
+          tab.pendingWheelLines = 0;
+        }
+      }, TERMINAL_WHEEL_GESTURE_IDLE_MS);
+      scheduleInteractiveTerminalScroll(tab);
+    }
+
+    /**
      * Routes interactive wheel input to the agent, or scrolls local history.
      * Example: terminal deltaMode=line, deltaY=-3 -> send scroll lines=3.
      */
@@ -544,9 +702,13 @@ export default defineComponent({
         // Interactive TUIs expose only one screen, so native DOM scrolling has
         // no history to move. Forward wheel lines using the desktop PTY path.
         event.preventDefault();
-        const lineHeight = Number.parseFloat(
+        const measuredLineHeight = Number.parseFloat(
           window.getComputedStyle(output).lineHeight,
         );
+        const lineHeight =
+          Number.isFinite(measuredLineHeight) && measuredLineHeight > 0
+            ? measuredLineHeight
+            : 1;
         let deltaLines = event.deltaY;
         if (event.deltaMode !== WheelEvent.DOM_DELTA_LINE) {
           deltaLines /= lineHeight;
@@ -554,11 +716,13 @@ export default defineComponent({
             deltaLines *= output.clientHeight;
           }
         }
-        const lines = -Math.sign(deltaLines) * Math.min(
-          MAX_TERMINAL_SCROLL_LINES,
-          Math.max(1, Math.round(Math.abs(deltaLines))),
+        // 触控板会产生不足一行的高频事件。逐条取整会放大输入并让
+        // 每个事件触发一次整屏 snapshot，因此保留小数并按帧合并。
+        queueInteractiveTerminalScroll(
+          tab,
+          deltaLines,
+          terminalPointerCell(event, output, tab),
         );
-        tab.socket.send(JSON.stringify({ type: "scroll", lines }));
         return;
       }
       if (event.deltaY > 0) {
@@ -607,10 +771,16 @@ export default defineComponent({
     /**
      * Connects the browser to the selected agent output WebSocket.
      */
-    function connectAgentSocket(tab) {
+    function connectAgentSocket(tab, preserveTerminal = false) {
       closeAgentSocket(tab);
       tab.closing = false;
-      clearTerminal(tab, "Connecting to agent terminal...");
+      if (preserveTerminal && tab.rows.length > 0) {
+        tab.status = "Reconnecting to agent terminal...";
+        tab.error = "";
+        refreshTabs();
+      } else {
+        clearTerminal(tab, "Connecting to agent terminal...");
+      }
 
       const socket = new WebSocket(agentOutputUrl(tab.binding));
       tab.socket = socket;
@@ -619,6 +789,7 @@ export default defineComponent({
       socket.onopen = () => {
         if (tab.socket === socket && tabStillOpen(tab)) {
           tab.status = "Waiting for terminal snapshot...";
+          tab.error = "";
           sendTerminalResize(tab, socket);
           refreshTabs();
         }
@@ -641,15 +812,39 @@ export default defineComponent({
       socket.onclose = () => {
         if (tab.socket === socket && tabStillOpen(tab)) {
           tab.socket = null;
-          tab.status = "dis";
-          tab.error = "dis";
           tab.lastResizeKey = "";
-          if (activeTabId.value === tab.id) {
-            renderActiveTerminal();
-          }
-          refreshTabs();
+          scheduleAgentReconnect(tab, "Agent terminal disconnected.");
         }
       };
+    }
+
+    /**
+     * Schedules bounded exponential reconnect while the browser tab stays open.
+     * Example: three failed sockets -> retry after 400ms, 800ms, then 1600ms.
+     */
+    function scheduleAgentReconnect(tab, reason) {
+      if (
+        tab.closing ||
+        !tabStillOpen(tab) ||
+        tab.reconnectTimer !== 0
+      ) {
+        return;
+      }
+      const exponent = Math.min(tab.reconnectAttempt, 8);
+      const delay = Math.min(
+        AGENT_RECONNECT_MAX_DELAY_MS,
+        AGENT_RECONNECT_BASE_DELAY_MS * 2 ** exponent,
+      );
+      tab.reconnectAttempt += 1;
+      tab.status = "Reconnecting to agent terminal...";
+      tab.error = `${reason} Retrying...`;
+      tab.reconnectTimer = window.setTimeout(() => {
+        tab.reconnectTimer = 0;
+        if (!tab.closing && tabStillOpen(tab)) {
+          connectAgentSocket(tab, true);
+        }
+      }, delay);
+      refreshTabs();
     }
 
     /**
@@ -672,6 +867,11 @@ export default defineComponent({
 
       if (message.type === "append") {
         applyAppendMessage(tab, message);
+        return;
+      }
+
+      if (message.type === "patch") {
+        applyPatchMessage(tab, message);
         return;
       }
 
@@ -705,10 +905,18 @@ export default defineComponent({
         : tab.scrollTop;
       tab.rows = trimTerminalRows(rows);
       tab.cols = Number.isFinite(message.cols) ? message.cols : 0;
+      tab.gridRows = Number.isFinite(message.screen_rows)
+        ? message.screen_rows
+        : tab.rows.length;
       tab.cursor = message.cursor ?? null;
       tab.palette = terminalPalette(message.palette);
-      tab.terminalScroll = message.terminal_scroll === true;
+      const terminalScroll = message.terminal_scroll === true;
+      if (tab.terminalScroll !== terminalScroll && terminalWheelTab === tab) {
+        cancelInteractiveTerminalScroll(tab);
+      }
+      tab.terminalScroll = terminalScroll;
       tab.sequence = Number.isFinite(message.sequence) ? message.sequence : null;
+      tab.reconnectAttempt = 0;
       tab.status = "Agent terminal connected.";
       tab.error = "";
       if (isActive) {
@@ -720,6 +928,40 @@ export default defineComponent({
         }
       }
       refreshTabs();
+    }
+
+    /**
+     * Applies changed TUI rows without rebuilding the terminal container.
+     * Example: rows [{ index: 4, row }] -> replace only DOM row 4.
+     */
+    function applyPatchMessage(tab, message) {
+      const nextSequence = message.sequence;
+      const currentSequence = tab.sequence;
+      const patches = Array.isArray(message.rows) ? message.rows : [];
+      if (
+        !Number.isFinite(nextSequence) ||
+        !Number.isFinite(currentSequence) ||
+        nextSequence !== currentSequence + 1 ||
+        patches.some(
+          (patch) =>
+            !Number.isInteger(patch?.index) ||
+            patch.index < 0 ||
+            patch.index >= tab.rows.length ||
+            !patch.row,
+        )
+      ) {
+        reconnectCurrentAgent(tab);
+        return;
+      }
+
+      for (const patch of patches) {
+        tab.rows[patch.index] = patch.row;
+      }
+      tab.sequence = nextSequence;
+      tab.cursor = message.cursor ?? tab.cursor;
+      if (activeTabId.value === tab.id) {
+        patchTerminalRows(patches, tab.rows.length);
+      }
     }
 
     /**
@@ -778,18 +1020,11 @@ export default defineComponent({
      * Example: sequence 1 then 3 -> reconnect.
      */
     function reconnectCurrentAgent(tab) {
-      tab.error = "Terminal stream sequence changed; reconnecting.";
       closeAgentSocket(tab);
       // 触发条件：append/ping sequence 不是当前 sequence + 1。
       // 不能直接继续 append：缺失的行无法从 append-only 协议恢复。
       // 防止回归：输出丢包后页面仍显示为貌似正常的半截日志。
-      tab.reconnectTimer = window.setTimeout(() => {
-        tab.reconnectTimer = 0;
-        if (tabStillOpen(tab)) {
-          connectAgentSocket(tab);
-        }
-      }, 300);
-      refreshTabs();
+      scheduleAgentReconnect(tab, "Terminal stream changed.");
     }
 
     /**
@@ -1189,6 +1424,32 @@ export default defineComponent({
     }
 
     /**
+     * Replaces only changed terminal row nodes while preserving scroll gestures.
+     * Example: two changed rows in a 24-row TUI -> two DOM replacements.
+     */
+    function patchTerminalRows(patches, expectedRowCount) {
+      const output = terminalOutputElement.value;
+      if (!output || output.childElementCount !== expectedRowCount) {
+        renderTerminalRows(activeTab()?.rows ?? []);
+        return;
+      }
+
+      const replacements = [];
+      for (const patch of patches) {
+        const current = output.children.item(patch.index);
+        if (!current) {
+          renderTerminalRows(activeTab()?.rows ?? []);
+          return;
+        }
+        replacements.push([current, terminalRowNode(patch.row)]);
+      }
+      // 浏览器会把连续 replaceWith 合并到同一 paint，避免整棵 DOM 失效。
+      for (const [current, replacement] of replacements) {
+        current.replaceWith(replacement);
+      }
+    }
+
+    /**
      * Appends protocol-guaranteed new rows and returns removed DOM height.
      * Example: 2 new rows and no trim -> append 2 nodes and return 0.
      */
@@ -1259,6 +1520,7 @@ export default defineComponent({
     function activateAgentTab(tabId) {
       handleTerminalScroll();
       cancelTerminalScroll();
+      cancelInteractiveTerminalScroll(activeTab());
       activeTabId.value = tabId;
       const tab = activeTab();
       nextTick(() => {
@@ -1467,6 +1729,7 @@ export default defineComponent({
     function cleanupRemoteShell() {
       closeAllAgentSockets();
       cancelTerminalScroll();
+      cancelInteractiveTerminalScroll();
       disconnectTerminalResizeObserver();
       disconnectVisualViewportObserver();
     }

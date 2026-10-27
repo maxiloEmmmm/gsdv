@@ -24,8 +24,8 @@ use tokio::time::MissedTickBehavior;
 const REMOTE_AGENT_IMAGE_PASTE_BYTES: &[u8] = &[0x16];
 /// Remote agent 输出 WebSocket 心跳间隔。
 const REMOTE_AGENT_OUTPUT_PING_INTERVAL: Duration = Duration::from_secs(30);
-/// Remote agent 输出 WebSocket 兜底检查间隔。
-const REMOTE_AGENT_OUTPUT_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Remote agent 输出 WebSocket 合帧间隔，上限约 60 FPS。
+const REMOTE_AGENT_OUTPUT_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 /// Remote agent 输出 WebSocket 允许连续丢失的 pong 次数。
 const REMOTE_AGENT_OUTPUT_MAX_MISSED_PONGS: u8 = 2;
 /// Remote 请求等待后台 agent terminal 创建的重试次数。
@@ -174,6 +174,10 @@ struct RemoteAgentScroll {
     session_id: u64,
     /// 正数向上，负数向下。
     lines: i32,
+    /// 浏览器指针所在的一基 terminal 列；旧客户端可省略。
+    col: Option<u16>,
+    /// 浏览器指针所在的一基 terminal 行；旧客户端可省略。
+    row: Option<u16>,
 }
 
 /// Agent 输出 WebSocket query 参数。
@@ -213,6 +217,8 @@ struct RemoteAgentOutputSnapshotMessage {
     sequence: u64,
     /// 当前 terminal 列数。
     cols: usize,
+    /// 当前 terminal 可见网格行数，不含历史 buffer。
+    screen_rows: usize,
     /// 当前 terminal buffer 行。
     rows: Vec<crate::gui::terminal_host::TerminalRemoteRow>,
     /// 当前 terminal 光标。
@@ -235,14 +241,18 @@ struct RemoteAgentOutputAppendMessage {
     rows: Vec<crate::gui::terminal_host::TerminalRemoteRow>,
 }
 
-/// Agent 输出 WebSocket ping 消息。
+/// Agent 输出 WebSocket 行级 patch 消息。
 #[derive(Debug, Serialize)]
-struct RemoteAgentOutputPingMessage {
+struct RemoteAgentOutputPatchMessage {
     /// 消息类型。
     #[serde(rename = "type")]
     message_type: &'static str,
     /// 连接内递增序号。
     sequence: u64,
+    /// 保持 terminal 网格形状时发生变化的行。
+    rows: Vec<crate::gui::terminal_host::TerminalRemoteRowPatch>,
+    /// 当前 terminal 光标。
+    cursor: crate::gui::terminal_host::TerminalRemoteCursor,
 }
 
 /// Agent 输出 WebSocket 客户端消息。
@@ -259,6 +269,10 @@ struct RemoteAgentOutputClientMessage {
     rows: Option<u16>,
     /// scroll 消息携带的有符号滚动行数。
     lines: Option<i32>,
+    /// scroll 消息携带的一基 terminal 列。
+    col: Option<u16>,
+    /// scroll 消息携带的一基 terminal 行。
+    row: Option<u16>,
 }
 
 /// HTTP JSON 图片输入请求。
@@ -579,7 +593,7 @@ impl GsdvGuiApp {
         let Some(host) = self.remote_agent_host_mut(workspace_index, &slot_id) else {
             return RemoteApiResult::Err(remote_not_found());
         };
-        host.scroll_remote(input.session_id, input.lines);
+        host.scroll_remote(input.session_id, input.lines, input.col.zip(input.row));
         RemoteApiResult::Ok(RemoteApiPayload::AgentOk)
     }
 
@@ -952,6 +966,37 @@ async fn dispatch_remote_agent_resize(
     let _ = response.await;
 }
 
+/// Queues one interactive terminal scroll without blocking the output socket.
+/// Example: wheel frame -> AppEvent queued while WebSocket keeps sending patches.
+fn dispatch_remote_agent_scroll(
+    state: &RemoteApiState,
+    target: RemoteAgentTarget,
+    session_id: u64,
+    lines: i32,
+    pointer_cell: Option<(u16, u16)>,
+) {
+    let (reply, _response) = oneshot::channel();
+    let envelope = RemoteApiEnvelope {
+        request: RemoteApiRequest::AgentScroll(RemoteAgentScroll {
+            target,
+            session_id,
+            lines,
+            col: pointer_cell.map(|cell| cell.0),
+            row: pointer_cell.map(|cell| cell.1),
+        }),
+        reply,
+    };
+    if state
+        .event_tx
+        .send(AppEvent::RemoteApiRequest(envelope))
+        .is_ok()
+    {
+        // 滚轮是连续输入，业务结果不需要逐条回执。等待回执会阻塞同一
+        // WebSocket 的输出 select，造成停手后才批量显示。
+        state.repaint_controller.request_repaint(&state.repaint_ctx);
+    }
+}
+
 /// Extracts a JSON payload or returns the stable remote error shape.
 fn json_payload<T>(payload: Result<Json<T>, JsonRejection>) -> Result<T, axum::response::Response> {
     payload.map(|Json(value)| value).map_err(|error| {
@@ -1009,24 +1054,26 @@ async fn run_remote_agent_output_socket(
     if !send_remote_agent_output_snapshot(socket, sequence, subscription.snapshot.clone()).await {
         return;
     }
-    let mut poll_interval = tokio::time::interval(REMOTE_AGENT_OUTPUT_POLL_INTERVAL);
-    poll_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut output_frame_interval = tokio::time::interval(REMOTE_AGENT_OUTPUT_FRAME_INTERVAL);
+    output_frame_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut ping_interval = tokio::time::interval(REMOTE_AGENT_OUTPUT_PING_INTERVAL);
     ping_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut missed_pongs = 0_u8;
+    let mut output_dirty = false;
     loop {
         tokio::select! {
             changed = subscription.source.changed() => {
                 if !changed {
                     return;
                 }
-                if !send_remote_agent_output_update(socket, &mut subscription, &mut sequence).await {
-                    return;
-                }
+                output_dirty = true;
             }
-            _ = poll_interval.tick() => {
-                if !send_remote_agent_output_update(socket, &mut subscription, &mut sequence).await {
-                    return;
+            _ = output_frame_interval.tick() => {
+                if output_dirty {
+                    output_dirty = false;
+                    if !send_remote_agent_output_update(socket, &mut subscription, &mut sequence).await {
+                        return;
+                    }
                 }
             }
             _ = ping_interval.tick() => {
@@ -1035,8 +1082,7 @@ async fn run_remote_agent_output_socket(
                     let _ = socket.send(Message::Close(None)).await;
                     return;
                 }
-                sequence = sequence.wrapping_add(1);
-                if !send_remote_agent_output_ping(socket, sequence).await {
+                if !send_remote_agent_output_ping(socket).await {
                     return;
                 }
             }
@@ -1058,15 +1104,14 @@ async fn run_remote_agent_output_socket(
                     dispatch_remote_agent_resize(&state, target.clone(), cols, rows).await;
                     continue;
                 }
-                if let Some(lines) = remote_agent_output_scroll_message(&message) {
-                    let _ = dispatch_remote_api_request_once(
-                        state.clone(),
-                        RemoteApiRequest::AgentScroll(RemoteAgentScroll {
-                            target: target.clone(),
-                            session_id: subscription.session_id,
-                            lines,
-                        }),
-                    ).await;
+                if let Some((lines, pointer_cell)) = remote_agent_output_scroll_message(&message) {
+                    dispatch_remote_agent_scroll(
+                        &state,
+                        target.clone(),
+                        subscription.session_id,
+                        lines,
+                        pointer_cell,
+                    );
                     continue;
                 }
                 if matches!(message, Message::Close(_)) {
@@ -1105,6 +1150,10 @@ async fn send_remote_agent_output_update(
             *sequence = sequence.wrapping_add(1);
             send_remote_agent_output_append(socket, *sequence, append).await
         }
+        TerminalRemoteUpdate::Patch(patch) => {
+            *sequence = sequence.wrapping_add(1);
+            send_remote_agent_output_patch(socket, *sequence, patch).await
+        }
         TerminalRemoteUpdate::Snapshot(snapshot) => {
             *sequence = sequence.wrapping_add(1);
             send_remote_agent_output_snapshot(socket, *sequence, snapshot).await
@@ -1122,6 +1171,7 @@ async fn send_remote_agent_output_snapshot(
         message_type: "snapshot",
         sequence,
         cols: snapshot.cols,
+        screen_rows: snapshot.screen_rows,
         rows: snapshot.rows,
         cursor: snapshot.cursor,
         palette: snapshot.palette,
@@ -1144,13 +1194,28 @@ async fn send_remote_agent_output_append(
     send_remote_agent_output_json(socket, &message).await
 }
 
-/// Sends a JSON heartbeat ping over WebSocket.
-async fn send_remote_agent_output_ping(socket: &mut WebSocket, sequence: u64) -> bool {
-    let message = RemoteAgentOutputPingMessage {
-        message_type: "ping",
+/// Sends changed full-screen TUI rows without replacing the browser grid.
+/// Example: one spinner row changes -> one row patch.
+async fn send_remote_agent_output_patch(
+    socket: &mut WebSocket,
+    sequence: u64,
+    patch: crate::gui::terminal_host::TerminalRemotePatch,
+) -> bool {
+    let message = RemoteAgentOutputPatchMessage {
+        message_type: "patch",
         sequence,
+        rows: patch.rows,
+        cursor: patch.cursor,
     };
     send_remote_agent_output_json(socket, &message).await
+}
+
+/// Sends a protocol heartbeat handled by the browser network stack.
+/// Example: background-frozen page -> browser still replies with Pong.
+async fn send_remote_agent_output_ping(socket: &mut WebSocket) -> bool {
+    // 页面 JS 在移动端或后台标签中可能被冻结，不能依赖业务 JSON pong。
+    // 协议级 Ping 由浏览器自动响应，也不会污染 terminal 消息 sequence。
+    socket.send(Message::Ping(Vec::new().into())).await.is_ok()
 }
 
 /// Serializes and sends one remote output WebSocket message.
@@ -1194,8 +1259,8 @@ fn remote_agent_output_resize_message(message: &Message) -> Option<(u16, u16)> {
 }
 
 /// 解析有界滚轮请求，忽略零值、越界值及其他消息。
-/// 例：{"type":"scroll","lines":3} -> Some(3)。
-fn remote_agent_output_scroll_message(message: &Message) -> Option<i32> {
+/// 例：{"type":"scroll","lines":3,"col":46,"row":13} -> Some((3, Some((46, 13))))。
+fn remote_agent_output_scroll_message(message: &Message) -> Option<(i32, Option<(u16, u16)>)> {
     let Message::Text(text) = message else {
         return None;
     };
@@ -1207,7 +1272,19 @@ fn remote_agent_output_scroll_message(message: &Message) -> Option<i32> {
     {
         return None;
     }
-    Some(lines)
+    let pointer_cell = match (message.col, message.row) {
+        (None, None) => None,
+        (Some(col), Some(row))
+            if col > 0
+                && row > 0
+                && col <= REMOTE_AGENT_RESIZE_MAX_COLS
+                && row <= REMOTE_AGENT_RESIZE_MAX_ROWS =>
+        {
+            Some((col, row))
+        }
+        _ => return None,
+    };
+    Some((lines, pointer_cell))
 }
 
 /// Converts a remote API error into an HTTP response.

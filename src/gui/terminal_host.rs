@@ -368,6 +368,10 @@ pub struct TerminalRemoteOutputState {
     row_signatures: Vec<TerminalRemoteRowSignature>,
     /// 上次告知 Web 的终端滚轮转发状态。
     terminal_scroll: bool,
+    /// 上次告知 Web 的 terminal 列数。
+    cols: usize,
+    /// 上次告知 Web 的 terminal 可见网格行数。
+    screen_rows: usize,
 }
 
 /// Remote terminal 当前完整输出快照。
@@ -375,6 +379,8 @@ pub struct TerminalRemoteOutputState {
 pub struct TerminalRemoteSnapshot {
     /// 当前 terminal 列数。
     pub cols: usize,
+    /// 当前 terminal 可见网格行数，不含 scrollback。
+    pub screen_rows: usize,
     /// 当前 terminal buffer 行。
     pub rows: Vec<TerminalRemoteRow>,
     /// 当前 terminal 光标。
@@ -392,6 +398,24 @@ pub struct TerminalRemoteAppend {
     pub rows: Vec<TerminalRemoteRow>,
 }
 
+/// Remote terminal 中一个原地变化的行。
+#[derive(Debug, Clone, Serialize)]
+pub struct TerminalRemoteRowPatch {
+    /// 行在上一份 snapshot 中的数组下标。
+    pub index: usize,
+    /// 该下标对应的最新 terminal 行。
+    pub row: TerminalRemoteRow,
+}
+
+/// Remote terminal 原屏改写的最小增量。
+#[derive(Debug, Clone, Serialize)]
+pub struct TerminalRemotePatch {
+    /// 本帧内容发生变化的 terminal 行。
+    pub rows: Vec<TerminalRemoteRowPatch>,
+    /// 本帧最新 terminal 光标。
+    pub cursor: TerminalRemoteCursor,
+}
+
 /// Remote terminal 输出变化分类。
 #[derive(Debug, Clone, Serialize)]
 pub enum TerminalRemoteUpdate {
@@ -399,6 +423,8 @@ pub enum TerminalRemoteUpdate {
     Unchanged,
     /// 当前变化可以用 append-only 增量表达。
     Append(TerminalRemoteAppend),
+    /// 全屏 TUI 保持网格形状，只原地改写部分行。
+    Patch(TerminalRemotePatch),
     /// 当前变化需要完整 snapshot 才能表达。
     Snapshot(TerminalRemoteSnapshot),
 }
@@ -594,6 +620,8 @@ impl TerminalRemoteOutputSource {
             output_sequence: *self.output_rx.borrow(),
             row_signatures: terminal_remote_row_signatures(&snapshot.rows),
             terminal_scroll: snapshot.terminal_scroll,
+            cols: snapshot.cols,
+            screen_rows: snapshot.screen_rows,
         };
         (snapshot, state)
     }
@@ -623,12 +651,30 @@ impl TerminalRemoteOutputSource {
         let snapshot = terminal_remote_snapshot(self);
         let next_signatures = terminal_remote_row_signatures(&snapshot.rows);
         let mode_changed = snapshot.terminal_scroll != state.terminal_scroll;
-        if next_signatures == state.row_signatures && !mode_changed {
+        let grid_changed = snapshot.cols != state.cols || snapshot.screen_rows != state.screen_rows;
+        if next_signatures == state.row_signatures && !mode_changed && !grid_changed {
             return TerminalRemoteUpdate::Unchanged;
         }
 
+        let can_patch = snapshot.terminal_scroll
+            && !mode_changed
+            && !grid_changed
+            && next_signatures.len() == state.row_signatures.len();
+        let patch_rows = can_patch.then(|| {
+            next_signatures
+                .iter()
+                .zip(&state.row_signatures)
+                .enumerate()
+                .filter(|(_, (next, previous))| next != previous)
+                .map(|(index, _)| TerminalRemoteRowPatch {
+                    index,
+                    row: snapshot.rows[index].clone(),
+                })
+                .collect::<Vec<_>>()
+        });
+
         // 全屏 TUI 滚动的是应用内部视图，不能把新画面追加成浏览器历史。
-        // 模式切换也必须发 snapshot，避免 Web 继续使用旧滚轮路由。
+        // 网格稳定时只发变化行；模式或尺寸切换必须发完整 snapshot。
         let start = if snapshot.terminal_scroll || mode_changed {
             None
         } else {
@@ -636,6 +682,14 @@ impl TerminalRemoteOutputSource {
         };
         state.row_signatures = next_signatures;
         state.terminal_scroll = snapshot.terminal_scroll;
+        state.cols = snapshot.cols;
+        state.screen_rows = snapshot.screen_rows;
+        if let Some(rows) = patch_rows {
+            return TerminalRemoteUpdate::Patch(TerminalRemotePatch {
+                rows,
+                cursor: snapshot.cursor,
+            });
+        }
         if let Some(start) = start
             && start < snapshot.rows.len()
         {
@@ -681,6 +735,8 @@ struct TerminalEventProxy {
     ///
     /// repaint 只是唤醒 app update；状态变化由 terminal runtime 投 AppEvent。
     repaint_enabled: Arc<AtomicBool>,
+    /// 独立于桌面 UI 节流的 Web terminal 输出变化信号。
+    remote_output_tx: watch::Sender<u64>,
     /// 高频 PTY 通知节流的毫秒起点。
     throttle_origin: Instant,
     /// 下一次允许转发 Wakeup 的毫秒刻度。
@@ -695,6 +751,12 @@ impl EventListener for TerminalEventProxy {
     fn send_event(&self, event: PtyEvent) {
         if matches!(event, PtyEvent::Wakeup) {
             crate::gui::perf_log::count("terminal.proxy.wakeup");
+            if self.remote_output_tx.receiver_count() > 0 {
+                // Web terminal 自己在 WebSocket 层按 60 FPS 合帧。这里若跟随
+                // 桌面 UI 的 100ms 节流，TUI 滚动最多只有 10 FPS。
+                self.remote_output_tx
+                    .send_modify(|sequence| *sequence = sequence.wrapping_add(1));
+            }
             if !self.forward_due(
                 &self.next_wakeup_forward_ms,
                 TERMINAL_WAKEUP_FORWARD_INTERVAL,
@@ -799,6 +861,7 @@ impl TerminalBackend {
             egui_ctx,
             repaint_controller: settings.repaint_controller,
             repaint_enabled: repaint_enabled.clone(),
+            remote_output_tx: settings.remote_output_tx,
             throttle_origin,
             next_wakeup_forward_ms: Arc::new(AtomicU64::new(0)),
             next_repaint_forward_ms: Arc::new(AtomicU64::new(0)),
@@ -953,8 +1016,8 @@ impl TerminalBackend {
     }
 
     /// Scrolls a remote Web terminal using the active terminal input mode.
-    /// Example: mouse-reporting mode and delta=2 -> two SGR wheel-up reports.
-    fn scroll_remote(&mut self, delta: i32) {
+    /// Example: mouse mode, delta=2, cell=(46,13) -> two wheel-up reports there.
+    fn scroll_remote(&mut self, delta: i32, pointer_cell: Option<(u16, u16)>) {
         if delta == 0 {
             return;
         }
@@ -965,8 +1028,21 @@ impl TerminalBackend {
         }
 
         let event_code = if delta > 0 { 64 } else { 65 };
-        let col = usize::from(self.size.cols).div_ceil(2).max(1);
-        let line = usize::from(self.size.lines).div_ceil(2).max(1);
+        // Mouse-aware TUIs can scope scrolling to the pane below the pointer.
+        // Old Web clients omit coordinates, so keep the historical center fallback.
+        let (col, line) = pointer_cell
+            .map(|(col, line)| {
+                (
+                    usize::from(col).clamp(1, usize::from(self.size.cols).max(1)),
+                    usize::from(line).clamp(1, usize::from(self.size.lines).max(1)),
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    usize::from(self.size.cols).div_ceil(2).max(1),
+                    usize::from(self.size.lines).div_ceil(2).max(1),
+                )
+            });
         let mut bytes = Vec::new();
         for _ in 0..delta.unsigned_abs() {
             terminal_mouse_report_at_cell(&mut bytes, event_code, col, line, mode);
@@ -1004,6 +1080,8 @@ struct BackendSettings {
     working_directory: Option<PathBuf>,
     /// 终端驱动 repaint 时使用的全局 FPS 控制器。
     repaint_controller: RepaintController,
+    /// Web terminal 订阅的 PTY 输出变化信号。
+    remote_output_tx: watch::Sender<u64>,
     /// 子进程输出前先写入模拟器的历史文本快照。
     initial_history: Option<String>,
 }
@@ -1132,6 +1210,7 @@ impl GuiTerminalHost {
                 args,
                 working_directory: Some(working_directory),
                 repaint_controller,
+                remote_output_tx: remote_output_tx.clone(),
                 initial_history,
             },
             &env,
@@ -1149,7 +1228,6 @@ impl GuiTerminalHost {
                 runtime_size: backend.runtime_size.clone(),
                 runtime_state: runtime_state.clone(),
                 runtime_theme_mode: runtime_theme_mode.clone(),
-                remote_output_tx: remote_output_tx.clone(),
                 event_sink,
             },
         );
@@ -1200,6 +1278,7 @@ impl GuiTerminalHost {
                 args,
                 working_directory: Some(spec.workdir.clone()),
                 repaint_controller,
+                remote_output_tx: remote_output_tx.clone(),
                 initial_history: None,
             },
             &terminal_env(workspace, TerminalSurfaceKind::Helix, network_settings),
@@ -1217,7 +1296,6 @@ impl GuiTerminalHost {
                 runtime_size: backend.runtime_size.clone(),
                 runtime_state: runtime_state.clone(),
                 runtime_theme_mode: runtime_theme_mode.clone(),
-                remote_output_tx: remote_output_tx.clone(),
                 event_sink,
             },
         );
@@ -1342,8 +1420,8 @@ impl GuiTerminalHost {
     }
 
     /// 将当前 Web 会话的全屏滚轮交给现有终端输入路径。
-    /// 例：当前会话、delta=3 -> 与桌面上滚三行一致。
-    pub fn scroll_remote(&mut self, session_id: u64, delta: i32) {
+    /// 例：当前会话、delta=3、cell=(46,13) -> 在该 TUI pane 上滚三行。
+    pub fn scroll_remote(&mut self, session_id: u64, delta: i32, pointer_cell: Option<(u16, u16)>) {
         if !self
             .remote_session
             .as_ref()
@@ -1353,7 +1431,7 @@ impl GuiTerminalHost {
         }
         // 请求排队期间可能退出 TUI 或被桌面抢占。
         // backend 会重新读取 mode，按鼠标报告或 alternate scroll 编码。
-        self.backend.scroll_remote(delta);
+        self.backend.scroll_remote(delta, pointer_cell);
     }
 
     pub fn take_abnormal_agent_exit(&mut self) -> Option<AgentProcessExit> {
@@ -1756,8 +1834,6 @@ struct TerminalRuntimeDrainer {
     runtime_state: Arc<Mutex<TerminalRuntimeState>>,
     /// 最新 UI 主题。
     runtime_theme_mode: Arc<Mutex<gui_theme::ThemeMode>>,
-    /// Agent remote 输出订阅的轻量变化信号。
-    remote_output_tx: watch::Sender<u64>,
     /// 向 AppEvent 队列投递轻量通知的出口。
     event_sink: TerminalRuntimeEventSink,
 }
@@ -1794,14 +1870,6 @@ fn handle_terminal_runtime_event(drainer: &TerminalRuntimeDrainer, event: PtyEve
     match event {
         PtyEvent::Wakeup => {
             crate::gui::perf_log::count("terminal.drain.wakeup");
-            if drainer.kind == TerminalSurfaceKind::Agent {
-                // 触发条件：Agent terminal 收到 PTY 输出。
-                // 不能在这里导出 grid：drainer 是高频内部事件路径。
-                // 防止回归：remote WS 订阅把 terminal runtime 卡住。
-                drainer
-                    .remote_output_tx
-                    .send_modify(|sequence| *sequence = sequence.wrapping_add(1));
-            }
             emit_terminal_runtime_event(drainer, TerminalRuntimeEventKind::Output);
         }
         PtyEvent::ColorRequest(index, formatter) => {
@@ -3429,6 +3497,7 @@ fn terminal_remote_snapshot(source: &TerminalRemoteOutputSource) -> TerminalRemo
 
     TerminalRemoteSnapshot {
         cols,
+        screen_rows: grid.screen_lines(),
         rows,
         cursor: TerminalRemoteCursor {
             line_index: content.cursor.point.line.0,
