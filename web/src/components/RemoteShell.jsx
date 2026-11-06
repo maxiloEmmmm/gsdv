@@ -55,6 +55,7 @@ export default defineComponent({
     const scrollFrame = ref(0);
     let terminalWheelFrame = 0;
     let terminalWheelTab = null;
+    let terminalTouchGesture = null;
     let terminalResizeHandler = null;
     let visualViewportHandler = null;
     let visualViewportSyncTimers = [];
@@ -553,6 +554,7 @@ export default defineComponent({
         tab.wheelGestureActive = false;
       }
       terminalWheelTab = null;
+      terminalTouchGesture = null;
     }
 
     /**
@@ -950,12 +952,62 @@ export default defineComponent({
      * Stops delayed auto-scroll before a mobile swipe can move the viewport.
      * Example: touchstart at the bottom -> do not snap back during swipe-up.
      */
-    function handleTerminalTouchStart() {
+    function handleTerminalTouchStart(event) {
       const tab = activeTab();
       if (tab) {
         tab.followOutput = false;
       }
       cancelTerminalScroll();
+      if (!tab?.terminalScroll || event.touches.length !== 1) {
+        terminalTouchGesture = null;
+        return;
+      }
+      const touch = event.touches[0];
+      terminalTouchGesture = {
+        identifier: touch.identifier,
+        clientX: touch.clientX,
+        clientY: touch.clientY,
+      };
+      // Interactive TUI screens have no DOM history. Prevent native page panning
+      // so every finger delta follows the same low-latency PTY scroll path as wheel.
+      event.preventDefault();
+    }
+
+    /**
+     * Converts an interactive mobile swipe into PTY scroll lines.
+     * Example: finger moves up by one line -> send one downward terminal scroll line.
+     */
+    function handleTerminalTouchMove(event) {
+      const tab = activeTab();
+      const output = terminalOutputElement.value;
+      if (!tab?.terminalScroll || !output || !terminalTouchGesture) {
+        return;
+      }
+      const touch = Array.from(event.touches).find(
+        (candidate) => candidate.identifier === terminalTouchGesture.identifier,
+      );
+      if (!touch || tab.socket?.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      event.preventDefault();
+      const measuredLineHeight = Number.parseFloat(
+        window.getComputedStyle(output).lineHeight,
+      );
+      const lineHeight =
+        Number.isFinite(measuredLineHeight) && measuredLineHeight > 0
+          ? measuredLineHeight
+          : 1;
+      const deltaLines =
+        (terminalTouchGesture.clientY - touch.clientY) / lineHeight;
+      terminalTouchGesture.clientX = touch.clientX;
+      terminalTouchGesture.clientY = touch.clientY;
+      if (deltaLines !== 0) {
+        queueInteractiveTerminalScroll(
+          tab,
+          deltaLines,
+          terminalPointerCell(touch, output, tab),
+        );
+      }
     }
 
     /**
@@ -963,6 +1015,7 @@ export default defineComponent({
      * Example: touchend back at the bottom -> resume following new output.
      */
     function handleTerminalTouchEnd() {
+      terminalTouchGesture = null;
       handleTerminalScroll();
     }
 
@@ -2070,11 +2123,16 @@ export default defineComponent({
 
         <main class="remote-shell__terminal" aria-label="Agent terminal output">
           <div
-            class="remote-shell__terminal-output"
+            class={{
+              "remote-shell__terminal-output": true,
+              "remote-shell__terminal-output--interactive":
+                tab?.terminalScroll === true,
+            }}
             ref={terminalOutputElement}
             onScroll={handleTerminalScroll}
             onWheel={handleTerminalWheel}
             onTouchstart={handleTerminalTouchStart}
+            onTouchmove={handleTerminalTouchMove}
             onTouchend={handleTerminalTouchEnd}
             onTouchcancel={handleTerminalTouchEnd}
           />

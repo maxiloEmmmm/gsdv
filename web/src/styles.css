@@ -210,6 +210,10 @@ textarea {
   white-space: pre;
 }
 
+.remote-shell__terminal-output--interactive {
+  touch-action: none;
+}
+
 .remote-shell__terminal-empty {
   color: var(--remote-terminal-muted);
   white-space: normal;

@@ -61,6 +61,7 @@ fixture="$(jq -Rs . <<'JS'
     workspaceConnections:0,
     workspaceSocket:null,
     agentConnections:0,
+    agentMessages:[],
     workspaces:[{
       workspace_id:"workspace-a",name:"alpha",path:"/alpha",rows:[{
         row_index:0,cols:[{col_index:0,agents:[
@@ -88,7 +89,8 @@ fixture="$(jq -Rs . <<'JS'
     readyState=1;
     constructor(url) {
       this.url=String(url);
-      if(this.url.includes("/api/workspace/ws")) {
+      this.workspace=this.url.includes("/api/workspace/ws");
+      if(this.workspace) {
         spotlightFixture.workspaceConnections+=1;
         spotlightFixture.workspaceSocket=this;
         setTimeout(()=>{this.onopen?.();spotlightFixture.emitWorkspace();},20);
@@ -98,13 +100,15 @@ fixture="$(jq -Rs . <<'JS'
           this.onopen?.();
           this.onmessage?.({data:JSON.stringify({
             type:"snapshot",sequence:1,cols:80,screen_rows:24,
-            terminal_scroll:false,palette:{background:"#0b1016",foreground:"#e6edf3"},
+            terminal_scroll:true,palette:{background:"#0b1016",foreground:"#e6edf3"},
             rows:[{line_index:0,runs:[{text:"spotlight terminal",fg:"#e6edf3",bg:"#0b1016"}]}]
           })});
         },20);
       }
     }
-    send() {}
+    send(payload) {
+      if(!this.workspace) spotlightFixture.agentMessages.push(JSON.parse(payload));
+    }
     close() { this.readyState=3; }
     serverClose() { this.readyState=3;this.onclose?.({code:1006}); }
   };
@@ -113,6 +117,7 @@ JS
 )"
 
 cdp Page.enable
+cdp Emulation.setDeviceMetricsOverride '{"width":390,"height":844,"deviceScaleFactor":1,"mobile":true,"screenWidth":390,"screenHeight":844}'
 cdp Page.addScriptToEvaluateOnNewDocument "$(jq -cn --argjson source "$fixture" '{source:$source}')"
 cdp Page.navigate "$(jq -cn --arg url "$page_url" '{url:$url}')"
 evaluate '(async()=>{
@@ -131,6 +136,20 @@ evaluate '(async()=>{
   if(getComputedStyle(document.querySelector(".remote-shell__terminal-output")).borderTopWidth!=="0px") throw new Error("terminal kept decorative frame");
   if(getComputedStyle(document.querySelector(".remote-shell")).backgroundColor!=="rgb(11, 16, 22)") throw new Error("spotlight root is not dark");
 })()'
+
+evaluate '(()=>{const rect=document.querySelector(".remote-shell__terminal-output").getBoundingClientRect();return {x:Math.floor(rect.left+rect.width/2),top:Math.floor(rect.top+rect.height*0.7),bottom:Math.floor(rect.top+rect.height*0.3)}})()'
+touch_x="$(jq -er '.result.result.value.x' <<<"$cdp_response")"
+touch_top="$(jq -er '.result.result.value.top' <<<"$cdp_response")"
+touch_bottom="$(jq -er '.result.result.value.bottom' <<<"$cdp_response")"
+cdp Input.dispatchTouchEvent "$(jq -cn --argjson x "$touch_x" --argjson y "$touch_top" '{type:"touchStart",touchPoints:[{x:$x,y:$y}]}')"
+cdp Input.dispatchTouchEvent "$(jq -cn --argjson x "$touch_x" --argjson y "$touch_bottom" '{type:"touchMove",touchPoints:[{x:$x,y:$y}]}')"
+evaluate '(async()=>{await new Promise(requestAnimationFrame);if(!spotlightFixture.agentMessages.some(message=>message.type==="scroll"&&message.lines<0))throw new Error("mobile swipe up did not scroll before touchend")})()'
+cdp Input.dispatchTouchEvent '{"type":"touchEnd","touchPoints":[]}'
+evaluate '(async()=>{await new Promise(r=>setTimeout(r,180))})()'
+cdp Input.dispatchTouchEvent "$(jq -cn --argjson x "$touch_x" --argjson y "$touch_bottom" '{type:"touchStart",touchPoints:[{x:$x,y:$y}]}')"
+cdp Input.dispatchTouchEvent "$(jq -cn --argjson x "$touch_x" --argjson y "$touch_top" '{type:"touchMove",touchPoints:[{x:$x,y:$y}]}')"
+evaluate '(async()=>{await new Promise(requestAnimationFrame);if(!spotlightFixture.agentMessages.some(message=>message.type==="scroll"&&message.lines>0))throw new Error("mobile swipe down did not scroll before touchend")})()'
+cdp Input.dispatchTouchEvent '{"type":"touchEnd","touchPoints":[]}'
 evaluate '(async()=>{
   spotlightFixture.swapActivity();
   await new Promise(r=>setTimeout(r,100));
@@ -148,4 +167,4 @@ if [ -n "$screenshot_path" ]; then
   jq -er '.result.data' <<<"$cdp_response" | base64 --decode >"$screenshot_path"
 fi
 
-printf 'PASS: Web spotlight layout, live ordering, and metadata reconnect\n'
+printf 'PASS: Web spotlight, reconnect, and bidirectional mobile touch scrolling\n'
