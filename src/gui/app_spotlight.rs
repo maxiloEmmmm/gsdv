@@ -1,7 +1,7 @@
 //! Cross-workspace Agent spotlight mode.
 //!
-//! Membership is persisted by stable Agent id. The visible list remains global
-//! and only reorders when runtime activity changes.
+//! Membership and priority are persisted by stable Agent id. The visible list
+//! remains global and reorders when activity, priority, or stop order changes.
 
 use super::*;
 
@@ -32,25 +32,169 @@ impl GsdvGuiApp {
         workspace_index: usize,
         slot: &AgentSlotId,
     ) -> bool {
-        self.spotlight_agent_id(workspace_index, slot)
-            .is_some_and(|agent_id| self.spotlight_agent_ids.contains(&agent_id))
+        self.spotlight_agent_level(workspace_index, slot).is_some()
     }
 
-    /// Toggles one Agent's persisted spotlight membership without entering the mode.
+    /// Returns one Agent's persisted spotlight priority level.
     ///
-    /// Example: ordinary Agent tab -> `Add to spotlight` -> starred tab.
-    pub(super) fn toggle_agent_spotlight(&mut self, workspace_index: usize, slot: AgentSlotId) {
+    /// Example: registered at level 1 -> `Some(1)`.
+    pub(super) fn spotlight_agent_level(
+        &self,
+        workspace_index: usize,
+        slot: &AgentSlotId,
+    ) -> Option<u8> {
+        let agent_id = self.spotlight_agent_id(workspace_index, slot)?;
+        self.spotlight_agents.get(&agent_id).copied()
+    }
+
+    /// Adds one Agent to spotlight or changes its persisted priority level.
+    ///
+    /// Example: ordinary Agent tab -> level 1 -> starred tab at priority 1.
+    pub(super) fn set_agent_spotlight_level(
+        &mut self,
+        workspace_index: usize,
+        slot: AgentSlotId,
+        level: u8,
+    ) {
         let Some(agent_id) = self.spotlight_agent_id(workspace_index, &slot) else {
             return;
         };
-        if !self.spotlight_agent_ids.remove(&agent_id) {
-            self.spotlight_agent_ids.insert(agent_id);
+        self.spotlight_agents.insert(agent_id, level.clamp(1, 3));
+        self.sync_spotlight_slot_stop_order(workspace_index, &slot);
+        self.mark_workspace_store_dirty();
+        self.reconcile_spotlight_leader();
+        self.request_app_repaint();
+    }
+
+    /// Removes one Agent from spotlight without closing its underlying tab.
+    ///
+    /// Example: registered Agent -> cancel registration -> ordinary Agent tab.
+    pub(super) fn remove_agent_spotlight(&mut self, workspace_index: usize, slot: AgentSlotId) {
+        let Some(agent_id) = self.spotlight_agent_id(workspace_index, &slot) else {
+            return;
+        };
+        if self.spotlight_agents.remove(&agent_id).is_none() {
+            return;
         }
         self.mark_workspace_store_dirty();
-        if self.spotlight_mode {
-            self.normalize_spotlight_selection();
-        }
+        self.normalize_spotlight_selection();
+        self.reconcile_spotlight_leader();
         self.request_app_repaint();
+    }
+
+    /// Applies the persisted rank-mode switch and reconciles the current leader.
+    ///
+    /// Example: disabled -> enabled -> select the first sorted spotlight Agent.
+    pub(super) fn set_spotlight_rank_mode(&mut self, enabled: bool) {
+        if self.spotlight_rank_mode == enabled {
+            return;
+        }
+        self.spotlight_rank_mode = enabled;
+        self.spotlight_leader_agent_id = None;
+        self.mark_workspace_store_dirty();
+        self.reconcile_spotlight_leader();
+        self.request_app_repaint();
+    }
+
+    /// Seeds runtime stop order for persisted stopped Agents during app startup.
+    ///
+    /// Example: two stored Idle Agents -> deterministic stop order 0 then 1.
+    pub(super) fn initialize_spotlight_stopped_order(&mut self) {
+        let stopped_ids = self
+            .workspaces
+            .iter()
+            .flat_map(|workspace| {
+                let main = std::iter::once((workspace.agent_id.clone(), workspace.activity));
+                let subagents = workspace
+                    .subagents
+                    .iter()
+                    .map(|subagent| (subagent.agent_id.clone(), subagent.activity));
+                main.chain(subagents)
+            })
+            .filter(|(agent_id, activity)| {
+                self.spotlight_agents.contains_key(agent_id)
+                    && spotlight_activity_is_stopped(*activity)
+            })
+            .map(|(agent_id, _)| agent_id)
+            .collect::<Vec<_>>();
+        for agent_id in stopped_ids {
+            self.record_spotlight_stopped_state(&agent_id, true);
+        }
+    }
+
+    /// Updates runtime stop order from one Agent slot's current state.
+    ///
+    /// Example: manually stopped Unknown Agent -> assign the next stop sequence.
+    pub(super) fn sync_spotlight_slot_stop_order(
+        &mut self,
+        workspace_index: usize,
+        slot: &AgentSlotId,
+    ) {
+        let Some(agent_id) = self.spotlight_agent_id(workspace_index, slot) else {
+            return;
+        };
+        let stopped = self.agent_slot_manually_stopped(workspace_index, slot)
+            || spotlight_activity_is_stopped(self.agent_slot_activity(workspace_index, slot));
+        self.record_spotlight_stopped_state(&agent_id, stopped);
+        self.reconcile_spotlight_leader();
+    }
+
+    /// Updates runtime stop order directly from a hook activity transition.
+    ///
+    /// Example: Busy -> Error -> assign stop sequence; Error -> Busy -> clear it.
+    pub(super) fn sync_spotlight_hook_activity(
+        &mut self,
+        agent_id: &str,
+        activity: WorkspaceActivity,
+    ) {
+        let stopped = spotlight_activity_is_stopped(activity)
+            || self.spotlight_agent_manually_stopped(agent_id);
+        self.record_spotlight_stopped_state(agent_id, stopped);
+        self.reconcile_spotlight_leader();
+    }
+
+    /// Finds whether one stable Agent id is currently manually stopped.
+    ///
+    /// Example: a late Busy hook after manual stop -> true keeps its stop order.
+    fn spotlight_agent_manually_stopped(&self, agent_id: &str) -> bool {
+        self.workspaces
+            .iter()
+            .enumerate()
+            .find_map(|(workspace_index, workspace)| {
+                if workspace.agent_id == agent_id {
+                    return Some(
+                        self.agent_slot_manually_stopped(workspace_index, &AgentSlotId::Main),
+                    );
+                }
+                workspace
+                    .subagents
+                    .iter()
+                    .find(|subagent| subagent.agent_id == agent_id)
+                    .map(|subagent| {
+                        self.agent_slot_manually_stopped(
+                            workspace_index,
+                            &AgentSlotId::Subagent(subagent.id.clone()),
+                        )
+                    })
+            })
+            .unwrap_or(false)
+    }
+
+    /// Records or clears one Agent's runtime stop sequence.
+    ///
+    /// Example: first stopped transition -> sequence 4; repeated Idle -> keep 4.
+    fn record_spotlight_stopped_state(&mut self, agent_id: &str, stopped: bool) {
+        if stopped {
+            if self.spotlight_stopped_order.contains_key(agent_id) {
+                return;
+            }
+            let order = self.spotlight_next_stopped_order;
+            self.spotlight_next_stopped_order = self.spotlight_next_stopped_order.saturating_add(1);
+            self.spotlight_stopped_order
+                .insert(agent_id.to_string(), order);
+        } else {
+            self.spotlight_stopped_order.remove(agent_id);
+        }
     }
 
     /// Enters the global Agent browser and temporarily forces its dark theme.
@@ -68,7 +212,12 @@ impl GsdvGuiApp {
         self.extra_tools.open = false;
         self.theme_mode = theme::ThemeMode::Dark;
         theme::set_mode(ctx, theme::ThemeMode::Dark);
-        self.normalize_spotlight_selection();
+        self.spotlight_leader_agent_id = None;
+        if self.spotlight_rank_mode {
+            self.reconcile_spotlight_leader();
+        } else {
+            self.normalize_spotlight_selection();
+        }
         self.request_app_repaint();
     }
 
@@ -93,36 +242,67 @@ impl GsdvGuiApp {
     fn spotlight_agents(&self) -> Vec<SpotlightAgentEntry> {
         let mut entries = Vec::new();
         for (workspace_index, workspace) in self.workspaces.iter().enumerate() {
-            if self.spotlight_agent_ids.contains(&workspace.agent_id) {
+            if let Some(level) = self.spotlight_agents.get(&workspace.agent_id).copied() {
                 let slot = AgentSlotId::Main;
                 entries.push(SpotlightAgentEntry {
                     workspace_index,
                     slot: slot.clone(),
                     agent_id: workspace.agent_id.clone(),
+                    spotlight_level: level,
                     title: "main".to_string(),
                     workspace_name: workspace.name.clone(),
                     activity: workspace.activity,
                     manually_stopped: self.agent_slot_manually_stopped(workspace_index, &slot),
+                    stopped_order: self
+                        .spotlight_stopped_order
+                        .get(&workspace.agent_id)
+                        .copied(),
                 });
             }
             for subagent in &workspace.subagents {
-                if !self.spotlight_agent_ids.contains(&subagent.agent_id) {
+                let Some(level) = self.spotlight_agents.get(&subagent.agent_id).copied() else {
                     continue;
-                }
+                };
                 let slot = AgentSlotId::Subagent(subagent.id.clone());
                 entries.push(SpotlightAgentEntry {
                     workspace_index,
                     slot: slot.clone(),
                     agent_id: subagent.agent_id.clone(),
+                    spotlight_level: level,
                     title: subagent.name.clone(),
                     workspace_name: workspace.name.clone(),
                     activity: subagent.activity,
                     manually_stopped: self.agent_slot_manually_stopped(workspace_index, &slot),
+                    stopped_order: self
+                        .spotlight_stopped_order
+                        .get(&subagent.agent_id)
+                        .copied(),
                 });
             }
         }
         entries.sort_by_key(spotlight_agent_sort_rank);
         entries
+    }
+
+    /// Selects a new first Agent only when rank mode observes a leader change.
+    ///
+    /// Example: level-1 Agent stops before current level-2 leader -> switch once.
+    pub(super) fn reconcile_spotlight_leader(&mut self) {
+        if !self.spotlight_rank_mode {
+            self.spotlight_leader_agent_id = None;
+            return;
+        }
+        let leader = self.spotlight_agents().into_iter().next();
+        let next_id = leader.as_ref().map(|entry| entry.agent_id.clone());
+        if self.spotlight_leader_agent_id == next_id {
+            return;
+        }
+        self.spotlight_leader_agent_id = next_id;
+        if self.spotlight_mode
+            && let Some(entry) = leader
+        {
+            self.prepare_spotlight_workspace(entry.workspace_index, entry.slot);
+        }
     }
 
     /// Selects the first spotlight Agent when the current target is no longer a member.
@@ -176,6 +356,16 @@ impl GsdvGuiApp {
         if back.clicked() {
             exit_requested = true;
         }
+        let mut rank_mode = self.spotlight_rank_mode;
+        if ui
+            .checkbox(
+                &mut rank_mode,
+                i18n::text(self.app_language, "Spotlight rank mode"),
+            )
+            .changed()
+        {
+            self.set_spotlight_rank_mode(rank_mode);
+        }
         ui.add_space(8.0);
 
         let entries = self.spotlight_agents();
@@ -213,7 +403,7 @@ impl GsdvGuiApp {
                             helix_dir.as_deref(),
                             name.as_deref(),
                             session.as_deref(),
-                            true,
+                            Some(entry.spotlight_level),
                             &mut action,
                             self.app_language,
                         );
@@ -304,19 +494,30 @@ impl GsdvGuiApp {
 /// Returns the stable activity group used by spotlight ordering.
 ///
 /// Example: manually stopped -> 0; unknown -> 1; busy -> 2.
-fn spotlight_agent_sort_rank(entry: &SpotlightAgentEntry) -> u8 {
-    if entry.manually_stopped
+fn spotlight_agent_sort_rank(entry: &SpotlightAgentEntry) -> (u8, u8, u64) {
+    let activity_rank = if entry.manually_stopped
         || matches!(
             entry.activity,
             WorkspaceActivity::Idle | WorkspaceActivity::Error
-        )
-    {
+        ) {
         0
     } else if entry.activity == WorkspaceActivity::Unknown {
         1
     } else {
         2
-    }
+    };
+    (
+        activity_rank,
+        entry.spotlight_level,
+        entry.stopped_order.unwrap_or(u64::MAX),
+    )
+}
+
+/// Returns whether activity belongs to the stopped spotlight group.
+///
+/// Example: Error -> true; Busy -> false.
+fn spotlight_activity_is_stopped(activity: WorkspaceActivity) -> bool {
+    matches!(activity, WorkspaceActivity::Idle | WorkspaceActivity::Error)
 }
 
 /// Draws one compact dark Agent selector row.

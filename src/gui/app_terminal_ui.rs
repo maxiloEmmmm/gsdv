@@ -1035,6 +1035,7 @@ impl GsdvGuiApp {
             }
         };
         if changed {
+            self.sync_spotlight_slot_stop_order(workspace_index, slot);
             self.mark_workspace_store_dirty();
             self.request_app_repaint();
         }

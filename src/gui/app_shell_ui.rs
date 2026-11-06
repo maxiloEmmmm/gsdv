@@ -1821,7 +1821,7 @@ impl GsdvGuiApp {
                         workspace.activity
                     },
                     active_slot == &slot,
-                    self.spotlight_agent_ids.contains(&workspace.agent_id),
+                    self.spotlight_agents.get(&workspace.agent_id).copied(),
                     &self.repaint_controller,
                 );
                 response.context_menu(|ui| {
@@ -1838,7 +1838,7 @@ impl GsdvGuiApp {
                         workspace.helix_work_dir.as_deref(),
                         None,
                         workspace.session_id.as_deref(),
-                        self.spotlight_agent_ids.contains(&workspace.agent_id),
+                        self.spotlight_agents.get(&workspace.agent_id).copied(),
                         agent_tab_action,
                         self.app_language,
                     );
@@ -1867,7 +1867,7 @@ impl GsdvGuiApp {
                         subagent.activity
                     },
                     active_slot == &slot,
-                    self.spotlight_agent_ids.contains(&subagent.agent_id),
+                    self.spotlight_agents.get(&subagent.agent_id).copied(),
                     &self.repaint_controller,
                 );
                 response.context_menu(|ui| {
@@ -1884,7 +1884,7 @@ impl GsdvGuiApp {
                         subagent.helix_work_dir.as_deref(),
                         Some(subagent.name.as_str()),
                         subagent.session_id.as_deref(),
-                        self.spotlight_agent_ids.contains(&subagent.agent_id),
+                        self.spotlight_agents.get(&subagent.agent_id).copied(),
                         agent_tab_action,
                         self.app_language,
                     );

@@ -336,6 +336,7 @@ impl GsdvGuiApp {
             self.mark_workspace_store_dirty();
         }
         if render_changed {
+            self.sync_spotlight_hook_activity(&status.agent_id, activity);
             self.request_app_repaint();
         }
     }
@@ -740,8 +741,11 @@ impl GsdvGuiApp {
                     agent_slot: slot,
                 });
             }
-            AgentTabAction::ToggleSpotlight(slot) => {
-                self.toggle_agent_spotlight(self.active_workspace, slot);
+            AgentTabAction::SetSpotlightLevel(slot, level) => {
+                self.set_agent_spotlight_level(self.active_workspace, slot, level);
+            }
+            AgentTabAction::RemoveSpotlight(slot) => {
+                self.remove_agent_spotlight(self.active_workspace, slot);
             }
             AgentTabAction::Restart(slot) => {
                 self.set_active_app_dialog(Some(AppDialog::RestartAgent {

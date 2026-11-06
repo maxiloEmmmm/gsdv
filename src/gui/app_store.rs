@@ -45,7 +45,8 @@ impl GsdvGuiApp {
         let active_workspace = self.active_workspace;
         let rail_collapsed = self.rail_collapsed;
         let focus_filter_enabled = self.focus_filter_enabled;
-        let spotlight_agent_ids = self.spotlight_agent_ids.clone();
+        let spotlight_agents = self.spotlight_agents.clone();
+        let spotlight_rank_mode = self.spotlight_rank_mode;
         let save_in_flight = Arc::clone(&self.workspace_store_save_in_flight);
         let repaint_ctx = ctx.clone();
         let repaint_controller = self.repaint_controller.clone();
@@ -57,7 +58,8 @@ impl GsdvGuiApp {
                     active_workspace,
                     rail_collapsed,
                     focus_filter_enabled,
-                    &spotlight_agent_ids,
+                    &spotlight_agents,
+                    spotlight_rank_mode,
                 );
             })
             .await;

@@ -46,6 +46,7 @@ export default defineComponent({
     const workspaceError = ref("");
     const workspaces = ref([]);
     const spotlightMode = ref(false);
+    const spotlightRankMode = ref(false);
     const expandedTreeNodes = ref(new Set());
     const tabs = ref([]);
     const activeTabId = ref(null);
@@ -63,6 +64,7 @@ export default defineComponent({
     let workspaceReconnectTimer = 0;
     let workspaceReconnectAttempt = 0;
     let workspaceSocketClosing = false;
+    let spotlightLeaderId = null;
 
     /**
      * Loads workspace metadata from the documented remote HTTP route.
@@ -76,9 +78,7 @@ export default defineComponent({
           throw new Error(`workspace api failed: ${response.status}`);
         }
         const payload = await response.json();
-        workspaces.value = Array.isArray(payload.workspaces)
-          ? payload.workspaces
-          : [];
+        applyWorkspaceSnapshot(payload);
       } catch (error) {
         workspaceError.value =
           error instanceof Error ? error.message : String(error);
@@ -99,12 +99,21 @@ export default defineComponent({
      * Applies one server workspace snapshot and repairs spotlight selection.
      */
     function applyWorkspaceSnapshot(payload) {
+      const nextRankMode = payload?.spotlight_rank_mode === true;
+      if (spotlightRankMode.value !== nextRankMode) {
+        spotlightLeaderId = null;
+      }
+      spotlightRankMode.value = nextRankMode;
       workspaces.value = Array.isArray(payload?.workspaces)
         ? payload.workspaces
         : [];
       refreshOpenTabBindings();
       if (spotlightMode.value) {
-        ensureSpotlightSelection();
+        if (spotlightRankMode.value) {
+          reconcileSpotlightLeader();
+        } else {
+          ensureSpotlightSelection();
+        }
       }
     }
 
@@ -318,11 +327,23 @@ export default defineComponent({
      */
     function spotlightAgentBindings() {
       return allAgentBindings()
-        .filter((binding) => binding.agent.in_spotlight === true)
-        .sort(
-          (left, right) =>
-            spotlightAgentRank(left.agent) - spotlightAgentRank(right.agent),
-        );
+        .filter((binding) => Number.isInteger(binding.agent.spotlight_level))
+        .sort((left, right) => {
+          const rank =
+            spotlightAgentRank(left.agent) - spotlightAgentRank(right.agent);
+          if (rank !== 0) {
+            return rank;
+          }
+          const level =
+            left.agent.spotlight_level - right.agent.spotlight_level;
+          if (level !== 0) {
+            return level;
+          }
+          return (
+            spotlightStoppedOrder(left.agent) -
+            spotlightStoppedOrder(right.agent)
+          );
+        });
     }
 
     /**
@@ -337,6 +358,22 @@ export default defineComponent({
         return 0;
       }
       return agent.activity === "busy" ? 2 : 1;
+    }
+
+    /**
+     * Returns a stopped Agent's runtime order or a stable trailing fallback.
+     */
+    function spotlightStoppedOrder(agent) {
+      return Number.isFinite(agent.stopped_order)
+        ? agent.stopped_order
+        : Number.MAX_SAFE_INTEGER;
+    }
+
+    /**
+     * Returns the stable cross-workspace identity used for leader changes.
+     */
+    function spotlightBindingId(binding) {
+      return `${binding.workspace.workspace_id}:${binding.agent.agent_id}`;
     }
 
     /**
@@ -362,7 +399,12 @@ export default defineComponent({
     function enterSpotlightMode() {
       spotlightMode.value = true;
       drawerOpen.value = false;
-      ensureSpotlightSelection();
+      spotlightLeaderId = null;
+      if (spotlightRankMode.value) {
+        reconcileSpotlightLeader();
+      } else {
+        ensureSpotlightSelection();
+      }
     }
 
     /**
@@ -370,6 +412,53 @@ export default defineComponent({
      */
     function exitSpotlightMode() {
       spotlightMode.value = false;
+    }
+
+    /**
+     * Persists the Web rank-mode checkbox and applies it immediately.
+     */
+    async function updateSpotlightRankMode(event) {
+      const enabled = event.target.checked === true;
+      const previous = spotlightRankMode.value;
+      spotlightRankMode.value = enabled;
+      spotlightLeaderId = null;
+      if (enabled) {
+        reconcileSpotlightLeader();
+      }
+      try {
+        const response = await fetch("/api/spotlight/rank-mode", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ enabled }),
+        });
+        if (!response.ok) {
+          throw new Error(`spotlight rank mode failed: ${response.status}`);
+        }
+      } catch (error) {
+        spotlightRankMode.value = previous;
+        spotlightLeaderId = null;
+        workspaceError.value =
+          error instanceof Error ? error.message : String(error);
+      }
+    }
+
+    /**
+     * Switches only when rank mode observes a different first Agent.
+     */
+    function reconcileSpotlightLeader() {
+      const first = spotlightAgentBindings()[0] ?? null;
+      const nextLeaderId = first ? spotlightBindingId(first) : null;
+      if (spotlightLeaderId === nextLeaderId) {
+        ensureSpotlightSelection();
+        return;
+      }
+      spotlightLeaderId = nextLeaderId;
+      if (first) {
+        selectAgent(first.workspace, first.row, first.col, first.agent);
+      } else {
+        activeTabId.value = null;
+        renderActiveTerminal();
+      }
     }
 
     /**
@@ -2035,6 +2124,14 @@ export default defineComponent({
               <span aria-hidden="true">←</span>
               <span>退出专注模式</span>
             </button>
+            <label class="remote-shell__spotlight-rank-mode">
+              <input
+                type="checkbox"
+                checked={spotlightRankMode.value}
+                onChange={updateSpotlightRankMode}
+              />
+              <span>等级模式</span>
+            </label>
             <nav class="remote-shell__spotlight-list" aria-label="Spotlight agents">
               {spotlightAgentBindings().map((item) => (
                 <button

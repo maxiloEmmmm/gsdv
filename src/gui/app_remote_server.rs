@@ -77,6 +77,8 @@ pub(super) struct RemoteApiEnvelope {
 enum RemoteApiRequest {
     /// 读取所有 workspace/agent 元数据。
     Workspace,
+    /// Updates the persisted spotlight rank-mode switch.
+    SpotlightRankMode(RemoteSpotlightRankMode),
     /// 给目标 agent 提交文本输入。
     AgentInput(RemoteAgentInput),
     /// 给目标 agent 发送中断输入。
@@ -180,6 +182,13 @@ struct RemoteAgentScroll {
     col: Option<u16>,
     /// 浏览器指针所在的一基 terminal 行；旧客户端可省略。
     row: Option<u16>,
+}
+
+/// Spotlight rank-mode mutation requested by the Web client.
+#[derive(Debug, Clone, Deserialize)]
+struct RemoteSpotlightRankMode {
+    /// Whether spotlight should follow the first Agent after ordering changes.
+    enabled: bool,
 }
 
 /// Agent 输出 WebSocket query 参数。
@@ -297,6 +306,8 @@ struct RemoteAgentImageHttpRequest {
 /// workspace 列表响应。
 #[derive(Debug, Clone, Serialize)]
 struct RemoteWorkspaceResponse {
+    /// Whether spotlight follows the first Agent whenever ordering changes.
+    spotlight_rank_mode: bool,
     /// 所有已打开 workspace。
     workspaces: Vec<RemoteWorkspace>,
 }
@@ -341,10 +352,14 @@ struct RemoteAgent {
     title: String,
     /// Whether this Agent belongs to the persisted spotlight browser.
     in_spotlight: bool,
+    /// Persisted spotlight priority from 1 through 3.
+    spotlight_level: Option<u8>,
     /// Last activity received from Agent hooks.
     activity: WorkspaceActivity,
     /// Whether the desktop user explicitly stopped the process.
     manually_stopped: bool,
+    /// Runtime sequence assigned when this Agent most recently stopped.
+    stopped_order: Option<u64>,
 }
 
 /// agent 操作成功响应。
@@ -453,6 +468,10 @@ impl GsdvGuiApp {
             RemoteApiRequest::Workspace => RemoteApiResult::Ok(RemoteApiPayload::Workspace(
                 self.remote_workspace_response(),
             )),
+            RemoteApiRequest::SpotlightRankMode(input) => {
+                self.set_spotlight_rank_mode(input.enabled);
+                RemoteApiResult::Ok(RemoteApiPayload::AgentOk)
+            }
             RemoteApiRequest::AgentInput(input) => self.handle_remote_agent_input(ctx, input),
             RemoteApiRequest::AgentEsc(target) => {
                 self.handle_remote_agent_bytes(ctx, target, &[0x03], false)
@@ -469,6 +488,7 @@ impl GsdvGuiApp {
     /// 构造 remote workspace 元数据响应。
     fn remote_workspace_response(&self) -> RemoteWorkspaceResponse {
         RemoteWorkspaceResponse {
+            spotlight_rank_mode: self.spotlight_rank_mode,
             workspaces: self
                 .workspaces
                 .iter()
@@ -477,7 +497,8 @@ impl GsdvGuiApp {
                     remote_workspace_from_view_data(
                         workspace,
                         self.terminal_hosts.get(workspace_index),
-                        &self.spotlight_agent_ids,
+                        &self.spotlight_agents,
+                        &self.spotlight_stopped_order,
                     )
                 })
                 .collect(),
@@ -778,6 +799,10 @@ fn remote_router(state: RemoteApiState) -> Router {
     Router::new()
         .route("/api/workspace", get(remote_workspace_handler))
         .route("/api/workspace/ws", get(remote_workspace_ws_handler))
+        .route(
+            "/api/spotlight/rank-mode",
+            post(remote_spotlight_rank_mode_handler),
+        )
         .route("/api/agent/input", post(remote_agent_input_handler))
         .route("/api/agent/esc", post(remote_agent_esc_handler))
         .route("/api/agent/image", post(remote_agent_image_handler))
@@ -811,6 +836,20 @@ fn remote_web_asset(path: &str) -> Option<&'static RemoteWebAsset> {
 /// Handles workspace metadata requests.
 async fn remote_workspace_handler(State(state): State<RemoteApiState>) -> impl IntoResponse {
     dispatch_remote_api_request(state, RemoteApiRequest::Workspace).await
+}
+
+/// Handles the Web spotlight rank-mode checkbox.
+///
+/// Example: `{ "enabled": true }` -> persist and begin following the first Agent.
+async fn remote_spotlight_rank_mode_handler(
+    State(state): State<RemoteApiState>,
+    payload: Result<Json<RemoteSpotlightRankMode>, JsonRejection>,
+) -> impl IntoResponse {
+    let input = match json_payload(payload) {
+        Ok(input) => input,
+        Err(response) => return response,
+    };
+    dispatch_remote_api_request(state, RemoteApiRequest::SpotlightRankMode(input)).await
 }
 
 /// Upgrades a browser connection for live workspace/spotlight metadata snapshots.
@@ -1447,7 +1486,8 @@ fn decode_remote_agent_image(
 fn remote_workspace_from_view_data(
     workspace: &WorkspaceViewData,
     hosts: Option<&WorkspaceTerminalHosts>,
-    spotlight_agent_ids: &BTreeSet<String>,
+    spotlight_agents: &BTreeMap<String, u8>,
+    spotlight_stopped_order: &BTreeMap<String, u64>,
 ) -> RemoteWorkspace {
     RemoteWorkspace {
         workspace_id: data::workspace_store_key(&workspace.path),
@@ -1461,7 +1501,8 @@ fn remote_workspace_from_view_data(
                 remote_agent_row_from_view_data(
                     workspace,
                     hosts,
-                    spotlight_agent_ids,
+                    spotlight_agents,
+                    spotlight_stopped_order,
                     row_index,
                     row,
                 )
@@ -1474,7 +1515,8 @@ fn remote_workspace_from_view_data(
 fn remote_agent_row_from_view_data(
     workspace: &WorkspaceViewData,
     hosts: Option<&WorkspaceTerminalHosts>,
-    spotlight_agent_ids: &BTreeSet<String>,
+    spotlight_agents: &BTreeMap<String, u8>,
+    spotlight_stopped_order: &BTreeMap<String, u64>,
     row_index: usize,
     row: &data::AgentRowViewData,
 ) -> RemoteAgentRow {
@@ -1488,7 +1530,8 @@ fn remote_agent_row_from_view_data(
                 remote_agent_column_from_view_data(
                     workspace,
                     hosts,
-                    spotlight_agent_ids,
+                    spotlight_agents,
+                    spotlight_stopped_order,
                     col_index,
                     column,
                 )
@@ -1501,7 +1544,8 @@ fn remote_agent_row_from_view_data(
 fn remote_agent_column_from_view_data(
     workspace: &WorkspaceViewData,
     hosts: Option<&WorkspaceTerminalHosts>,
-    spotlight_agent_ids: &BTreeSet<String>,
+    spotlight_agents: &BTreeMap<String, u8>,
+    spotlight_stopped_order: &BTreeMap<String, u64>,
     col_index: usize,
     column: &data::AgentColumnViewData,
 ) -> RemoteAgentColumn {
@@ -1511,7 +1555,13 @@ fn remote_agent_column_from_view_data(
             .tabs
             .iter()
             .filter_map(|slot| {
-                remote_agent_from_column_slot(workspace, hosts, spotlight_agent_ids, slot)
+                remote_agent_from_column_slot(
+                    workspace,
+                    hosts,
+                    spotlight_agents,
+                    spotlight_stopped_order,
+                    slot,
+                )
             })
             .collect(),
     }
@@ -1521,18 +1571,21 @@ fn remote_agent_column_from_view_data(
 fn remote_agent_from_column_slot(
     workspace: &WorkspaceViewData,
     hosts: Option<&WorkspaceTerminalHosts>,
-    spotlight_agent_ids: &BTreeSet<String>,
+    spotlight_agents: &BTreeMap<String, u8>,
+    spotlight_stopped_order: &BTreeMap<String, u64>,
     slot: &data::AgentColumnSlot,
 ) -> Option<RemoteAgent> {
     match slot {
         data::AgentColumnSlot::Main => Some(RemoteAgent {
             agent_id: workspace.agent_id.clone(),
             title: "main".to_string(),
-            in_spotlight: spotlight_agent_ids.contains(&workspace.agent_id),
+            in_spotlight: spotlight_agents.contains_key(&workspace.agent_id),
+            spotlight_level: spotlight_agents.get(&workspace.agent_id).copied(),
             activity: workspace.activity,
             manually_stopped: hosts
                 .and_then(|hosts| hosts.agents.get(&AgentSlotId::Main))
                 .is_some_and(|slot| slot.manually_stopped),
+            stopped_order: spotlight_stopped_order.get(&workspace.agent_id).copied(),
         }),
         data::AgentColumnSlot::Subagent(id) => workspace
             .subagents
@@ -1541,7 +1594,8 @@ fn remote_agent_from_column_slot(
             .map(|subagent| RemoteAgent {
                 agent_id: subagent.agent_id.clone(),
                 title: subagent.name.clone(),
-                in_spotlight: spotlight_agent_ids.contains(&subagent.agent_id),
+                in_spotlight: spotlight_agents.contains_key(&subagent.agent_id),
+                spotlight_level: spotlight_agents.get(&subagent.agent_id).copied(),
                 activity: subagent.activity,
                 manually_stopped: hosts
                     .and_then(|hosts| {
@@ -1550,6 +1604,7 @@ fn remote_agent_from_column_slot(
                             .get(&AgentSlotId::Subagent(subagent.id.clone()))
                     })
                     .is_some_and(|slot| slot.manually_stopped),
+                stopped_order: spotlight_stopped_order.get(&subagent.agent_id).copied(),
             }),
     }
 }
