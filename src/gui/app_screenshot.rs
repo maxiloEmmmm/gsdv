@@ -52,7 +52,11 @@ impl GsdvGuiApp {
         self.spawn_screenshot_request_load_task(ctx);
     }
 
-    pub(super) fn apply_debug_capture_command(&mut self, command: &str) -> &'static str {
+    pub(super) fn apply_debug_capture_command(
+        &mut self,
+        ctx: &egui::Context,
+        command: &str,
+    ) -> &'static str {
         if let Some(scroll_y) = preview_scroll_capture_offset(command) {
             self.exit_reviewer_route();
             self.set_center_mode(CenterMode::Preview);
@@ -96,6 +100,10 @@ impl GsdvGuiApp {
             "workspace" => {
                 self.exit_reviewer_route();
                 "workspace-file"
+            }
+            "spotlight" => {
+                self.enter_spotlight_mode(ctx);
+                "spotlight-file"
             }
             _ => "file",
         }

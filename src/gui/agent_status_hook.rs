@@ -7,6 +7,7 @@ use std::io::Read;
 enum HookStatus {
     Idle,
     Busy,
+    Error,
 }
 
 pub fn run_from_stdin() -> Result<()> {
@@ -33,7 +34,13 @@ fn run_with_input(input: &str) -> Result<()> {
         .unwrap_or("");
     let status = match event {
         "SessionStart" | "Stop" | "SessionEnd" => HookStatus::Idle,
-        "UserPromptSubmit" => HookStatus::Busy,
+        "UserPromptSubmit" | "PreModelRequest" => HookStatus::Busy,
+        "PostModelRequest" if payload.get("status").and_then(Value::as_str) == Some("failed") => {
+            HookStatus::Error
+        }
+        // A successful model request can still be followed by tool calls or another request.
+        // Stop remains the only turn-level idle signal, preventing premature reordering.
+        "PostModelRequest" => return Ok(()),
         _ => return Ok(()),
     };
     notify_agent_status(agent_id, &workspace_dir, status, &payload);
@@ -45,6 +52,7 @@ fn notify_agent_status(agent_id: &str, workspace_dir: &str, status: HookStatus, 
     let status = match status {
         HookStatus::Idle => "idle",
         HookStatus::Busy => "busy",
+        HookStatus::Error => "error",
     };
     let data = json!({
         "agent_id": agent_id,

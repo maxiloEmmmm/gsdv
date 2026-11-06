@@ -893,7 +893,7 @@ impl GsdvGuiApp {
                 self.screenshot_request_read_in_flight = false;
                 match result {
                     Ok(Some(command)) => {
-                        let source = self.apply_debug_capture_command(command.trim());
+                        let source = self.apply_debug_capture_command(ctx, command.trim());
                         self.request_egui_screenshot(ctx, source);
                     }
                     Ok(None) => {}

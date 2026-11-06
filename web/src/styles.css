@@ -315,6 +315,161 @@ textarea {
   display: none;
 }
 
+.remote-shell--spotlight {
+  display: grid;
+  grid-template-columns: 244px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "spotlight terminal"
+    "spotlight composer";
+  background: #0b1016;
+  color: #e6edf3;
+}
+
+.remote-shell__spotlight-sidebar {
+  grid-area: spotlight;
+  min-width: 0;
+  overflow: hidden;
+  border-right: 1px solid #293646;
+  background: #111821;
+}
+
+.remote-shell__spotlight-exit {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 44px;
+  padding: 0 14px;
+  border: 0;
+  border-bottom: 1px solid #293646;
+  background: transparent;
+  color: #e6edf3;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.remote-shell__spotlight-exit:hover {
+  background: #1d2a38;
+}
+
+.remote-shell__spotlight-list {
+  height: calc(100% - 44px);
+  padding: 8px 0;
+  overflow: auto;
+}
+
+.remote-shell__spotlight-agent {
+  position: relative;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) 10px;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 54px;
+  padding: 7px 12px;
+  border: 0;
+  background: transparent;
+  color: #e6edf3;
+  text-align: left;
+  cursor: pointer;
+}
+
+.remote-shell__spotlight-agent:hover {
+  background: #1d2a38;
+}
+
+.remote-shell__spotlight-agent--active {
+  background: #172c4a;
+}
+
+.remote-shell__spotlight-agent--active::before {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 3px;
+  background: #60a5fa;
+  content: "";
+}
+
+.remote-shell__spotlight-star {
+  color: #f5b800;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.remote-shell__spotlight-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.remote-shell__spotlight-title,
+.remote-shell__spotlight-workspace {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remote-shell__spotlight-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.remote-shell__spotlight-workspace {
+  color: #91a4b7;
+  font-size: 11px;
+}
+
+.remote-shell__spotlight-status {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #64748b;
+}
+
+.remote-shell__spotlight-status--idle {
+  background: #34d399;
+}
+
+.remote-shell__spotlight-status--error {
+  background: #fb7185;
+}
+
+.remote-shell__spotlight-status--busy {
+  background: #60a5fa;
+  box-shadow: 0 0 0 3px rgb(96 165 250 / 18%);
+}
+
+.remote-shell--spotlight .remote-shell__terminal {
+  grid-area: terminal;
+  padding: 0;
+  background: var(--remote-terminal-bg);
+}
+
+.remote-shell--spotlight .remote-shell__terminal-output {
+  padding: 12px;
+  border: 0;
+  border-radius: 0;
+}
+
+.remote-shell--spotlight .remote-shell__composer {
+  grid-area: composer;
+  border-color: #293646;
+  background: #111821;
+}
+
+.remote-shell__drawer-footer {
+  position: sticky;
+  bottom: 0;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid #e5e7eb;
+  background: #ffffff;
+}
+
 .remote-shell__drawer-tree {
   display: grid;
   gap: 2px;
@@ -403,5 +558,15 @@ textarea {
 
   .remote-shell__composer {
     padding: 8px;
+  }
+
+  .remote-shell--spotlight {
+    grid-template-columns: minmax(144px, 42vw) minmax(0, 1fr);
+  }
+
+  .remote-shell__spotlight-agent {
+    grid-template-columns: 16px minmax(0, 1fr) 8px;
+    gap: 6px;
+    padding-inline: 8px;
   }
 }
