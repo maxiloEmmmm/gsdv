@@ -108,29 +108,56 @@ pub(super) fn agent_slot_tab_button(
     label: &str,
     activity: WorkspaceActivity,
     active: bool,
+    in_spotlight: bool,
     repaint_controller: &repaint_gate::RepaintController,
 ) -> egui::Response {
     let (dot, _) = activity_style(activity);
-    let response = ui.add_sized(
-        [label.chars().count().max(4) as f32 * 8.0 + 32.0, 30.0],
-        Button::new(RichText::new(label).size(13.0).color(if active {
-            theme::primary()
-        } else {
-            theme::text()
-        }))
-        .fill(if active {
-            theme::primary_soft()
-        } else {
-            theme::bg()
-        })
-        .stroke(Stroke::new(
-            1.0,
-            if active {
+    let mut label_job = egui::text::LayoutJob::default();
+    label_job.append(
+        label,
+        0.0,
+        egui::TextFormat {
+            font_id: egui::FontId::proportional(13.0),
+            color: if active {
                 theme::primary()
             } else {
-                theme::border()
+                theme::text()
             },
-        )),
+            ..Default::default()
+        },
+    );
+    if in_spotlight {
+        label_job.append(
+            " ★",
+            0.0,
+            egui::TextFormat {
+                font_id: egui::FontId::proportional(14.0),
+                color: theme::warning(),
+                ..Default::default()
+            },
+        );
+    }
+    let response = ui.add_sized(
+        [
+            label.chars().count().max(4) as f32 * 8.0
+                + 32.0
+                + if in_spotlight { 16.0 } else { 0.0 },
+            30.0,
+        ],
+        Button::new(label_job)
+            .fill(if active {
+                theme::primary_soft()
+            } else {
+                theme::bg()
+            })
+            .stroke(Stroke::new(
+                1.0,
+                if active {
+                    theme::primary()
+                } else {
+                    theme::border()
+                },
+            )),
     );
     let center = egui::pos2(response.rect.left() + 10.0, response.rect.center().y);
     paint_activity_dot(ui, center, dot, activity, true, repaint_controller);
@@ -153,6 +180,7 @@ pub(super) fn agent_slot_context_menu(
     current_agent_helix_work_dir: Option<&Path>,
     current_agent_name: Option<&str>,
     current_session_id: Option<&str>,
+    in_spotlight: bool,
     action: &mut Option<AgentTabAction>,
     language: AppLanguage,
 ) {
@@ -169,6 +197,20 @@ pub(super) fn agent_slot_context_menu(
     };
     if ui.button(process_action.0).clicked() {
         *action = Some(process_action.1);
+        ui.close_menu();
+    }
+    if ui
+        .button(i18n::text(
+            language,
+            if in_spotlight {
+                "Remove from spotlight"
+            } else {
+                "Add to spotlight"
+            },
+        ))
+        .clicked()
+    {
+        *action = Some(AgentTabAction::ToggleSpotlight(slot.clone()));
         ui.close_menu();
     }
     ui.separator();
@@ -321,6 +363,14 @@ pub(super) fn workspace_effective_activity(workspace: &WorkspaceViewData) -> Wor
             .any(|subagent| subagent.activity == WorkspaceActivity::Busy)
     {
         return WorkspaceActivity::Busy;
+    }
+    if workspace.activity == WorkspaceActivity::Error
+        || workspace
+            .subagents
+            .iter()
+            .any(|subagent| subagent.activity == WorkspaceActivity::Error)
+    {
+        return WorkspaceActivity::Error;
     }
     if workspace.activity == WorkspaceActivity::Idle
         || workspace
@@ -813,10 +863,18 @@ pub(super) fn rail_nav_row(ui: &mut Ui, icon: &str, label: &str) -> egui::Respon
             .rect_filled(rect, CornerRadius::same(theme::RADIUS_SM), fill);
     }
     let icon_center = egui::pos2(rect.left() + 17.0, rect.center().y);
-    if icon == "gear" {
-        paint_gear_icon(ui, icon_center, theme::muted());
-    } else {
-        paint_plus_icon(ui, icon_center, 6.0, theme::muted(), 1.4);
+    match icon {
+        "gear" => paint_gear_icon(ui, icon_center, theme::muted()),
+        "star" => {
+            ui.painter().text(
+                icon_center,
+                Align2::CENTER_CENTER,
+                "★",
+                egui::FontId::proportional(16.0),
+                theme::warning(),
+            );
+        }
+        _ => paint_plus_icon(ui, icon_center, 6.0, theme::muted(), 1.4),
     }
     ui.painter().text(
         egui::pos2(rect.left() + 36.0, rect.center().y),
@@ -946,6 +1004,7 @@ pub(super) fn activity_style(activity: WorkspaceActivity) -> (Color32, &'static 
     match activity {
         WorkspaceActivity::Busy => (theme::primary(), "Busy"),
         WorkspaceActivity::Idle => (theme::success(), "Idle"),
+        WorkspaceActivity::Error => (theme::danger(), "Error"),
         WorkspaceActivity::Unknown => (theme::muted(), "Unknown"),
     }
 }

@@ -123,6 +123,9 @@ mod app_remote_server;
 #[path = "app_shell_ui.rs"]
 mod app_shell_ui;
 
+#[path = "app_spotlight.rs"]
+mod app_spotlight;
+
 #[path = "app_screenshot.rs"]
 mod app_screenshot;
 
@@ -470,6 +473,12 @@ struct GsdvGuiApp {
     rail_collapsed: bool,
     /// Whether the workspace rail only shows focused workspaces.
     focus_filter_enabled: bool,
+    /// Stable Agent ids included in the cross-workspace spotlight browser.
+    spotlight_agent_ids: BTreeSet<String>,
+    /// Whether the app is rendering the cross-workspace spotlight browser.
+    spotlight_mode: bool,
+    /// Theme restored when spotlight mode exits after forcing its dark surface.
+    spotlight_return_theme: Option<theme::ThemeMode>,
     /// Whether F11 hides navigation chrome and keeps only center content plus bottom bar.
     app_fullscreen: bool,
     /// 用户设置的新 workspace 默认 agent。
@@ -977,6 +986,9 @@ impl GsdvGuiApp {
             theme_mode: theme::current_mode(),
             rail_collapsed: value.rail_collapsed,
             focus_filter_enabled: value.focus_filter_enabled,
+            spotlight_agent_ids: value.spotlight_agent_ids,
+            spotlight_mode: false,
+            spotlight_return_theme: None,
             app_fullscreen: false,
             default_agent_kind: agent_launch.kind,
             agent_launch,
@@ -2138,6 +2150,8 @@ struct AgentSurfaceSnapshot {
     subagents: Vec<data::SubagentViewData>,
     /// Main Agent implementation shown by the main tab.
     agent_kind: AgentKind,
+    /// Stable main Agent id used by hooks and spotlight membership.
+    agent_id: String,
     /// Optional main Agent model override.
     agent_model: Option<String>,
     /// Optional main Agent model provider override.
@@ -2166,6 +2180,7 @@ impl AgentSurfaceSnapshot {
             agent_focus: workspace.agent_focus,
             subagents: workspace.subagents.clone(),
             agent_kind: workspace.agent_kind,
+            agent_id: workspace.agent_id.clone(),
             agent_model: workspace.agent_model.clone(),
             agent_model_provider: workspace.agent_model_provider.clone(),
             agent_effort: workspace.agent_effort.clone(),
@@ -2208,6 +2223,25 @@ impl AgentSlotId {
             Self::Subagent(id) => data::AgentColumnSlot::Subagent(id.clone()),
         }
     }
+}
+
+/// One Agent shown in the cross-workspace spotlight sidebar.
+#[derive(Debug, Clone)]
+struct SpotlightAgentEntry {
+    /// Current workspace vector index used by terminal host routing.
+    workspace_index: usize,
+    /// Main or subagent slot rendered on the right.
+    slot: AgentSlotId,
+    /// Stable hook id persisted as spotlight membership.
+    agent_id: String,
+    /// Human-readable Agent tab title.
+    title: String,
+    /// Workspace label shown below the Agent title.
+    workspace_name: String,
+    /// Last activity received from Agent hooks.
+    activity: WorkspaceActivity,
+    /// Whether the user explicitly stopped the underlying process.
+    manually_stopped: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2756,6 +2790,8 @@ enum AgentTabAction {
     Start(AgentSlotId),
     /// 立即停止 Agent 进程但保留 tab 和会话配置。
     Stop(AgentSlotId),
+    /// Adds or removes one Agent from the cross-workspace spotlight browser.
+    ToggleSpotlight(AgentSlotId),
     Restart(AgentSlotId),
     Switch {
         slot: AgentSlotId,
@@ -2964,62 +3000,85 @@ impl GsdvGuiApp {
         self.render_dirty = false;
         self.rendering_frame = true;
 
-        TopBottomPanel::bottom("window_bottombar")
-            .exact_height(BOTTOM_BAR_HEIGHT)
-            .frame(bottom_bar_frame())
-            .show(ctx, |ui| self.bottom_bar(ui));
-
-        if !self.app_fullscreen {
-            let workspace_rail_width = if self.rail_collapsed {
-                COMPACT_WORKSPACE_RAIL_WIDTH
-            } else {
-                WORKSPACE_RAIL_WIDTH
-            };
-            SidePanel::left("workspace_rail")
-                .exact_width(workspace_rail_width)
-                .frame(panel_frame())
-                .show(ctx, |ui| self.workspace_rail(ui));
-
-            if should_show_outline_panel(self.current_workspace()) {
-                let outline_collapsed = self.current_workspace().is_some_and(|workspace| {
-                    if workspace.remote.is_some() {
-                        workspace.remote_outline_collapsed
-                    } else {
-                        workspace.outline_panel_collapsed
-                    }
+        if self.spotlight_mode {
+            let mut exit_requested = false;
+            SidePanel::left("spotlight_agent_sidebar")
+                .exact_width(244.0)
+                .frame(
+                    Frame::new()
+                        .fill(Color32::from_rgb(0x11, 0x18, 0x21))
+                        .stroke(Stroke::new(1.0, Color32::from_rgb(0x29, 0x36, 0x46))),
+                )
+                .show(ctx, |ui| {
+                    exit_requested = self.spotlight_sidebar(ui);
                 });
-                let outline_width = if outline_collapsed {
-                    COLLAPSED_OUTLINE_WIDTH
-                } else {
-                    272.0
-                };
-                let frame = if outline_collapsed {
-                    collapsed_outline_panel_frame()
-                } else {
-                    panel_frame()
-                };
-                SidePanel::left("outline_panel")
-                    .exact_width(outline_width)
-                    .frame(frame)
-                    .show(ctx, |ui| self.outline_panel(ui));
+            CentralPanel::default()
+                .frame(Frame::new().fill(Color32::from_rgb(0x0B, 0x10, 0x16)))
+                .show(ctx, |ui| self.spotlight_agent_surface(ui));
+            if exit_requested {
+                self.exit_spotlight_mode(ctx);
             }
+            self.app_dialog(ctx);
+            self.agent_input_translation_popup(ctx);
+            self.toast_overlay(ctx);
+        } else {
+            TopBottomPanel::bottom("window_bottombar")
+                .exact_height(BOTTOM_BAR_HEIGHT)
+                .frame(bottom_bar_frame())
+                .show(ctx, |ui| self.bottom_bar(ui));
+
+            if !self.app_fullscreen {
+                let workspace_rail_width = if self.rail_collapsed {
+                    COMPACT_WORKSPACE_RAIL_WIDTH
+                } else {
+                    WORKSPACE_RAIL_WIDTH
+                };
+                SidePanel::left("workspace_rail")
+                    .exact_width(workspace_rail_width)
+                    .frame(panel_frame())
+                    .show(ctx, |ui| self.workspace_rail(ui));
+
+                if should_show_outline_panel(self.current_workspace()) {
+                    let outline_collapsed = self.current_workspace().is_some_and(|workspace| {
+                        if workspace.remote.is_some() {
+                            workspace.remote_outline_collapsed
+                        } else {
+                            workspace.outline_panel_collapsed
+                        }
+                    });
+                    let outline_width = if outline_collapsed {
+                        COLLAPSED_OUTLINE_WIDTH
+                    } else {
+                        272.0
+                    };
+                    let frame = if outline_collapsed {
+                        collapsed_outline_panel_frame()
+                    } else {
+                        panel_frame()
+                    };
+                    SidePanel::left("outline_panel")
+                        .exact_width(outline_width)
+                        .frame(frame)
+                        .show(ctx, |ui| self.outline_panel(ui));
+                }
+            }
+
+            CentralPanel::default()
+                .frame(panel_frame())
+                .show(ctx, |ui| self.center_panel(ui));
+
+            self.workspace_terminal_overlay(ctx);
+            self.reviewer_helix_overlay(ctx);
+            self.notification_overlay(ctx);
+            self.extra_tools_dialog(ctx);
+            self.app_dialog(ctx);
+            self.reviewer_dialog(ctx);
+            self.agent_input_translation_popup(ctx);
+            self.pomodoro_work_peek_overlay(ctx);
+            self.pomodoro_cat_overlay(ctx);
+            self.toast_overlay(ctx);
+            self.bottom_bar_overlay(ctx);
         }
-
-        CentralPanel::default()
-            .frame(panel_frame())
-            .show(ctx, |ui| self.center_panel(ui));
-
-        self.workspace_terminal_overlay(ctx);
-        self.reviewer_helix_overlay(ctx);
-        self.notification_overlay(ctx);
-        self.extra_tools_dialog(ctx);
-        self.app_dialog(ctx);
-        self.reviewer_dialog(ctx);
-        self.agent_input_translation_popup(ctx);
-        self.pomodoro_work_peek_overlay(ctx);
-        self.pomodoro_cat_overlay(ctx);
-        self.toast_overlay(ctx);
-        self.bottom_bar_overlay(ctx);
 
         self.rendering_frame = false;
         self.last_full_frame_at = Some(Instant::now());

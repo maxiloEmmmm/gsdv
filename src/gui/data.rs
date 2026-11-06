@@ -41,6 +41,7 @@ static STORE_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 pub enum WorkspaceActivity {
     Busy,
     Idle,
+    Error,
     Unknown,
 }
 
@@ -266,6 +267,8 @@ pub struct InitialGuiData {
     pub rail_collapsed: bool,
     /// Whether the workspace rail only shows focused workspaces.
     pub focus_filter_enabled: bool,
+    /// Stable Agent ids included in the cross-workspace spotlight browser.
+    pub spotlight_agent_ids: BTreeSet<String>,
 }
 
 /// 应用界面语言，适用于全局 GUI 文案切换。
@@ -648,6 +651,9 @@ struct StoreFile {
     rail_collapsed: bool,
     #[serde(default)]
     focus_filter_enabled: bool,
+    /// Stable Agent ids explicitly added to spotlight mode.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    spotlight_agent_ids: BTreeSet<String>,
     #[serde(default)]
     default_agent_kind: Option<AgentKind>,
     #[serde(default)]
@@ -811,6 +817,7 @@ pub fn load_initial_gui_data(default_agent_kind: AgentKind) -> InitialGuiData {
         workspaces,
         rail_collapsed: stored.rail_collapsed,
         focus_filter_enabled: stored.focus_filter_enabled,
+        spotlight_agent_ids: stored.spotlight_agent_ids,
     }
 }
 
@@ -1308,6 +1315,7 @@ pub fn save_workspace_store(
     active: usize,
     rail_collapsed: bool,
     focus_filter_enabled: bool,
+    spotlight_agent_ids: &BTreeSet<String>,
 ) {
     let _guard = store_write_guard();
     let Some(path) = gsdv_store_path() else {
@@ -1321,6 +1329,7 @@ pub fn save_workspace_store(
         active: (!workspaces.is_empty()).then_some(active.min(workspaces.len().saturating_sub(1))),
         rail_collapsed,
         focus_filter_enabled,
+        spotlight_agent_ids: spotlight_agent_ids.clone(),
         default_agent_kind: existing_store.default_agent_kind,
         theme_mode: existing_store.theme_mode,
         language: existing_store.language,

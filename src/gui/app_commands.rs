@@ -740,6 +740,9 @@ impl GsdvGuiApp {
                     agent_slot: slot,
                 });
             }
+            AgentTabAction::ToggleSpotlight(slot) => {
+                self.toggle_agent_spotlight(self.active_workspace, slot);
+            }
             AgentTabAction::Restart(slot) => {
                 self.set_active_app_dialog(Some(AppDialog::RestartAgent {
                     index: self.active_workspace,
@@ -1127,6 +1130,7 @@ fn workspace_activity_from_hook_status(status: &str) -> WorkspaceActivity {
     match status.trim().to_ascii_lowercase().as_str() {
         "busy" => WorkspaceActivity::Busy,
         "idle" => WorkspaceActivity::Idle,
+        "error" => WorkspaceActivity::Error,
         _ => WorkspaceActivity::Unknown,
     }
 }

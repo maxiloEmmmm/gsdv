@@ -38,6 +38,8 @@ const REMOTE_AGENT_RESIZE_MAX_COLS: u16 = 500;
 const REMOTE_AGENT_RESIZE_MAX_ROWS: u16 = 200;
 /// 单次滚轮请求最多移动的行数，限制 PTY 输入量。
 const REMOTE_AGENT_SCROLL_MAX_LINES: i32 = 50;
+/// Workspace metadata refresh cadence while a Web spotlight client is connected.
+const REMOTE_WORKSPACE_STREAM_INTERVAL: Duration = Duration::from_millis(250);
 
 /// 内嵌 remote 前端静态资源。
 struct RemoteWebAsset {
@@ -337,6 +339,12 @@ struct RemoteAgent {
     agent_id: String,
     /// UI 展示标题。
     title: String,
+    /// Whether this Agent belongs to the persisted spotlight browser.
+    in_spotlight: bool,
+    /// Last activity received from Agent hooks.
+    activity: WorkspaceActivity,
+    /// Whether the desktop user explicitly stopped the process.
+    manually_stopped: bool,
 }
 
 /// agent 操作成功响应。
@@ -464,7 +472,14 @@ impl GsdvGuiApp {
             workspaces: self
                 .workspaces
                 .iter()
-                .map(remote_workspace_from_view_data)
+                .enumerate()
+                .map(|(workspace_index, workspace)| {
+                    remote_workspace_from_view_data(
+                        workspace,
+                        self.terminal_hosts.get(workspace_index),
+                        &self.spotlight_agent_ids,
+                    )
+                })
                 .collect(),
         }
     }
@@ -762,6 +777,7 @@ async fn run_remote_server_listener(
 fn remote_router(state: RemoteApiState) -> Router {
     Router::new()
         .route("/api/workspace", get(remote_workspace_handler))
+        .route("/api/workspace/ws", get(remote_workspace_ws_handler))
         .route("/api/agent/input", post(remote_agent_input_handler))
         .route("/api/agent/esc", post(remote_agent_esc_handler))
         .route("/api/agent/image", post(remote_agent_image_handler))
@@ -795,6 +811,54 @@ fn remote_web_asset(path: &str) -> Option<&'static RemoteWebAsset> {
 /// Handles workspace metadata requests.
 async fn remote_workspace_handler(State(state): State<RemoteApiState>) -> impl IntoResponse {
     dispatch_remote_api_request(state, RemoteApiRequest::Workspace).await
+}
+
+/// Upgrades a browser connection for live workspace/spotlight metadata snapshots.
+///
+/// Example: Agent `busy -> idle` -> the next changed snapshot reorders the sidebar.
+async fn remote_workspace_ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<RemoteApiState>,
+) -> axum::response::Response {
+    ws.on_upgrade(|socket| run_remote_workspace_socket(socket, state))
+}
+
+/// Streams changed workspace metadata and observes browser disconnects.
+///
+/// Example: unchanged snapshots are suppressed; a close frame ends the task.
+async fn run_remote_workspace_socket(mut socket: WebSocket, state: RemoteApiState) {
+    let mut interval = tokio::time::interval(REMOTE_WORKSPACE_STREAM_INTERVAL);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut last_payload = String::new();
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                let result = dispatch_remote_api_request_once(
+                    state.clone(),
+                    RemoteApiRequest::Workspace,
+                ).await;
+                let RemoteApiResult::Ok(RemoteApiPayload::Workspace(response)) = result else {
+                    break;
+                };
+                let Ok(payload) = serde_json::to_string(&response) else {
+                    break;
+                };
+                if payload == last_payload {
+                    continue;
+                }
+                last_payload.clone_from(&payload);
+                if socket.send(Message::Text(payload.into())).await.is_err() {
+                    break;
+                }
+            }
+            message = socket.recv() => {
+                match message {
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                    _ => {}
+                }
+            }
+        }
+    }
 }
 
 /// Handles agent text input requests.
@@ -1380,7 +1444,11 @@ fn decode_remote_agent_image(
 }
 
 /// Converts workspace view data into remote API metadata.
-fn remote_workspace_from_view_data(workspace: &WorkspaceViewData) -> RemoteWorkspace {
+fn remote_workspace_from_view_data(
+    workspace: &WorkspaceViewData,
+    hosts: Option<&WorkspaceTerminalHosts>,
+    spotlight_agent_ids: &BTreeSet<String>,
+) -> RemoteWorkspace {
     RemoteWorkspace {
         workspace_id: data::workspace_store_key(&workspace.path),
         name: workspace.name.clone(),
@@ -1389,7 +1457,15 @@ fn remote_workspace_from_view_data(workspace: &WorkspaceViewData) -> RemoteWorks
             .agent_rows
             .iter()
             .enumerate()
-            .map(|(row_index, row)| remote_agent_row_from_view_data(workspace, row_index, row))
+            .map(|(row_index, row)| {
+                remote_agent_row_from_view_data(
+                    workspace,
+                    hosts,
+                    spotlight_agent_ids,
+                    row_index,
+                    row,
+                )
+            })
             .collect(),
     }
 }
@@ -1397,6 +1473,8 @@ fn remote_workspace_from_view_data(workspace: &WorkspaceViewData) -> RemoteWorks
 /// Converts an Agent row into remote API metadata.
 fn remote_agent_row_from_view_data(
     workspace: &WorkspaceViewData,
+    hosts: Option<&WorkspaceTerminalHosts>,
+    spotlight_agent_ids: &BTreeSet<String>,
     row_index: usize,
     row: &data::AgentRowViewData,
 ) -> RemoteAgentRow {
@@ -1407,7 +1485,13 @@ fn remote_agent_row_from_view_data(
             .iter()
             .enumerate()
             .map(|(col_index, column)| {
-                remote_agent_column_from_view_data(workspace, col_index, column)
+                remote_agent_column_from_view_data(
+                    workspace,
+                    hosts,
+                    spotlight_agent_ids,
+                    col_index,
+                    column,
+                )
             })
             .collect(),
     }
@@ -1416,6 +1500,8 @@ fn remote_agent_row_from_view_data(
 /// Converts an Agent column into remote API metadata.
 fn remote_agent_column_from_view_data(
     workspace: &WorkspaceViewData,
+    hosts: Option<&WorkspaceTerminalHosts>,
+    spotlight_agent_ids: &BTreeSet<String>,
     col_index: usize,
     column: &data::AgentColumnViewData,
 ) -> RemoteAgentColumn {
@@ -1424,7 +1510,9 @@ fn remote_agent_column_from_view_data(
         agents: column
             .tabs
             .iter()
-            .filter_map(|slot| remote_agent_from_column_slot(workspace, slot))
+            .filter_map(|slot| {
+                remote_agent_from_column_slot(workspace, hosts, spotlight_agent_ids, slot)
+            })
             .collect(),
     }
 }
@@ -1432,12 +1520,19 @@ fn remote_agent_column_from_view_data(
 /// Converts one column slot into remote Agent metadata.
 fn remote_agent_from_column_slot(
     workspace: &WorkspaceViewData,
+    hosts: Option<&WorkspaceTerminalHosts>,
+    spotlight_agent_ids: &BTreeSet<String>,
     slot: &data::AgentColumnSlot,
 ) -> Option<RemoteAgent> {
     match slot {
         data::AgentColumnSlot::Main => Some(RemoteAgent {
             agent_id: workspace.agent_id.clone(),
             title: "main".to_string(),
+            in_spotlight: spotlight_agent_ids.contains(&workspace.agent_id),
+            activity: workspace.activity,
+            manually_stopped: hosts
+                .and_then(|hosts| hosts.agents.get(&AgentSlotId::Main))
+                .is_some_and(|slot| slot.manually_stopped),
         }),
         data::AgentColumnSlot::Subagent(id) => workspace
             .subagents
@@ -1446,6 +1541,15 @@ fn remote_agent_from_column_slot(
             .map(|subagent| RemoteAgent {
                 agent_id: subagent.agent_id.clone(),
                 title: subagent.name.clone(),
+                in_spotlight: spotlight_agent_ids.contains(&subagent.agent_id),
+                activity: subagent.activity,
+                manually_stopped: hosts
+                    .and_then(|hosts| {
+                        hosts
+                            .agents
+                            .get(&AgentSlotId::Subagent(subagent.id.clone()))
+                    })
+                    .is_some_and(|slot| slot.manually_stopped),
             }),
     }
 }

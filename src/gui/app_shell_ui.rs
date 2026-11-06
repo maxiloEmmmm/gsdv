@@ -265,7 +265,7 @@ impl GsdvGuiApp {
                     }
                     ui.add_space(4.0);
                 }
-                let bottom_height = 30.0 + 10.0 + 28.0 + 10.0 + 30.0;
+                let bottom_height = 30.0 + 10.0 + 30.0 + 10.0 + 30.0 + 10.0 + 28.0;
                 ui.add_space((ui.available_height() - bottom_height).max(24.0));
                 ui.allocate_ui_with_layout(
                     Vec2::new(ui.available_width(), 28.0),
@@ -283,6 +283,12 @@ impl GsdvGuiApp {
                         }
                     },
                 );
+                ui.add_space(10.0);
+                if rail_nav_row(ui, "star", i18n::text(self.app_language, "Spotlight mode"))
+                    .clicked()
+                {
+                    self.enter_spotlight_mode(ui.ctx());
+                }
                 ui.add_space(10.0);
                 if rail_nav_row(ui, "+", i18n::text(self.app_language, "New Workspace")).clicked() {
                     self.add_workspace_from_dialog(ui.ctx());
@@ -401,12 +407,30 @@ impl GsdvGuiApp {
                     }
                     ui.add_space(8.0);
                 }
-                let bottom_height = 28.0 + 10.0 + 22.0 + 10.0 + 28.0;
+                let bottom_height = 28.0 + 10.0 + 28.0 + 10.0 + 28.0 + 10.0 + 22.0;
                 ui.add_space((ui.available_height() - bottom_height).max(24.0));
                 if workspace_focus_filter_switch(ui, self.focus_filter_enabled, self.app_language)
                     .clicked()
                 {
                     rail_action = Some(WorkspaceRailAction::ToggleFocusFilter);
+                }
+                ui.add_space(10.0);
+                if compact_rail_nav_button(
+                    ui,
+                    i18n::text(self.app_language, "Spotlight mode"),
+                    |ui, center, _color| {
+                        ui.painter().text(
+                            center,
+                            Align2::CENTER_CENTER,
+                            "★",
+                            egui::FontId::proportional(16.0),
+                            theme::warning(),
+                        );
+                    },
+                )
+                .clicked()
+                {
+                    self.enter_spotlight_mode(ui.ctx());
                 }
                 ui.add_space(10.0);
                 if compact_rail_nav_button(
@@ -1797,6 +1821,7 @@ impl GsdvGuiApp {
                         workspace.activity
                     },
                     active_slot == &slot,
+                    self.spotlight_agent_ids.contains(&workspace.agent_id),
                     &self.repaint_controller,
                 );
                 response.context_menu(|ui| {
@@ -1813,6 +1838,7 @@ impl GsdvGuiApp {
                         workspace.helix_work_dir.as_deref(),
                         None,
                         workspace.session_id.as_deref(),
+                        self.spotlight_agent_ids.contains(&workspace.agent_id),
                         agent_tab_action,
                         self.app_language,
                     );
@@ -1841,6 +1867,7 @@ impl GsdvGuiApp {
                         subagent.activity
                     },
                     active_slot == &slot,
+                    self.spotlight_agent_ids.contains(&subagent.agent_id),
                     &self.repaint_controller,
                 );
                 response.context_menu(|ui| {
@@ -1857,6 +1884,7 @@ impl GsdvGuiApp {
                         subagent.helix_work_dir.as_deref(),
                         Some(subagent.name.as_str()),
                         subagent.session_id.as_deref(),
+                        self.spotlight_agent_ids.contains(&subagent.agent_id),
                         agent_tab_action,
                         self.app_language,
                     );

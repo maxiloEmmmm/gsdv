@@ -14,6 +14,8 @@ const MAX_TERMINAL_SCROLL_LINES = 50;
 const TERMINAL_WHEEL_GESTURE_IDLE_MS = 120;
 const AGENT_RECONNECT_BASE_DELAY_MS = 400;
 const AGENT_RECONNECT_MAX_DELAY_MS = 8000;
+const WORKSPACE_RECONNECT_BASE_DELAY_MS = 500;
+const WORKSPACE_RECONNECT_MAX_DELAY_MS = 8000;
 const REMOTE_SHELL_VIEWPORT_HEIGHT_VAR = "--remote-shell-viewport-height";
 /**
  * Fallback palette used before the first Rust terminal snapshot arrives.
@@ -43,6 +45,7 @@ export default defineComponent({
     const workspaceLoading = ref(false);
     const workspaceError = ref("");
     const workspaces = ref([]);
+    const spotlightMode = ref(false);
     const expandedTreeNodes = ref(new Set());
     const tabs = ref([]);
     const activeTabId = ref(null);
@@ -55,6 +58,10 @@ export default defineComponent({
     let terminalResizeHandler = null;
     let visualViewportHandler = null;
     let visualViewportSyncTimers = [];
+    let workspaceSocket = null;
+    let workspaceReconnectTimer = 0;
+    let workspaceReconnectAttempt = 0;
+    let workspaceSocketClosing = false;
 
     /**
      * Loads workspace metadata from the documented remote HTTP route.
@@ -77,6 +84,103 @@ export default defineComponent({
       } finally {
         workspaceLoading.value = false;
       }
+    }
+
+    /**
+     * Builds the live workspace metadata WebSocket URL.
+     */
+    function workspaceOutputUrl() {
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      return `${protocol}//${window.location.host}/api/workspace/ws`;
+    }
+
+    /**
+     * Applies one server workspace snapshot and repairs spotlight selection.
+     */
+    function applyWorkspaceSnapshot(payload) {
+      workspaces.value = Array.isArray(payload?.workspaces)
+        ? payload.workspaces
+        : [];
+      refreshOpenTabBindings();
+      if (spotlightMode.value) {
+        ensureSpotlightSelection();
+      }
+    }
+
+    /**
+     * Opens the metadata stream used by live spotlight ordering.
+     */
+    function connectWorkspaceSocket() {
+      closeWorkspaceSocket(false);
+      workspaceSocketClosing = false;
+      const socket = new WebSocket(workspaceOutputUrl());
+      workspaceSocket = socket;
+      socket.onopen = () => {
+        if (workspaceSocket === socket) {
+          workspaceReconnectAttempt = 0;
+          workspaceError.value = "";
+        }
+      };
+      socket.onmessage = (event) => {
+        if (workspaceSocket !== socket) {
+          return;
+        }
+        try {
+          applyWorkspaceSnapshot(JSON.parse(event.data));
+        } catch (_error) {
+          workspaceError.value = "Received invalid workspace metadata.";
+        }
+      };
+      socket.onerror = () => {
+        if (workspaceSocket === socket) {
+          workspaceError.value = "Workspace metadata connection failed.";
+        }
+      };
+      socket.onclose = () => {
+        if (workspaceSocket !== socket) {
+          return;
+        }
+        workspaceSocket = null;
+        if (!workspaceSocketClosing) {
+          scheduleWorkspaceReconnect();
+        }
+      };
+    }
+
+    /**
+     * Closes the workspace stream and optionally suppresses reconnect.
+     */
+    function closeWorkspaceSocket(closing = true) {
+      workspaceSocketClosing = closing;
+      if (workspaceReconnectTimer !== 0) {
+        window.clearTimeout(workspaceReconnectTimer);
+        workspaceReconnectTimer = 0;
+      }
+      if (workspaceSocket) {
+        const socket = workspaceSocket;
+        workspaceSocket = null;
+        socket.close();
+      }
+    }
+
+    /**
+     * Reconnects workspace metadata with bounded exponential backoff.
+     */
+    function scheduleWorkspaceReconnect() {
+      if (workspaceSocketClosing || workspaceReconnectTimer !== 0) {
+        return;
+      }
+      const delay = Math.min(
+        WORKSPACE_RECONNECT_MAX_DELAY_MS,
+        WORKSPACE_RECONNECT_BASE_DELAY_MS * 2 ** workspaceReconnectAttempt,
+      );
+      workspaceReconnectAttempt = Math.min(workspaceReconnectAttempt + 1, 8);
+      workspaceReconnectTimer = window.setTimeout(() => {
+        workspaceReconnectTimer = 0;
+        if (!workspaceSocketClosing) {
+          connectWorkspaceSocket();
+        }
+      }, delay);
     }
 
     /**
@@ -182,6 +286,114 @@ export default defineComponent({
         col.col_index,
         agent.agent_id,
       ].join(":");
+    }
+
+    /**
+     * Returns each current Agent binding once, independent of grid duplication.
+     */
+    function allAgentBindings() {
+      const bindings = [];
+      const seen = new Set();
+      for (const workspace of workspaces.value) {
+        for (const row of Array.isArray(workspace.rows) ? workspace.rows : []) {
+          for (const col of Array.isArray(row.cols) ? row.cols : []) {
+            for (const agent of Array.isArray(col.agents) ? col.agents : []) {
+              const id = agentTabId(workspace, row, col, agent);
+              const stableId = `${workspace.workspace_id}:${agent.agent_id}`;
+              if (seen.has(stableId)) {
+                continue;
+              }
+              seen.add(stableId);
+              bindings.push({ id, workspace, row, col, agent });
+            }
+          }
+        }
+      }
+      return bindings;
+    }
+
+    /**
+     * Returns persisted spotlight Agents with stopped/error entries first.
+     */
+    function spotlightAgentBindings() {
+      return allAgentBindings()
+        .filter((binding) => binding.agent.in_spotlight === true)
+        .sort(
+          (left, right) =>
+            spotlightAgentRank(left.agent) - spotlightAgentRank(right.agent),
+        );
+    }
+
+    /**
+     * Maps server activity to the stable spotlight ordering group.
+     */
+    function spotlightAgentRank(agent) {
+      if (
+        agent.manually_stopped === true ||
+        agent.activity === "idle" ||
+        agent.activity === "error"
+      ) {
+        return 0;
+      }
+      return agent.activity === "busy" ? 2 : 1;
+    }
+
+    /**
+     * Refreshes metadata references held by already-open terminal tabs.
+     */
+    function refreshOpenTabBindings() {
+      const current = new Map(
+        allAgentBindings().map((binding) => [binding.id, binding]),
+      );
+      for (const tab of tabs.value) {
+        const binding = current.get(tab.id);
+        if (binding) {
+          tab.binding = binding;
+          tab.title = binding.agent.title;
+        }
+      }
+      refreshTabs();
+    }
+
+    /**
+     * Opens the read-only Web spotlight browser.
+     */
+    function enterSpotlightMode() {
+      spotlightMode.value = true;
+      drawerOpen.value = false;
+      ensureSpotlightSelection();
+    }
+
+    /**
+     * Returns to the ordinary remote workspace browser.
+     */
+    function exitSpotlightMode() {
+      spotlightMode.value = false;
+    }
+
+    /**
+     * Keeps the selected Web terminal bound to a current spotlight member.
+     */
+    function ensureSpotlightSelection() {
+      const bindings = spotlightAgentBindings();
+      const current = activeBinding();
+      if (
+        current &&
+        bindings.some(
+          (binding) =>
+            binding.workspace.workspace_id === current.workspace.workspace_id &&
+            binding.agent.agent_id === current.agent.agent_id,
+        )
+      ) {
+        return;
+      }
+      const first = bindings[0];
+      if (first) {
+        selectAgent(first.workspace, first.row, first.col, first.agent);
+      } else {
+        activeTabId.value = null;
+        renderActiveTerminal();
+      }
     }
 
     /**
@@ -1727,6 +1939,7 @@ export default defineComponent({
      * Releases browser resources owned by the remote shell.
      */
     function cleanupRemoteShell() {
+      closeWorkspaceSocket(true);
       closeAllAgentSockets();
       cancelTerminalScroll();
       cancelInteractiveTerminalScroll();
@@ -1737,6 +1950,7 @@ export default defineComponent({
     onMounted(() => {
       observeVisualViewportSize();
       loadWorkspaceTree();
+      connectWorkspaceSocket();
       renderActiveTerminal();
       observeTerminalOutputSize();
     });
@@ -1751,8 +1965,58 @@ export default defineComponent({
       const terminalBanner = tab?.error || (tab?.status === "dis" ? "dis" : "");
       const palette = activeTerminalPalette();
       return (
-      <div class="remote-shell" style={remotePaletteStyle(palette)}>
-        <header class="remote-shell__header">
+      <div
+        class={{
+          "remote-shell": true,
+          "remote-shell--spotlight": spotlightMode.value,
+        }}
+        style={remotePaletteStyle(palette)}
+      >
+        {spotlightMode.value ? (
+          <aside class="remote-shell__spotlight-sidebar">
+            <button
+              class="remote-shell__spotlight-exit"
+              type="button"
+              onClick={exitSpotlightMode}
+            >
+              <span aria-hidden="true">←</span>
+              <span>退出专注模式</span>
+            </button>
+            <nav class="remote-shell__spotlight-list" aria-label="Spotlight agents">
+              {spotlightAgentBindings().map((item) => (
+                <button
+                  class={{
+                    "remote-shell__spotlight-agent": true,
+                    "remote-shell__spotlight-agent--active":
+                      activeTabId.value === item.id,
+                  }}
+                  type="button"
+                  key={`${item.workspace.workspace_id}:${item.agent.agent_id}`}
+                  onClick={() =>
+                    selectAgent(item.workspace, item.row, item.col, item.agent)
+                  }
+                >
+                  <span class="remote-shell__spotlight-star" aria-hidden="true">★</span>
+                  <span class="remote-shell__spotlight-copy">
+                    <span class="remote-shell__spotlight-title">{item.agent.title}</span>
+                    <span class="remote-shell__spotlight-workspace">
+                      {item.workspace.name}
+                    </span>
+                  </span>
+                  <span
+                    class={[
+                      "remote-shell__spotlight-status",
+                      `remote-shell__spotlight-status--${item.agent.activity || "unknown"}`,
+                    ]}
+                    aria-label={item.agent.activity || "unknown"}
+                  />
+                </button>
+              ))}
+            </nav>
+          </aside>
+        ) : null}
+
+        {!spotlightMode.value ? <header class="remote-shell__header">
           <Button
             class="remote-shell__menu-button"
             aria-label="Open workspaces"
@@ -1772,9 +2036,9 @@ export default defineComponent({
                 : "No agent selected"}
             </div>
           </div>
-        </header>
+        </header> : null}
 
-        {tabs.value.length > 0 ? (
+        {!spotlightMode.value && tabs.value.length > 0 ? (
           <div class="remote-shell__tabs" aria-label="Open agents">
             {tabs.value.map((item) => (
               <button
@@ -1893,6 +2157,11 @@ export default defineComponent({
             ) : null}
             {workspaces.value.map(renderWorkspace)}
           </nav>
+          <div class="remote-shell__drawer-footer">
+            <Button block onClick={enterSpotlightMode}>
+              ★ 专注模式
+            </Button>
+          </div>
         </Drawer>
       </div>
       );

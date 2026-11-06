@@ -34,7 +34,13 @@ static GLOBAL_ALLOCATOR: pprof_alloc::PprofAlloc = pprof_alloc::PprofAlloc::new(
     .with_stats();
 
 const GSDV_WF_SKILL: &str = include_str!("../../assets/skills/gsdv-wf/SKILL.md");
-const CODEX_AGENT_STATUS_HOOK_EVENTS: [&str; 3] = ["SessionStart", "UserPromptSubmit", "Stop"];
+const CODEX_AGENT_STATUS_HOOK_EVENTS: [&str; 5] = [
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreModelRequest",
+    "PostModelRequest",
+    "Stop",
+];
 const CODEX_AGENT_STATUS_HOOK_TIMEOUT: u64 = 5;
 const CODEX_AGENT_STATUS_MESSAGE: &str = "updating gsdv agent status";
 
@@ -412,6 +418,8 @@ fn codex_hook_event_key(event: &str) -> Option<&'static str> {
         "PostCompact" => Some("post_compact"),
         "SessionStart" => Some("session_start"),
         "UserPromptSubmit" => Some("user_prompt_submit"),
+        "PreModelRequest" => Some("pre_model_request"),
+        "PostModelRequest" => Some("post_model_request"),
         "Stop" => Some("stop"),
         _ => None,
     }

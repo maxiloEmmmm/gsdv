@@ -4701,6 +4701,9 @@ impl TerminalHost for GuiTerminalHost {
                 footer: match (&self.session_id, self.activity) {
                     (Some(session), WorkspaceActivity::Busy) => format!("session {session} · busy"),
                     (Some(session), WorkspaceActivity::Idle) => format!("session {session} · idle"),
+                    (Some(session), WorkspaceActivity::Error) => {
+                        format!("session {session} · request failed")
+                    }
                     (Some(session), WorkspaceActivity::Unknown) => {
                         format!("session {session} · status unknown")
                     }
