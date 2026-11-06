@@ -58,6 +58,7 @@ fixture="$(jq -Rs . <<'JS'
     agent_id:id,title,activity,in_spotlight:inSpotlight,manually_stopped:false
   });
   window.spotlightFixture = {
+    spotlightRankMode:false,
     workspaceConnections:0,
     workspaceSocket:null,
     agentConnections:0,
@@ -65,25 +66,58 @@ fixture="$(jq -Rs . <<'JS'
     workspaces:[{
       workspace_id:"workspace-a",name:"alpha",path:"/alpha",rows:[{
         row_index:0,cols:[{col_index:0,agents:[
-          agent("busy-agent","Busy Agent","busy"),
-          agent("idle-agent","Idle Agent","idle"),
+          {...agent("busy-agent","Busy Agent","busy"),spotlight_level:1,stopped_order:null},
+          {...agent("idle-agent","Idle Agent","idle"),spotlight_level:3,stopped_order:1},
           agent("plain-agent","Plain Agent","unknown",false)
         ]}]
       }]
     }],
     emitWorkspace() {
-      this.workspaceSocket?.onmessage?.({data:JSON.stringify({workspaces:this.workspaces})});
+      this.workspaceSocket?.onmessage?.({data:JSON.stringify({
+        spotlight_rank_mode:this.spotlightRankMode,
+        workspaces:this.workspaces
+      })});
     },
     swapActivity() {
       const agents=this.workspaces[0].rows[0].cols[0].agents;
       agents[0].activity="idle";
+      agents[0].stopped_order=2;
       agents[1].activity="busy";
+      agents[1].stopped_order=null;
+      this.emitWorkspace();
+    },
+    levelPriority() {
+      const agents=this.workspaces[0].rows[0].cols[0].agents;
+      agents[0].activity="idle";
+      agents[0].spotlight_level=1;
+      agents[0].stopped_order=4;
+      agents[1].activity="idle";
+      agents[1].spotlight_level=3;
+      agents[1].stopped_order=1;
+      this.emitWorkspace();
+    },
+    sameLevelStops() {
+      const agents=this.workspaces[0].rows[0].cols[0].agents;
+      agents[0].activity="idle";
+      agents[0].spotlight_level=2;
+      agents[0].stopped_order=4;
+      agents[1].activity="idle";
+      agents[1].spotlight_level=2;
+      agents[1].stopped_order=2;
       this.emitWorkspace();
     }
   };
-  window.fetch = async () => new Response(JSON.stringify({
-    workspaces:spotlightFixture.workspaces
-  }));
+  window.fetch = async (url,options={}) => {
+    if(String(url).includes("/api/spotlight/rank-mode")) {
+      spotlightFixture.spotlightRankMode=JSON.parse(options.body).enabled===true;
+      spotlightFixture.emitWorkspace();
+      return new Response(JSON.stringify({ok:true}));
+    }
+    return new Response(JSON.stringify({
+      spotlight_rank_mode:spotlightFixture.spotlightRankMode,
+      workspaces:spotlightFixture.workspaces
+    }));
+  };
   window.WebSocket = class {
     static OPEN=1;
     readyState=1;
@@ -137,6 +171,7 @@ evaluate '(async()=>{
   if(getComputedStyle(document.querySelector(".remote-shell")).backgroundColor!=="rgb(11, 16, 22)") throw new Error("spotlight root is not dark");
 })()'
 
+evaluate '(async()=>{for(let i=0;i<100&&!document.querySelector(".remote-shell__terminal-output--interactive");i++)await new Promise(r=>setTimeout(r,20));if(!document.querySelector(".remote-shell__terminal-output--interactive"))throw new Error("interactive terminal snapshot did not arrive")})()'
 evaluate '(()=>{const rect=document.querySelector(".remote-shell__terminal-output").getBoundingClientRect();return {x:Math.floor(rect.left+rect.width/2),top:Math.floor(rect.top+rect.height*0.7),bottom:Math.floor(rect.top+rect.height*0.3)}})()'
 touch_x="$(jq -er '.result.result.value.x' <<<"$cdp_response")"
 touch_top="$(jq -er '.result.result.value.top' <<<"$cdp_response")"
@@ -151,10 +186,25 @@ cdp Input.dispatchTouchEvent "$(jq -cn --argjson x "$touch_x" --argjson y "$touc
 evaluate '(async()=>{await new Promise(requestAnimationFrame);if(!spotlightFixture.agentMessages.some(message=>message.type==="scroll"&&message.lines>0))throw new Error("mobile swipe down did not scroll before touchend")})()'
 cdp Input.dispatchTouchEvent '{"type":"touchEnd","touchPoints":[]}'
 evaluate '(async()=>{
+  const checkbox=document.querySelector(".remote-shell__spotlight-rank-mode input");
+  if(checkbox.checked) throw new Error("rank mode unexpectedly enabled");
+  checkbox.click();
+  await new Promise(r=>setTimeout(r,100));
+  if(!checkbox.checked||!spotlightFixture.spotlightRankMode) throw new Error("rank mode did not persist");
   spotlightFixture.swapActivity();
   await new Promise(r=>setTimeout(r,100));
   const rows=[...document.querySelectorAll(".remote-shell__spotlight-agent")];
   if(!rows[0].textContent.includes("Busy Agent")) throw new Error("live activity did not reorder tabs");
+  if(!rows[0].classList.contains("remote-shell__spotlight-agent--active")) throw new Error("rank mode did not follow the new leader");
+  spotlightFixture.levelPriority();
+  await new Promise(r=>setTimeout(r,100));
+  const leveled=[...document.querySelectorAll(".remote-shell__spotlight-agent")];
+  if(!leveled[0].textContent.includes("Busy Agent")) throw new Error("level 1 Agent was not ordered before level 3");
+  spotlightFixture.sameLevelStops();
+  await new Promise(r=>setTimeout(r,100));
+  const stopped=[...document.querySelectorAll(".remote-shell__spotlight-agent")];
+  if(!stopped[0].textContent.includes("Idle Agent")) throw new Error("earlier stopped Agent was not ordered first");
+  if(!stopped[0].classList.contains("remote-shell__spotlight-agent--active")) throw new Error("rank mode did not follow earliest stopped Agent");
   const previous=spotlightFixture.workspaceConnections;
   spotlightFixture.workspaceSocket.serverClose();
   await new Promise(r=>setTimeout(r,700));
@@ -167,4 +217,4 @@ if [ -n "$screenshot_path" ]; then
   jq -er '.result.data' <<<"$cdp_response" | base64 --decode >"$screenshot_path"
 fi
 
-printf 'PASS: Web spotlight, reconnect, and bidirectional mobile touch scrolling\n'
+printf 'PASS: Web spotlight levels, rank following, reconnect, and mobile touch scrolling\n'

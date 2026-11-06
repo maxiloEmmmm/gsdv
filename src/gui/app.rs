@@ -473,8 +473,16 @@ struct GsdvGuiApp {
     rail_collapsed: bool,
     /// Whether the workspace rail only shows focused workspaces.
     focus_filter_enabled: bool,
-    /// Stable Agent ids included in the cross-workspace spotlight browser.
-    spotlight_agent_ids: BTreeSet<String>,
+    /// Stable Agent ids mapped to persisted spotlight priority levels 1 through 3.
+    spotlight_agents: BTreeMap<String, u8>,
+    /// Whether spotlight follows the first Agent whenever ordering changes.
+    spotlight_rank_mode: bool,
+    /// Runtime stop sequence used to keep earlier stopped Agents ahead of later ones.
+    spotlight_stopped_order: BTreeMap<String, u64>,
+    /// Next runtime stop sequence assigned to an Agent entering a stopped state.
+    spotlight_next_stopped_order: u64,
+    /// First sorted Agent observed by rank mode before the latest ordering change.
+    spotlight_leader_agent_id: Option<String>,
     /// Whether the app is rendering the cross-workspace spotlight browser.
     spotlight_mode: bool,
     /// Theme restored when spotlight mode exits after forcing its dark surface.
@@ -986,7 +994,11 @@ impl GsdvGuiApp {
             theme_mode: theme::current_mode(),
             rail_collapsed: value.rail_collapsed,
             focus_filter_enabled: value.focus_filter_enabled,
-            spotlight_agent_ids: value.spotlight_agent_ids,
+            spotlight_agents: value.spotlight_agents,
+            spotlight_rank_mode: value.spotlight_rank_mode,
+            spotlight_stopped_order: BTreeMap::new(),
+            spotlight_next_stopped_order: 0,
+            spotlight_leader_agent_id: None,
             spotlight_mode: false,
             spotlight_return_theme: None,
             app_fullscreen: false,
@@ -1065,6 +1077,7 @@ impl GsdvGuiApp {
         };
         app.sync_fs_watches();
         app.spawn_external_hook_server();
+        app.initialize_spotlight_stopped_order();
         app
     }
 }
@@ -2234,6 +2247,8 @@ struct SpotlightAgentEntry {
     slot: AgentSlotId,
     /// Stable hook id persisted as spotlight membership.
     agent_id: String,
+    /// Persisted priority where 1 sorts before 2 and 3.
+    spotlight_level: u8,
     /// Human-readable Agent tab title.
     title: String,
     /// Workspace label shown below the Agent title.
@@ -2242,6 +2257,8 @@ struct SpotlightAgentEntry {
     activity: WorkspaceActivity,
     /// Whether the user explicitly stopped the underlying process.
     manually_stopped: bool,
+    /// Runtime sequence assigned when this Agent most recently stopped.
+    stopped_order: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2790,8 +2807,10 @@ enum AgentTabAction {
     Start(AgentSlotId),
     /// 立即停止 Agent 进程但保留 tab 和会话配置。
     Stop(AgentSlotId),
-    /// Adds or removes one Agent from the cross-workspace spotlight browser.
-    ToggleSpotlight(AgentSlotId),
+    /// Adds an Agent to spotlight or changes its priority level.
+    SetSpotlightLevel(AgentSlotId, u8),
+    /// Removes one Agent from the cross-workspace spotlight browser.
+    RemoveSpotlight(AgentSlotId),
     Restart(AgentSlotId),
     Switch {
         slot: AgentSlotId,

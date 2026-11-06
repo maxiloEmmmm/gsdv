@@ -7,12 +7,14 @@ repo_root="$(cd "$(dirname "$0")/../../.." && pwd)"
 binary="${1:-$repo_root/target/debug/gsdv}"
 binary="$(realpath "$binary")"
 remote_port="${2:-20179}"
+visual_copy="${3-}"
 tmp_dir="$(mktemp -d)"
 test_home="$tmp_dir/home"
 workspace="$tmp_dir/workspace"
 store="$tmp_dir/store.json"
 app_log="$tmp_dir/gsdv.log"
 marker="$tmp_dir/socket-marker"
+context_menu_request="$tmp_dir/context-menu.request"
 app_pid=""
 test_status=0
 
@@ -75,6 +77,8 @@ jq -n \
   export E2E_STORE="$store"
   export E2E_PATH="$test_home/bin:$PATH"
   export E2E_BINARY="$binary"
+  export E2E_CONTEXT_MENU_REQUEST="$context_menu_request"
+  export E2E_SCREENSHOT_REQUEST="$workspace/target/gsdv-screenshots/capture.request"
   exec env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET \
     WINIT_UNIX_BACKEND=x11 \
     XDG_SESSION_TYPE=x11 \
@@ -91,6 +95,15 @@ jq -n \
       trap '\''exit 130'\'' INT
       trap '\''exit 143'\'' TERM
       while kill -0 "$child" 2>/dev/null; do
+        if [ -f "$E2E_CONTEXT_MENU_REQUEST" ]; then
+          xdotool mousemove 100 115 click 3 2>/dev/null || true
+          sleep 0.2
+          xdotool mousemove 180 84 2>/dev/null || true
+          printf '\''spotlight\n'\'' >"$E2E_SCREENSHOT_REQUEST"
+          rm -f "$E2E_CONTEXT_MENU_REQUEST"
+          sleep 1
+          continue
+        fi
         xdotool mousemove 10 10 2>/dev/null || true
         xdotool mousemove 11 10 2>/dev/null || true
         sleep 0.2
@@ -141,7 +154,7 @@ wait_activity() {
     if curl --fail --silent "http://127.0.0.1:$remote_port/api/workspace" | jq -e \
       --arg expected "$expected" \
       '[.workspaces[].rows[].cols[].agents[] | select(.agent_id == "fixture-agent")][0]
-       | .in_spotlight == true and .activity == $expected' >/dev/null; then
+       | .in_spotlight == true and .spotlight_level == 2 and .activity == $expected' >/dev/null; then
       return 0
     fi
     sleep 0.05
@@ -155,6 +168,28 @@ send_hook '{"hook_event_name":"PostModelRequest","status":"failed","error":"HTTP
 wait_activity error
 send_hook '{"hook_event_name":"Stop","session_id":"fixture-session"}'
 wait_activity idle
+
+curl --fail --silent \
+  -H 'content-type: application/json' \
+  -d '{"enabled":true}' \
+  "http://127.0.0.1:$remote_port/api/spotlight/rank-mode" | jq -e '.ok == true' >/dev/null
+curl --fail --silent "http://127.0.0.1:$remote_port/api/workspace" | jq -e \
+  '.spotlight_rank_mode == true
+   and ([.workspaces[].rows[].cols[].agents[] | select(.agent_id == "fixture-agent")][0]
+        | .stopped_order == 0)' >/dev/null
+for _ in $(seq 1 40); do
+  if jq -e \
+    '.spotlight_rank_mode == true
+     and .spotlight_agents["fixture-agent"] == 2
+     and ((.spotlight_agent_ids // []) | length == 0)' "$store" >/dev/null; then
+    break
+  fi
+  sleep 0.05
+done
+jq -e \
+  '.spotlight_rank_mode == true
+   and .spotlight_agents["fixture-agent"] == 2
+   and ((.spotlight_agent_ids // []) | length == 0)' "$store" >/dev/null
 
 jq -e '.hooks.PreModelRequest and .hooks.PostModelRequest' \
   "$test_home/.codex/hooks.json" >/dev/null
@@ -170,4 +205,17 @@ screenshot="$(cat "$latest")"
 identify -format '%w %h' "$screenshot" | awk '{exit !($1 >= 640 && $2 >= 480)}'
 magick "$screenshot" -crop 244x720+0+0 txt:- | rg '#F5B800|#F5B84B' >/dev/null
 
-printf 'PASS: offscreen spotlight render, persisted membership, and Codex model hooks\n'
+previous_screenshot="$screenshot"
+touch "$context_menu_request"
+for _ in $(seq 1 120); do
+  screenshot="$(cat "$latest")"
+  [ "$screenshot" != "$previous_screenshot" ] && break
+  sleep 0.05
+done
+[ "$screenshot" != "$previous_screenshot" ]
+[ -s "$screenshot" ]
+if [ -n "$visual_copy" ]; then
+  cp "$screenshot" "$visual_copy"
+fi
+
+printf 'PASS: offscreen spotlight levels, rank persistence, context menu, and hooks\n'

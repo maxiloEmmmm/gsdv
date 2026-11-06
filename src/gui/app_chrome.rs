@@ -108,7 +108,7 @@ pub(super) fn agent_slot_tab_button(
     label: &str,
     activity: WorkspaceActivity,
     active: bool,
-    in_spotlight: bool,
+    spotlight_level: Option<u8>,
     repaint_controller: &repaint_gate::RepaintController,
 ) -> egui::Response {
     let (dot, _) = activity_style(activity);
@@ -126,7 +126,7 @@ pub(super) fn agent_slot_tab_button(
             ..Default::default()
         },
     );
-    if in_spotlight {
+    if spotlight_level.is_some() {
         label_job.append(
             " ★",
             0.0,
@@ -141,7 +141,7 @@ pub(super) fn agent_slot_tab_button(
         [
             label.chars().count().max(4) as f32 * 8.0
                 + 32.0
-                + if in_spotlight { 16.0 } else { 0.0 },
+                + if spotlight_level.is_some() { 16.0 } else { 0.0 },
             30.0,
         ],
         Button::new(label_job)
@@ -180,7 +180,7 @@ pub(super) fn agent_slot_context_menu(
     current_agent_helix_work_dir: Option<&Path>,
     current_agent_name: Option<&str>,
     current_session_id: Option<&str>,
-    in_spotlight: bool,
+    spotlight_level: Option<u8>,
     action: &mut Option<AgentTabAction>,
     language: AppLanguage,
 ) {
@@ -199,20 +199,37 @@ pub(super) fn agent_slot_context_menu(
         *action = Some(process_action.1);
         ui.close_menu();
     }
-    if ui
-        .button(i18n::text(
-            language,
-            if in_spotlight {
-                "Remove from spotlight"
-            } else {
-                "Add to spotlight"
-            },
-        ))
-        .clicked()
-    {
-        *action = Some(AgentTabAction::ToggleSpotlight(slot.clone()));
-        ui.close_menu();
-    }
+    ui.menu_button(i18n::text(language, "Spotlight registration"), |ui| {
+        for level in 1..=3 {
+            if ui
+                .selectable_label(
+                    spotlight_level == Some(level),
+                    i18n::text(
+                        language,
+                        match level {
+                            1 => "Spotlight level 1",
+                            2 => "Spotlight level 2",
+                            _ => "Spotlight level 3",
+                        },
+                    ),
+                )
+                .clicked()
+            {
+                *action = Some(AgentTabAction::SetSpotlightLevel(slot.clone(), level));
+                ui.close_menu();
+            }
+        }
+        if spotlight_level.is_some() {
+            ui.separator();
+            if ui
+                .button(i18n::text(language, "Remove spotlight registration"))
+                .clicked()
+            {
+                *action = Some(AgentTabAction::RemoveSpotlight(slot.clone()));
+                ui.close_menu();
+            }
+        }
+    });
     ui.separator();
     if let Some(session_id) = current_session_id {
         if ui.button(i18n::text(language, "Copy session ID")).clicked() {

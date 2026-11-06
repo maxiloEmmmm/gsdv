@@ -358,8 +358,27 @@ textarea {
   background: #1d2a38;
 }
 
+.remote-shell__spotlight-rank-mode {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 14px;
+  border-bottom: 1px solid #293646;
+  color: #d3dae1;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.remote-shell__spotlight-rank-mode input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: #60a5fa;
+}
+
 .remote-shell__spotlight-list {
-  height: calc(100% - 44px);
+  height: calc(100% - 84px);
   padding: 8px 0;
   overflow: auto;
 }

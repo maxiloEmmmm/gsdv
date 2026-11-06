@@ -119,6 +119,7 @@ impl GsdvGuiApp {
                 host.stop_process();
             }
         }
+        self.sync_spotlight_slot_stop_order(index, &slot);
         if let Some(states) = self.agent_busy_watchdogs.get_mut(index) {
             states.remove(&slot);
         }
@@ -149,6 +150,7 @@ impl GsdvGuiApp {
             host_slot.manually_stopped = false;
             host_slot.error = None;
         }
+        self.sync_spotlight_slot_stop_order(index, &slot);
         self.ensure_agent_terminal_host(ctx, index, &slot);
         self.request_app_repaint();
     }
