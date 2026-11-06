@@ -24,9 +24,9 @@ use crate::gui::reviewer_adapter::{ReviewerAdapter, ReviewerBranchTarget};
 use crate::gui::terminal_host::{
     AgentProcessExit, GuiTerminalHost, HelixLaunchSpec, RemoteTerminalMetadata,
     TerminalFileLineClick, TerminalHost, TerminalInputShortcutScope, TerminalOutputClick,
-    TerminalRemoteOutputSource, TerminalRemoteOutputState, TerminalRemoteSnapshot,
-    TerminalRemoteUpdate, TerminalRuntimeEvent, TerminalRuntimeEventKind, TerminalRuntimeEventSink,
-    TerminalSurfaceKind, TerminalWorkspaceMetadata,
+    TerminalRemoteKey, TerminalRemoteOutputSource, TerminalRemoteOutputState,
+    TerminalRemoteSnapshot, TerminalRemoteUpdate, TerminalRuntimeEvent, TerminalRuntimeEventKind,
+    TerminalRuntimeEventSink, TerminalSurfaceKind, TerminalWorkspaceMetadata,
     agent_input_bytes_from_events_with_kitty_protocol, classify_terminal_output_path_click,
     terminal_agent_input_submit_bytes,
 };

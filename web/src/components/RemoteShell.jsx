@@ -47,6 +47,7 @@ export default defineComponent({
     const workspaces = ref([]);
     const spotlightMode = ref(false);
     const spotlightRankMode = ref(false);
+    const keyMenuOpen = ref(false);
     const expandedTreeNodes = ref(new Set());
     const tabs = ref([]);
     const activeTabId = ref(null);
@@ -1479,28 +1480,26 @@ export default defineComponent({
     }
 
     /**
-     * Sends an interrupt request to the selected agent.
+     * Toggles the compact terminal key menu beside the composer.
      */
-    async function interruptAgent() {
+    function toggleKeyMenu() {
+      keyMenuOpen.value = !keyMenuOpen.value;
+    }
+
+    /**
+     * Sends one whitelisted terminal key through the active output socket.
+     */
+    function sendAgentKey(key) {
       const tab = activeTab();
-      const binding = tab?.binding ?? null;
-      if (!binding) {
+      keyMenuOpen.value = false;
+      if (!tab || tab.socket?.readyState !== WebSocket.OPEN) {
+        if (tab) {
+          tab.error = "Agent terminal is not connected.";
+          refreshTabs();
+        }
         return;
       }
-
-      try {
-        const response = await fetch("/api/agent/esc", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(agentRequestBody(binding)),
-        });
-        if (!response.ok) {
-          throw new Error(`esc api failed: ${response.status}`);
-        }
-      } catch (error) {
-        tab.error = error instanceof Error ? error.message : String(error);
-        refreshTabs();
-      }
+      tab.socket.send(JSON.stringify({ type: "key", key }));
     }
 
     /**
@@ -1882,6 +1881,7 @@ export default defineComponent({
      * Activates one open browser tab without opening duplicate sockets.
      */
     function activateAgentTab(tabId) {
+      keyMenuOpen.value = false;
       handleTerminalScroll();
       cancelTerminalScroll();
       cancelInteractiveTerminalScroll(activeTab());
@@ -1905,6 +1905,7 @@ export default defineComponent({
      * Closes one browser tab and selects a neighboring tab when needed.
      */
     function closeAgentTab(tab, event) {
+      keyMenuOpen.value = false;
       event?.stopPropagation();
       const index = tabs.value.findIndex((candidate) => candidate.id === tab.id);
       if (index < 0) {
@@ -2259,14 +2260,40 @@ export default defineComponent({
         </main>
 
         <footer class="remote-shell__composer">
-          <Button
-            class="remote-shell__action-button"
-            aria-label="Interrupt agent"
-            disabled={!binding}
-            onClick={interruptAgent}
-          >
-            ESC
-          </Button>
+          <div class="remote-shell__key-control">
+            <Button
+              class="remote-shell__action-button"
+              aria-label="Terminal keys"
+              aria-expanded={keyMenuOpen.value}
+              disabled={!binding}
+              onClick={toggleKeyMenu}
+            >
+              ESC
+            </Button>
+            {keyMenuOpen.value ? (
+              <div class="remote-shell__key-menu" role="menu" aria-label="Terminal keys">
+                {[
+                  ["up", "↑", "Up"],
+                  ["down", "↓", "Down"],
+                  ["left", "←", "Left"],
+                  ["right", "→", "Right"],
+                  ["enter", "Enter", "Enter"],
+                  ["esc", "Esc", "Escape"],
+                ].map(([key, label, ariaLabel]) => (
+                  <button
+                    class="remote-shell__key-menu-button"
+                    type="button"
+                    role="menuitem"
+                    aria-label={ariaLabel}
+                    key={key}
+                    onClick={() => sendAgentKey(key)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
           <Button
             class="remote-shell__action-button"
             aria-label="Select image"
