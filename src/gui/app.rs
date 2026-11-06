@@ -3022,7 +3022,7 @@ impl GsdvGuiApp {
         if self.spotlight_mode {
             let mut exit_requested = false;
             SidePanel::left("spotlight_agent_sidebar")
-                .exact_width(244.0)
+                .exact_width(app_spotlight::SPOTLIGHT_SIDEBAR_WIDTH)
                 .frame(
                     Frame::new()
                         .fill(Color32::from_rgb(0x11, 0x18, 0x21))

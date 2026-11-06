@@ -5,8 +5,8 @@
 
 use super::*;
 
-const SPOTLIGHT_SIDEBAR_WIDTH: f32 = 244.0;
-const SPOTLIGHT_ROW_HEIGHT: f32 = 54.0;
+pub(super) const SPOTLIGHT_SIDEBAR_WIDTH: f32 = 220.0;
+const SPOTLIGHT_ROW_HEIGHT: f32 = 42.0;
 
 impl GsdvGuiApp {
     /// Returns the stable id for one workspace Agent slot.
@@ -340,33 +340,23 @@ impl GsdvGuiApp {
     pub(super) fn spotlight_sidebar(&mut self, ui: &mut Ui) -> bool {
         let mut exit_requested = false;
         ui.set_min_width(SPOTLIGHT_SIDEBAR_WIDTH);
-        ui.add_space(8.0);
-        let back = ui.add_sized(
-            [ui.available_width(), 36.0],
-            Button::new(
-                RichText::new(format!(
-                    "←  {}",
-                    i18n::text(self.app_language, "Exit spotlight mode")
-                ))
-                .color(theme::text()),
-            )
-            .fill(Color32::TRANSPARENT)
-            .stroke(Stroke::NONE),
-        );
-        if back.clicked() {
-            exit_requested = true;
-        }
-        let mut rank_mode = self.spotlight_rank_mode;
-        if ui
-            .checkbox(
-                &mut rank_mode,
-                i18n::text(self.app_language, "Spotlight rank mode"),
-            )
-            .changed()
-        {
-            self.set_spotlight_rank_mode(rank_mode);
-        }
-        ui.add_space(8.0);
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            if spotlight_back_button(ui, self.app_language).clicked() {
+                exit_requested = true;
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.add_space(8.0);
+                if spotlight_rank_checkbox(ui, self.spotlight_rank_mode, self.app_language)
+                    .clicked()
+                {
+                    self.set_spotlight_rank_mode(!self.spotlight_rank_mode);
+                }
+            });
+        });
+        ui.add_space(6.0);
+        ui.separator();
 
         let entries = self.spotlight_agents();
         let active_slot = self.active_agent_slot();
@@ -520,6 +510,98 @@ fn spotlight_activity_is_stopped(activity: WorkspaceActivity) -> bool {
     matches!(activity, WorkspaceActivity::Idle | WorkspaceActivity::Error)
 }
 
+/// Draws the icon-only spotlight exit control.
+///
+/// Example: click the left arrow -> exit spotlight mode.
+fn spotlight_back_button(ui: &mut Ui, language: AppLanguage) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
+    let fill = if response.hovered() {
+        Color32::from_rgb(0x1D, 0x2A, 0x38)
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter().rect_filled(rect, CornerRadius::same(4), fill);
+    let center = rect.center();
+    let color = theme::text();
+    ui.painter().line_segment(
+        [
+            egui::pos2(center.x - 6.0, center.y),
+            egui::pos2(center.x + 6.0, center.y),
+        ],
+        Stroke::new(1.5_f32, color),
+    );
+    ui.painter().line_segment(
+        [
+            egui::pos2(center.x - 6.0, center.y),
+            egui::pos2(center.x - 1.0, center.y - 5.0),
+        ],
+        Stroke::new(1.5_f32, color),
+    );
+    ui.painter().line_segment(
+        [
+            egui::pos2(center.x - 6.0, center.y),
+            egui::pos2(center.x - 1.0, center.y + 5.0),
+        ],
+        Stroke::new(1.5_f32, color),
+    );
+    response
+        .on_hover_text(i18n::text(language, "Exit spotlight mode"))
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Draws the icon-only rank-mode checkbox.
+///
+/// Example: unchecked square -> click -> checked rank mode.
+fn spotlight_rank_checkbox(ui: &mut Ui, checked: bool, language: AppLanguage) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
+    let box_rect = Rect::from_center_size(rect.center(), Vec2::splat(15.0));
+    let border = if checked {
+        Color32::from_rgb(0x60, 0xA5, 0xFA)
+    } else {
+        Color32::from_rgb(0x58, 0x6C, 0x84)
+    };
+    ui.painter().rect(
+        box_rect,
+        CornerRadius::same(3),
+        if checked {
+            border
+        } else {
+            Color32::TRANSPARENT
+        },
+        Stroke::new(1.2_f32, border),
+        egui::StrokeKind::Inside,
+    );
+    if checked {
+        let center = box_rect.center();
+        ui.painter().line_segment(
+            [
+                egui::pos2(center.x - 4.0, center.y),
+                egui::pos2(center.x - 1.0, center.y + 3.0),
+            ],
+            Stroke::new(1.5_f32, Color32::WHITE),
+        );
+        ui.painter().line_segment(
+            [
+                egui::pos2(center.x - 1.0, center.y + 3.0),
+                egui::pos2(center.x + 5.0, center.y - 4.0),
+            ],
+            Stroke::new(1.5_f32, Color32::WHITE),
+        );
+    }
+    response
+        .on_hover_text(i18n::text(language, "Spotlight rank mode"))
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Returns the final workspace path segment for compact spotlight rows.
+///
+/// Example: `tmp/project` -> `project`.
+fn spotlight_workspace_leaf(name: &str) -> &str {
+    name.rsplit(['/', '\\'])
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(name)
+}
+
 /// Draws one compact dark Agent selector row.
 ///
 /// Example: selected Idle Agent -> blue edge, yellow star, green dot.
@@ -549,25 +631,23 @@ fn spotlight_agent_row(
         );
     }
     ui.painter().text(
-        egui::pos2(rect.left() + 12.0, rect.center().y - 1.0),
+        egui::pos2(rect.left() + 12.0, rect.center().y),
         Align2::LEFT_CENTER,
         "★",
         egui::FontId::proportional(16.0),
         Color32::from_rgb(0xF5, 0xB8, 0x00),
     );
-    ui.painter().text(
-        egui::pos2(rect.left() + 36.0, rect.top() + 17.0),
-        Align2::LEFT_CENTER,
-        truncate_middle(&entry.title, 22),
-        egui::FontId::proportional(13.0),
-        theme::text(),
+    let label = format!(
+        "{} · {}",
+        entry.title,
+        spotlight_workspace_leaf(&entry.workspace_name)
     );
     ui.painter().text(
-        egui::pos2(rect.left() + 36.0, rect.top() + 37.0),
+        egui::pos2(rect.left() + 36.0, rect.center().y),
         Align2::LEFT_CENTER,
-        truncate_middle(&entry.workspace_name, 24),
-        egui::FontId::proportional(11.0),
-        theme::muted(),
+        truncate_middle(&label, 24),
+        egui::FontId::proportional(13.0),
+        theme::text(),
     );
     let (status_color, _) = activity_style(entry.activity);
     paint_activity_dot(
@@ -578,5 +658,7 @@ fn spotlight_agent_row(
         true,
         repaint_controller,
     );
-    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    response
+        .on_hover_text(format!("{}\n{}", entry.title, entry.workspace_name))
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
