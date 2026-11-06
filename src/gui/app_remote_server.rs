@@ -91,6 +91,8 @@ enum RemoteApiRequest {
     AgentResize(RemoteAgentResize),
     /// 将 Web 交互式终端滚轮交给目标 agent。
     AgentScroll(RemoteAgentScroll),
+    /// Sends one whitelisted key from the owning Web terminal session.
+    AgentKey(RemoteAgentKey),
 }
 
 /// remote API 调用处理结果。
@@ -182,6 +184,17 @@ struct RemoteAgentScroll {
     col: Option<u16>,
     /// 浏览器指针所在的一基 terminal 行；旧客户端可省略。
     row: Option<u16>,
+}
+
+/// One whitelisted key bound to an active remote terminal session.
+#[derive(Debug, Clone)]
+struct RemoteAgentKey {
+    /// Agent operation target.
+    target: RemoteAgentTarget,
+    /// Owning output WebSocket session id.
+    session_id: u64,
+    /// Validated key to write to the PTY.
+    key: TerminalRemoteKey,
 }
 
 /// Spotlight rank-mode mutation requested by the Web client.
@@ -284,6 +297,8 @@ struct RemoteAgentOutputClientMessage {
     col: Option<u16>,
     /// scroll 消息携带的一基 terminal 行。
     row: Option<u16>,
+    /// key 消息携带的白名单按键名。
+    key: Option<String>,
 }
 
 /// HTTP JSON 图片输入请求。
@@ -482,6 +497,7 @@ impl GsdvGuiApp {
             }
             RemoteApiRequest::AgentResize(input) => self.handle_remote_agent_resize(ctx, input),
             RemoteApiRequest::AgentScroll(input) => self.handle_remote_agent_scroll(input),
+            RemoteApiRequest::AgentKey(input) => self.handle_remote_agent_key(input),
         }
     }
 
@@ -630,6 +646,20 @@ impl GsdvGuiApp {
             return RemoteApiResult::Err(remote_not_found());
         };
         host.scroll_remote(input.session_id, input.lines, input.col.zip(input.row));
+        RemoteApiResult::Ok(RemoteApiPayload::AgentOk)
+    }
+
+    /// Handles one key from the currently owning Web terminal session.
+    ///
+    /// Example: `up` -> current Agent PTY receives CSI A.
+    fn handle_remote_agent_key(&mut self, input: RemoteAgentKey) -> RemoteApiResult {
+        let Some((workspace_index, slot_id)) = self.remote_agent_slot(&input.target) else {
+            return RemoteApiResult::Err(remote_not_found());
+        };
+        let Some(host) = self.remote_agent_host_mut(workspace_index, &slot_id) else {
+            return RemoteApiResult::Err(remote_not_found());
+        };
+        host.send_remote_key(input.session_id, input.key);
         RemoteApiResult::Ok(RemoteApiPayload::AgentOk)
     }
 
@@ -1100,6 +1130,33 @@ fn dispatch_remote_agent_scroll(
     }
 }
 
+/// Queues one validated Web key without blocking terminal output delivery.
+///
+/// Example: `Enter` -> AppEvent handles the active terminal keyboard protocol.
+fn dispatch_remote_agent_key(
+    state: &RemoteApiState,
+    target: RemoteAgentTarget,
+    session_id: u64,
+    key: TerminalRemoteKey,
+) {
+    let (reply, _response) = oneshot::channel();
+    let envelope = RemoteApiEnvelope {
+        request: RemoteApiRequest::AgentKey(RemoteAgentKey {
+            target,
+            session_id,
+            key,
+        }),
+        reply,
+    };
+    if state
+        .event_tx
+        .send(AppEvent::RemoteApiRequest(envelope))
+        .is_ok()
+    {
+        state.repaint_controller.request_repaint(&state.repaint_ctx);
+    }
+}
+
 /// Extracts a JSON payload or returns the stable remote error shape.
 fn json_payload<T>(payload: Result<Json<T>, JsonRejection>) -> Result<T, axum::response::Response> {
     payload.map(|Json(value)| value).map_err(|error| {
@@ -1214,6 +1271,15 @@ async fn run_remote_agent_output_socket(
                         subscription.session_id,
                         lines,
                         pointer_cell,
+                    );
+                    continue;
+                }
+                if let Some(key) = remote_agent_output_key_message(&message) {
+                    dispatch_remote_agent_key(
+                        &state,
+                        target.clone(),
+                        subscription.session_id,
+                        key,
                     );
                     continue;
                 }
@@ -1388,6 +1454,28 @@ fn remote_agent_output_scroll_message(message: &Message) -> Option<(i32, Option<
         _ => return None,
     };
     Some((lines, pointer_cell))
+}
+
+/// Parses the six terminal keys accepted from the Web composer.
+///
+/// Example: `{"type":"key","key":"left"}` -> `Some(Left)`.
+fn remote_agent_output_key_message(message: &Message) -> Option<TerminalRemoteKey> {
+    let Message::Text(text) = message else {
+        return None;
+    };
+    let message = serde_json::from_str::<RemoteAgentOutputClientMessage>(text.as_str()).ok()?;
+    if message.message_type != "key" {
+        return None;
+    }
+    match message.key?.as_str() {
+        "up" => Some(TerminalRemoteKey::Up),
+        "down" => Some(TerminalRemoteKey::Down),
+        "left" => Some(TerminalRemoteKey::Left),
+        "right" => Some(TerminalRemoteKey::Right),
+        "enter" => Some(TerminalRemoteKey::Enter),
+        "esc" => Some(TerminalRemoteKey::Escape),
+        _ => None,
+    }
 }
 
 /// Converts a remote API error into an HTTP response.

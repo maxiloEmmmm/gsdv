@@ -172,6 +172,45 @@ evaluate '(async()=>{
 })()'
 
 evaluate '(async()=>{for(let i=0;i<100&&!document.querySelector(".remote-shell__terminal-output--interactive");i++)await new Promise(r=>setTimeout(r,20));if(!document.querySelector(".remote-shell__terminal-output--interactive"))throw new Error("interactive terminal snapshot did not arrive")})()'
+evaluate '(async()=>{
+  const trigger=document.querySelector("[aria-label=\"Terminal keys\"]");
+  if(!trigger) throw new Error("terminal key trigger missing");
+  const expected=[
+    ["Up","↑","up"],
+    ["Down","↓","down"],
+    ["Left","←","left"],
+    ["Right","→","right"],
+    ["Enter","Enter","enter"],
+    ["Escape","Esc","esc"]
+  ];
+  for(const [ariaLabel,label,key] of expected) {
+    trigger.click();
+    await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+    const menu=document.querySelector(".remote-shell__key-menu");
+    if(!menu) throw new Error(`terminal key menu did not open for ${key}`);
+    const buttons=[...menu.querySelectorAll(".remote-shell__key-menu-button")];
+    if(buttons.length!==6) throw new Error(`expected 6 terminal keys, got ${buttons.length}`);
+    if(buttons.map(button=>button.textContent.trim()).join("|")!==expected.map(item=>item[1]).join("|")) {
+      throw new Error("terminal key order changed");
+    }
+    const menuRect=menu.getBoundingClientRect();
+    const inputRect=document.querySelector(".remote-shell__input").getBoundingClientRect();
+    if(menuRect.left<0||menuRect.right>innerWidth||menuRect.top<0||menuRect.bottom>inputRect.top) {
+      throw new Error(`terminal key menu overflowed mobile viewport: ${JSON.stringify(menuRect.toJSON())}`);
+    }
+    const button=menu.querySelector(`[aria-label="${ariaLabel}"]`);
+    if(!button) throw new Error(`terminal key ${ariaLabel} missing`);
+    button.click();
+    await new Promise(r=>requestAnimationFrame(r));
+    if(document.querySelector(".remote-shell__key-menu")) throw new Error(`terminal key menu stayed open after ${key}`);
+  }
+  const sent=spotlightFixture.agentMessages.filter(message=>message.type==="key");
+  const actual=sent.map(message=>message.key).join("|");
+  const wanted=expected.map(item=>item[2]).join("|");
+  if(actual!==wanted) throw new Error(`terminal key messages ${actual}, expected ${wanted}`);
+  trigger.click();
+  await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+})()'
 evaluate '(()=>{const rect=document.querySelector(".remote-shell__terminal-output").getBoundingClientRect();return {x:Math.floor(rect.left+rect.width/2),top:Math.floor(rect.top+rect.height*0.7),bottom:Math.floor(rect.top+rect.height*0.3)}})()'
 touch_x="$(jq -er '.result.result.value.x' <<<"$cdp_response")"
 touch_top="$(jq -er '.result.result.value.top' <<<"$cdp_response")"
@@ -217,8 +256,9 @@ evaluate '(async()=>{
 })()'
 
 if [ -n "$screenshot_path" ]; then
+  evaluate '(()=>{if(!document.querySelector(".remote-shell__key-menu"))document.querySelector("[aria-label=\"Terminal keys\"]").click()})()'
   cdp Page.captureScreenshot '{"format":"png","fromSurface":true}'
   jq -er '.result.data' <<<"$cdp_response" | base64 --decode >"$screenshot_path"
 fi
 
-printf 'PASS: Web spotlight levels, rank following, reconnect, and mobile touch scrolling\n'
+printf 'PASS: Web spotlight levels, terminal keys, rank following, reconnect, and mobile touch scrolling\n'

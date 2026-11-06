@@ -266,6 +266,7 @@ textarea {
 }
 
 .remote-shell__composer {
+  position: relative;
   display: flex;
   align-items: flex-end;
   gap: 8px;
@@ -313,6 +314,48 @@ textarea {
 .remote-shell__action-button {
   font-size: 12px;
   font-weight: 650;
+}
+
+.remote-shell__key-control {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.remote-shell__key-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 20;
+  display: grid;
+  grid-template-columns: repeat(3, 42px);
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid #293646;
+  border-radius: 6px;
+  background: #111821;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 28%);
+}
+
+.remote-shell__key-menu-button {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid #354a65;
+  border-radius: 4px;
+  background: #17212c;
+  color: #e6edf3;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.remote-shell__key-menu-button:hover,
+.remote-shell__key-menu-button:focus-visible {
+  border-color: #60a5fa;
+  background: #172c4a;
+  outline: none;
 }
 
 .remote-shell__image-input {

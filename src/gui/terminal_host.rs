@@ -351,6 +351,23 @@ pub struct TerminalRemoteSessionControl {
     pub disconnect_rx: watch::Receiver<bool>,
 }
 
+/// Whitelisted terminal keys accepted from the remote Web composer.
+#[derive(Debug, Clone, Copy)]
+pub enum TerminalRemoteKey {
+    /// Cursor up.
+    Up,
+    /// Cursor down.
+    Down,
+    /// Cursor left.
+    Left,
+    /// Cursor right.
+    Right,
+    /// Submit or confirm using the terminal's active keyboard protocol.
+    Enter,
+    /// Escape from the current terminal interaction.
+    Escape,
+}
+
 /// Agent terminal 当前被 remote WebSocket 占用的状态。
 struct TerminalRemoteSession {
     /// 本次 remote 连接的递增 id。
@@ -1432,6 +1449,27 @@ impl GuiTerminalHost {
         // 请求排队期间可能退出 TUI 或被桌面抢占。
         // backend 会重新读取 mode，按鼠标报告或 alternate scroll 编码。
         self.backend.scroll_remote(delta, pointer_cell);
+    }
+
+    /// Sends one whitelisted key from the currently owning Web session.
+    ///
+    /// Example: current session + `Up` -> terminal receives CSI A.
+    pub fn send_remote_key(&mut self, session_id: u64, key: TerminalRemoteKey) {
+        if !self
+            .remote_session
+            .as_ref()
+            .is_some_and(|session| session.session_id == session_id)
+        {
+            return;
+        }
+        match key {
+            TerminalRemoteKey::Up => self.write_bytes(b"\x1b[A"),
+            TerminalRemoteKey::Down => self.write_bytes(b"\x1b[B"),
+            TerminalRemoteKey::Left => self.write_bytes(b"\x1b[D"),
+            TerminalRemoteKey::Right => self.write_bytes(b"\x1b[C"),
+            TerminalRemoteKey::Enter => self.submit_current_input(),
+            TerminalRemoteKey::Escape => self.write_bytes(b"\x1b"),
+        }
     }
 
     pub fn take_abnormal_agent_exit(&mut self) -> Option<AgentProcessExit> {
