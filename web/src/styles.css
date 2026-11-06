@@ -321,7 +321,7 @@ textarea {
 
 .remote-shell--spotlight {
   display: grid;
-  grid-template-columns: 244px minmax(0, 1fr);
+  grid-template-columns: 220px minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr) auto;
   grid-template-areas:
     "spotlight terminal"
@@ -338,36 +338,41 @@ textarea {
   background: #111821;
 }
 
-.remote-shell__spotlight-exit {
+.remote-shell__spotlight-toolbar {
   display: flex;
   align-items: center;
-  gap: 10px;
+  justify-content: space-between;
   width: 100%;
-  height: 44px;
-  padding: 0 14px;
-  border: 0;
+  height: 40px;
+  padding: 0 8px;
   border-bottom: 1px solid #293646;
+}
+
+.remote-shell__spotlight-exit,
+.remote-shell__spotlight-rank-mode {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
   background: transparent;
-  color: #e6edf3;
-  font-size: 13px;
-  text-align: left;
   cursor: pointer;
 }
 
-.remote-shell__spotlight-exit:hover {
+.remote-shell__spotlight-exit:hover,
+.remote-shell__spotlight-rank-mode:hover {
   background: #1d2a38;
 }
 
-.remote-shell__spotlight-rank-mode {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 40px;
-  padding: 0 14px;
-  border-bottom: 1px solid #293646;
-  color: #d3dae1;
-  font-size: 12px;
-  cursor: pointer;
+.remote-shell__spotlight-exit span {
+  width: 11px;
+  height: 11px;
+  border-bottom: 1.5px solid #d3dae1;
+  border-left: 1.5px solid #d3dae1;
+  transform: rotate(45deg);
 }
 
 .remote-shell__spotlight-rank-mode input {
@@ -375,11 +380,12 @@ textarea {
   height: 15px;
   margin: 0;
   accent-color: #60a5fa;
+  cursor: pointer;
 }
 
 .remote-shell__spotlight-list {
-  height: calc(100% - 84px);
-  padding: 8px 0;
+  height: calc(100% - 40px);
+  padding: 6px 0;
   overflow: auto;
 }
 
@@ -390,8 +396,8 @@ textarea {
   align-items: center;
   gap: 8px;
   width: 100%;
-  min-height: 54px;
-  padding: 7px 12px;
+  min-height: 42px;
+  padding: 6px 10px;
   border: 0;
   background: transparent;
   color: #e6edf3;
@@ -424,9 +430,10 @@ textarea {
 }
 
 .remote-shell__spotlight-copy {
-  display: grid;
+  display: flex;
+  align-items: baseline;
   min-width: 0;
-  gap: 2px;
+  gap: 5px;
 }
 
 .remote-shell__spotlight-title,
@@ -443,7 +450,12 @@ textarea {
 
 .remote-shell__spotlight-workspace {
   color: #91a4b7;
-  font-size: 11px;
+  font-size: 12px;
+}
+
+.remote-shell__spotlight-separator {
+  color: #586c84;
+  font-size: 12px;
 }
 
 .remote-shell__spotlight-status {
@@ -584,12 +596,17 @@ textarea {
   }
 
   .remote-shell--spotlight {
-    grid-template-columns: minmax(144px, 42vw) minmax(0, 1fr);
+    grid-template-columns: minmax(132px, 40vw) minmax(0, 1fr);
   }
 
   .remote-shell__spotlight-agent {
     grid-template-columns: 16px minmax(0, 1fr) 8px;
     gap: 6px;
     padding-inline: 8px;
+  }
+
+  .remote-shell__spotlight-separator,
+  .remote-shell__spotlight-workspace {
+    display: none;
   }
 }

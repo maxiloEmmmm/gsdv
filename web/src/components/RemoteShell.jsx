@@ -377,6 +377,16 @@ export default defineComponent({
     }
 
     /**
+     * Returns the final workspace path segment for compact spotlight tabs.
+     */
+    function spotlightWorkspaceLeaf(name) {
+      const segments = String(name ?? "")
+        .split(/[\\/]/)
+        .filter(Boolean);
+      return segments.at(-1) ?? "";
+    }
+
+    /**
      * Refreshes metadata references held by already-open terminal tabs.
      */
     function refreshOpenTabBindings() {
@@ -2116,22 +2126,28 @@ export default defineComponent({
       >
         {spotlightMode.value ? (
           <aside class="remote-shell__spotlight-sidebar">
-            <button
-              class="remote-shell__spotlight-exit"
-              type="button"
-              onClick={exitSpotlightMode}
-            >
-              <span aria-hidden="true">←</span>
-              <span>退出专注模式</span>
-            </button>
-            <label class="remote-shell__spotlight-rank-mode">
-              <input
-                type="checkbox"
-                checked={spotlightRankMode.value}
-                onChange={updateSpotlightRankMode}
-              />
-              <span>等级模式</span>
-            </label>
+            <div class="remote-shell__spotlight-toolbar">
+              <button
+                class="remote-shell__spotlight-exit"
+                type="button"
+                aria-label="退出专注模式"
+                title="退出专注模式"
+                onClick={exitSpotlightMode}
+              >
+                <span aria-hidden="true" />
+              </button>
+              <label
+                class="remote-shell__spotlight-rank-mode"
+                title="等级模式"
+              >
+                <input
+                  type="checkbox"
+                  aria-label="等级模式"
+                  checked={spotlightRankMode.value}
+                  onChange={updateSpotlightRankMode}
+                />
+              </label>
+            </div>
             <nav class="remote-shell__spotlight-list" aria-label="Spotlight agents">
               {spotlightAgentBindings().map((item) => (
                 <button
@@ -2142,6 +2158,7 @@ export default defineComponent({
                   }}
                   type="button"
                   key={`${item.workspace.workspace_id}:${item.agent.agent_id}`}
+                  title={`${item.agent.title}\n${item.workspace.name}`}
                   onClick={() =>
                     selectAgent(item.workspace, item.row, item.col, item.agent)
                   }
@@ -2149,8 +2166,9 @@ export default defineComponent({
                   <span class="remote-shell__spotlight-star" aria-hidden="true">★</span>
                   <span class="remote-shell__spotlight-copy">
                     <span class="remote-shell__spotlight-title">{item.agent.title}</span>
+                    <span class="remote-shell__spotlight-separator" aria-hidden="true">·</span>
                     <span class="remote-shell__spotlight-workspace">
-                      {item.workspace.name}
+                      {spotlightWorkspaceLeaf(item.workspace.name)}
                     </span>
                   </span>
                   <span

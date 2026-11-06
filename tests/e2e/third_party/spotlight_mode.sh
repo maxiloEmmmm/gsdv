@@ -96,9 +96,9 @@ jq -n \
       trap '\''exit 143'\'' TERM
       while kill -0 "$child" 2>/dev/null; do
         if [ -f "$E2E_CONTEXT_MENU_REQUEST" ]; then
-          xdotool mousemove 100 115 click 3 2>/dev/null || true
+          xdotool mousemove 100 68 click 3 2>/dev/null || true
           sleep 0.2
-          xdotool mousemove 180 84 2>/dev/null || true
+          xdotool mousemove 180 128 2>/dev/null || true
           printf '\''spotlight\n'\'' >"$E2E_SCREENSHOT_REQUEST"
           rm -f "$E2E_CONTEXT_MENU_REQUEST"
           sleep 1
@@ -204,6 +204,9 @@ screenshot="$(cat "$latest")"
 [ -s "$screenshot" ]
 identify -format '%w %h' "$screenshot" | awk '{exit !($1 >= 640 && $2 >= 480)}'
 magick "$screenshot" -crop 244x720+0+0 txt:- | rg '#F5B800|#F5B84B' >/dev/null
+if [ -n "$visual_copy" ]; then
+  cp "$screenshot" "${visual_copy%.png}-base.png"
+fi
 
 previous_screenshot="$screenshot"
 touch "$context_menu_request"

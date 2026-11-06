@@ -176,14 +176,18 @@ evaluate '(()=>{const rect=document.querySelector(".remote-shell__terminal-outpu
 touch_x="$(jq -er '.result.result.value.x' <<<"$cdp_response")"
 touch_top="$(jq -er '.result.result.value.top' <<<"$cdp_response")"
 touch_bottom="$(jq -er '.result.result.value.bottom' <<<"$cdp_response")"
-cdp Input.dispatchTouchEvent "$(jq -cn --argjson x "$touch_x" --argjson y "$touch_top" '{type:"touchStart",touchPoints:[{x:$x,y:$y}]}')"
-cdp Input.dispatchTouchEvent "$(jq -cn --argjson x "$touch_x" --argjson y "$touch_bottom" '{type:"touchMove",touchPoints:[{x:$x,y:$y}]}')"
-evaluate '(async()=>{await new Promise(requestAnimationFrame);if(!spotlightFixture.agentMessages.some(message=>message.type==="scroll"&&message.lines<0))throw new Error("mobile swipe up did not scroll before touchend")})()'
+touch_middle="$(((touch_top + touch_bottom) / 2))"
+evaluate '(async()=>{await new Promise(r=>setTimeout(r,50))})()'
+cdp Input.dispatchTouchEvent "$(jq -cn --argjson x "$touch_x" --argjson y "$touch_top" '{type:"touchStart",touchPoints:[{id:1,x:$x,y:$y}]}')"
+cdp Input.dispatchTouchEvent "$(jq -cn --argjson x "$touch_x" --argjson y "$touch_middle" '{type:"touchMove",touchPoints:[{id:1,x:$x,y:$y}]}')"
+cdp Input.dispatchTouchEvent "$(jq -cn --argjson x "$touch_x" --argjson y "$touch_bottom" '{type:"touchMove",touchPoints:[{id:1,x:$x,y:$y}]}')"
+evaluate '(async()=>{await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));if(!spotlightFixture.agentMessages.some(message=>message.type==="scroll"&&message.lines<0))throw new Error("mobile swipe up did not scroll before touchend")})()'
 cdp Input.dispatchTouchEvent '{"type":"touchEnd","touchPoints":[]}'
 evaluate '(async()=>{await new Promise(r=>setTimeout(r,180))})()'
-cdp Input.dispatchTouchEvent "$(jq -cn --argjson x "$touch_x" --argjson y "$touch_bottom" '{type:"touchStart",touchPoints:[{x:$x,y:$y}]}')"
-cdp Input.dispatchTouchEvent "$(jq -cn --argjson x "$touch_x" --argjson y "$touch_top" '{type:"touchMove",touchPoints:[{x:$x,y:$y}]}')"
-evaluate '(async()=>{await new Promise(requestAnimationFrame);if(!spotlightFixture.agentMessages.some(message=>message.type==="scroll"&&message.lines>0))throw new Error("mobile swipe down did not scroll before touchend")})()'
+cdp Input.dispatchTouchEvent "$(jq -cn --argjson x "$touch_x" --argjson y "$touch_bottom" '{type:"touchStart",touchPoints:[{id:2,x:$x,y:$y}]}')"
+cdp Input.dispatchTouchEvent "$(jq -cn --argjson x "$touch_x" --argjson y "$touch_middle" '{type:"touchMove",touchPoints:[{id:2,x:$x,y:$y}]}')"
+cdp Input.dispatchTouchEvent "$(jq -cn --argjson x "$touch_x" --argjson y "$touch_top" '{type:"touchMove",touchPoints:[{id:2,x:$x,y:$y}]}')"
+evaluate '(async()=>{await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));if(!spotlightFixture.agentMessages.some(message=>message.type==="scroll"&&message.lines>0))throw new Error("mobile swipe down did not scroll before touchend")})()'
 cdp Input.dispatchTouchEvent '{"type":"touchEnd","touchPoints":[]}'
 evaluate '(async()=>{
   const checkbox=document.querySelector(".remote-shell__spotlight-rank-mode input");
