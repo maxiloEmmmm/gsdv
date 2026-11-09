@@ -330,6 +330,26 @@ impl GsdvGuiApp {
         if let Some(workspace) = self.workspaces.get_mut(workspace_index) {
             workspace.route = Route::Workspace;
             workspace.center_mode = CenterMode::Agent;
+            let column_slot = slot.to_column_slot();
+            let location = workspace
+                .agent_rows
+                .iter()
+                .enumerate()
+                .find_map(|(row_index, row)| {
+                    row.columns
+                        .iter()
+                        .position(|column| column.tabs.contains(&column_slot))
+                        .map(|column_index| (row_index, column_index))
+                });
+            if let Some((row_index, column_index)) = location {
+                // 专注模式绕过了普通网格点击，必须同步列内 tab 和焦点。
+                // 否则 active_agent_slot 会继续优先返回旧 agent_focus。
+                workspace.agent_rows[row_index].columns[column_index].active_slot = column_slot;
+                workspace.agent_focus = Some(data::AgentFocusViewData {
+                    row_index,
+                    column_index,
+                });
+            }
         }
         self.set_active_agent_slot(workspace_index, slot);
     }

@@ -15,6 +15,7 @@ store="$tmp_dir/store.json"
 app_log="$tmp_dir/gsdv.log"
 marker="$tmp_dir/socket-marker"
 context_menu_request="$tmp_dir/context-menu.request"
+switch_agent_request="$tmp_dir/switch-agent.request"
 app_pid=""
 test_status=0
 
@@ -57,7 +58,7 @@ jq -n \
   --argjson port "$remote_port" \
   '{
     active: 0,
-    spotlight_agent_ids: ["fixture-agent"],
+    spotlight_agents: {"fixture-agent": 2, "fixture-subagent": 2},
     runtime_settings: {
       remote_server_enabled: true,
       remote_server_host: "127.0.0.1",
@@ -70,6 +71,46 @@ jq -n \
     }]
   }' >"$store"
 
+hash_source="$tmp_dir/workspace-hash.rs"
+hash_binary="$tmp_dir/workspace-hash"
+cat >"$hash_source" <<'RS'
+use std::hash::{Hash, Hasher};
+
+fn main() {
+    let path = std::path::PathBuf::from(std::env::args_os().nth(1).unwrap());
+    let normalized = path.canonicalize().unwrap_or(path);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    normalized.to_string_lossy().hash(&mut hasher);
+    println!("{:x}", hasher.finish());
+}
+RS
+rustc "$hash_source" -o "$hash_binary"
+workspace_store="$tmp_dir/workspaces/$($hash_binary "$workspace")"
+mkdir -p "$workspace_store"
+cat >"$workspace_store/subagents.json" <<'JSON'
+{
+  "subagents": [{
+    "id": "fixture-sub",
+    "name": "secondary",
+    "agent_kind": "codex",
+    "agent_id": "fixture-subagent",
+    "session_id": null
+  }],
+  "rows": [{
+    "columns": [{
+      "id": "main",
+      "tabs": ["main", {"subagent": "fixture-sub"}],
+      "active_slot": "main",
+      "width_weight": 1.0,
+      "collapsed": false
+    }],
+    "height_weight": 1.0,
+    "collapsed": false
+  }],
+  "focus": {"row_index": 0, "column_index": 0}
+}
+JSON
+
 (
   cd "$workspace"
   export E2E_HOME="$test_home"
@@ -78,6 +119,7 @@ jq -n \
   export E2E_PATH="$test_home/bin:$PATH"
   export E2E_BINARY="$binary"
   export E2E_CONTEXT_MENU_REQUEST="$context_menu_request"
+  export E2E_SWITCH_AGENT_REQUEST="$switch_agent_request"
   export E2E_SCREENSHOT_REQUEST="$workspace/target/gsdv-screenshots/capture.request"
   exec env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET \
     WINIT_UNIX_BACKEND=x11 \
@@ -95,6 +137,14 @@ jq -n \
       trap '\''exit 130'\'' INT
       trap '\''exit 143'\'' TERM
       while kill -0 "$child" 2>/dev/null; do
+        if [ -f "$E2E_SWITCH_AGENT_REQUEST" ]; then
+          xdotool mousemove 100 110 click 1 2>/dev/null || true
+          sleep 0.2
+          printf '\''spotlight\n'\'' >"$E2E_SCREENSHOT_REQUEST"
+          rm -f "$E2E_SWITCH_AGENT_REQUEST"
+          sleep 1
+          continue
+        fi
         if [ -f "$E2E_CONTEXT_MENU_REQUEST" ]; then
           xdotool mousemove 100 68 click 3 2>/dev/null || true
           sleep 0.2
@@ -169,6 +219,25 @@ wait_activity error
 send_hook '{"hook_event_name":"Stop","session_id":"fixture-session"}'
 wait_activity idle
 
+printf 'spotlight\n' >"$workspace/target/gsdv-screenshots/capture.request"
+latest="$workspace/target/gsdv-screenshots/latest.txt"
+for _ in $(seq 1 120); do
+  [ -s "$latest" ] && break
+  sleep 0.05
+done
+previous_screenshot="$(cat "$latest")"
+[ -s "$previous_screenshot" ]
+touch "$switch_agent_request"
+for _ in $(seq 1 120); do
+  screenshot="$(cat "$latest")"
+  [ "$screenshot" != "$previous_screenshot" ] && break
+  sleep 0.05
+done
+[ "$screenshot" != "$previous_screenshot" ]
+[ -s "$screenshot" ]
+selected_pixels="$(magick "$screenshot" -crop 220x36+0+92 txt:- | rg -c '#172C4A')"
+[ "$selected_pixels" -gt 2000 ]
+
 curl --fail --silent \
   -H 'content-type: application/json' \
   -d '{"enabled":true}' \
@@ -195,12 +264,12 @@ jq -e '.hooks.PreModelRequest and .hooks.PostModelRequest' \
   "$test_home/.codex/hooks.json" >/dev/null
 
 printf 'spotlight\n' >"$workspace/target/gsdv-screenshots/capture.request"
-latest="$workspace/target/gsdv-screenshots/latest.txt"
 for _ in $(seq 1 120); do
-  [ -s "$latest" ] && break
+  next_screenshot="$(cat "$latest")"
+  [ "$next_screenshot" != "$screenshot" ] && break
   sleep 0.05
 done
-screenshot="$(cat "$latest")"
+screenshot="$next_screenshot"
 [ -s "$screenshot" ]
 identify -format '%w %h' "$screenshot" | awk '{exit !($1 >= 640 && $2 >= 480)}'
 magick "$screenshot" -crop 244x720+0+0 txt:- | rg '#F5B800|#F5B84B' >/dev/null
@@ -221,4 +290,4 @@ if [ -n "$visual_copy" ]; then
   cp "$screenshot" "$visual_copy"
 fi
 
-printf 'PASS: offscreen spotlight levels, rank persistence, context menu, and hooks\n'
+printf 'PASS: offscreen spotlight selection, levels, rank persistence, context menu, and hooks\n'
