@@ -174,7 +174,7 @@ curl --fail --silent "http://127.0.0.1:$remote_port/api/workspace" >/dev/null
 
 hook_endpoint=""
 for _ in $(seq 1 100); do
-  for candidate in /tmp/gsdv-hook-*.sock; do
+  for candidate in /tmp/gsdv/*.sock; do
     if [ -S "$candidate" ] && [ "$candidate" -nt "$marker" ]; then
       hook_endpoint="$candidate"
       break
