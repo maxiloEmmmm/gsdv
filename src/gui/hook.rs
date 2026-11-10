@@ -289,7 +289,15 @@ fn write_hook_frame(endpoint: &str, frame: &[u8]) -> Result<()> {
 
 #[cfg(unix)]
 fn app_hook_socket_path() -> PathBuf {
-    std::env::temp_dir().join(format!("gsdv-hook-{}.sock", std::process::id()))
+    app_hook_socket_dir().join(format!("{}.sock", std::process::id()))
+}
+
+/// Returns the shared temporary directory containing per-process hook sockets.
+///
+/// Example: Linux temporary directory `/tmp` -> `/tmp/gsdv`.
+#[cfg(unix)]
+pub(crate) fn app_hook_socket_dir() -> PathBuf {
+    std::env::temp_dir().join("gsdv")
 }
 
 /// 用单引号包裹 shell 参数。

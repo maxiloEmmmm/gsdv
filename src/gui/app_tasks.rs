@@ -1557,6 +1557,8 @@ async fn run_external_hook_server(tx: Sender<AppEvent>) -> anyhow::Result<()> {
         use tokio::io::AsyncReadExt;
         use tokio::net::UnixListener;
 
+        let socket_dir = hook::app_hook_socket_dir();
+        std::fs::create_dir_all(&socket_dir)?;
         let endpoint = hook::app_hook_endpoint();
         let _ = std::fs::remove_file(&endpoint);
         let listener = UnixListener::bind(&endpoint)?;
