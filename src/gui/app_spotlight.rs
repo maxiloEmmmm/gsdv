@@ -6,6 +6,7 @@
 use super::*;
 
 pub(super) const SPOTLIGHT_SIDEBAR_WIDTH: f32 = 220.0;
+pub(super) const SPOTLIGHT_COLLAPSED_SIDEBAR_WIDTH: f32 = 44.0;
 const SPOTLIGHT_ROW_HEIGHT: f32 = 42.0;
 
 impl GsdvGuiApp {
@@ -292,8 +293,16 @@ impl GsdvGuiApp {
             self.spotlight_leader_agent_id = None;
             return;
         }
-        let leader = self.spotlight_agents().into_iter().next();
+        let entries = self.spotlight_agents();
+        let leader = entries.into_iter().find(spotlight_entry_is_stopped);
         let next_id = leader.as_ref().map(|entry| entry.agent_id.clone());
+        if leader.is_none() {
+            self.spotlight_leader_agent_id = None;
+            if self.spotlight_mode {
+                self.normalize_spotlight_selection();
+            }
+            return;
+        }
         if self.spotlight_leader_agent_id == next_id {
             return;
         }
@@ -359,22 +368,41 @@ impl GsdvGuiApp {
     /// Example: click top back button -> true.
     pub(super) fn spotlight_sidebar(&mut self, ui: &mut Ui) -> bool {
         let mut exit_requested = false;
-        ui.set_min_width(SPOTLIGHT_SIDEBAR_WIDTH);
+        let collapsed = self.spotlight_sidebar_collapsed;
+        ui.set_min_width(if collapsed {
+            SPOTLIGHT_COLLAPSED_SIDEBAR_WIDTH
+        } else {
+            SPOTLIGHT_SIDEBAR_WIDTH
+        });
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            if spotlight_back_button(ui, self.app_language).clicked() {
-                exit_requested = true;
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.add_space(8.0);
-                if spotlight_rank_checkbox(ui, self.spotlight_rank_mode, self.app_language)
-                    .clicked()
-                {
-                    self.set_spotlight_rank_mode(!self.spotlight_rank_mode);
+        if collapsed {
+            ui.vertical_centered(|ui| {
+                if spotlight_sidebar_toggle_button(ui, false, self.app_language).clicked() {
+                    self.spotlight_sidebar_collapsed = false;
+                }
+                if spotlight_back_button(ui, self.app_language).clicked() {
+                    exit_requested = true;
                 }
             });
-        });
+        } else {
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                if spotlight_back_button(ui, self.app_language).clicked() {
+                    exit_requested = true;
+                }
+                if spotlight_sidebar_toggle_button(ui, true, self.app_language).clicked() {
+                    self.spotlight_sidebar_collapsed = true;
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.add_space(8.0);
+                    if spotlight_rank_checkbox(ui, self.spotlight_rank_mode, self.app_language)
+                        .clicked()
+                    {
+                        self.set_spotlight_rank_mode(!self.spotlight_rank_mode);
+                    }
+                });
+            });
+        }
         ui.add_space(6.0);
         ui.separator();
 
@@ -384,7 +412,11 @@ impl GsdvGuiApp {
             for entry in entries {
                 let selected =
                     entry.workspace_index == self.active_workspace && entry.slot == active_slot;
-                let response = spotlight_agent_row(ui, &entry, selected, &self.repaint_controller);
+                let response = if collapsed {
+                    spotlight_compact_agent_row(ui, &entry, selected, &self.repaint_controller)
+                } else {
+                    spotlight_agent_row(ui, &entry, selected, &self.repaint_controller)
+                };
                 let mut action = None;
                 let menu = self.spotlight_agent_menu_values(&entry);
                 response.context_menu(|ui| {
@@ -528,6 +560,57 @@ fn spotlight_agent_sort_rank(entry: &SpotlightAgentEntry) -> (u8, u8, u64) {
 /// Example: Error -> true; Busy -> false.
 fn spotlight_activity_is_stopped(activity: WorkspaceActivity) -> bool {
     matches!(activity, WorkspaceActivity::Idle | WorkspaceActivity::Error)
+}
+
+/// Returns whether rank mode may automatically focus this entry.
+///
+/// Example: manually stopped Busy Agent -> true; active Busy Agent -> false.
+fn spotlight_entry_is_stopped(entry: &SpotlightAgentEntry) -> bool {
+    entry.manually_stopped || spotlight_activity_is_stopped(entry.activity)
+}
+
+/// Draws the spotlight sidebar collapse/expand chevron.
+///
+/// Example: expanded sidebar -> left chevron that collapses it.
+fn spotlight_sidebar_toggle_button(
+    ui: &mut Ui,
+    expanded: bool,
+    language: AppLanguage,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
+    let fill = if response.hovered() {
+        Color32::from_rgb(0x1D, 0x2A, 0x38)
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter().rect_filled(rect, CornerRadius::same(4), fill);
+    let direction = if expanded { -1.0 } else { 1.0 };
+    let center = rect.center();
+    let color = theme::text();
+    ui.painter().line_segment(
+        [
+            egui::pos2(center.x + 3.0 * direction, center.y - 5.0),
+            egui::pos2(center.x - 2.0 * direction, center.y),
+        ],
+        Stroke::new(1.5_f32, color),
+    );
+    ui.painter().line_segment(
+        [
+            egui::pos2(center.x - 2.0 * direction, center.y),
+            egui::pos2(center.x + 3.0 * direction, center.y + 5.0),
+        ],
+        Stroke::new(1.5_f32, color),
+    );
+    response
+        .on_hover_text(i18n::text(
+            language,
+            if expanded {
+                "Collapse spotlight sidebar"
+            } else {
+                "Expand spotlight sidebar"
+            },
+        ))
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Draws the icon-only spotlight exit control.
@@ -680,5 +763,54 @@ fn spotlight_agent_row(
     );
     response
         .on_hover_text(format!("{}\n{}", entry.title, entry.workspace_name))
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Draws one Agent selector inside the collapsed spotlight strip.
+///
+/// Example: selected Agent -> blue edge with centered yellow star and status tooltip.
+fn spotlight_compact_agent_row(
+    ui: &mut Ui,
+    entry: &SpotlightAgentEntry,
+    selected: bool,
+    repaint_controller: &repaint_gate::RepaintController,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), SPOTLIGHT_ROW_HEIGHT),
+        Sense::click(),
+    );
+    let fill = if selected {
+        Color32::from_rgb(0x17, 0x2C, 0x4A)
+    } else if response.hovered() {
+        Color32::from_rgb(0x1D, 0x2A, 0x38)
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter().rect_filled(rect, CornerRadius::same(4), fill);
+    if selected {
+        ui.painter().rect_filled(
+            Rect::from_min_size(rect.min, Vec2::new(3.0, rect.height())),
+            CornerRadius::ZERO,
+            theme::primary(),
+        );
+    }
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        "★",
+        egui::FontId::proportional(16.0),
+        Color32::from_rgb(0xF5, 0xB8, 0x00),
+    );
+    let (status_color, _) = activity_style(entry.activity);
+    paint_activity_dot(
+        ui,
+        egui::pos2(rect.right() - 7.0, rect.bottom() - 7.0),
+        status_color,
+        entry.activity,
+        true,
+        repaint_controller,
+    );
+    response
+        .on_hover_text(format!("{} · {}", entry.title, entry.workspace_name))
         .on_hover_cursor(egui::CursorIcon::PointingHand)
 }

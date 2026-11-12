@@ -47,6 +47,7 @@ export default defineComponent({
     const workspaces = ref([]);
     const spotlightMode = ref(false);
     const spotlightRankMode = ref(false);
+    const spotlightSidebarCollapsed = ref(false);
     const keyMenuOpen = ref(false);
     const expandedTreeNodes = ref(new Set());
     const tabs = ref([]);
@@ -457,8 +458,16 @@ export default defineComponent({
      * Switches only when rank mode observes a different first Agent.
      */
     function reconcileSpotlightLeader() {
-      const first = spotlightAgentBindings()[0] ?? null;
+      const bindings = spotlightAgentBindings();
+      const first = bindings.find(
+        (binding) => spotlightAgentRank(binding.agent) === 0,
+      ) ?? null;
       const nextLeaderId = first ? spotlightBindingId(first) : null;
+      if (!first) {
+        spotlightLeaderId = null;
+        ensureSpotlightSelection();
+        return;
+      }
       if (spotlightLeaderId === nextLeaderId) {
         ensureSpotlightSelection();
         return;
@@ -2122,32 +2131,53 @@ export default defineComponent({
         class={{
           "remote-shell": true,
           "remote-shell--spotlight": spotlightMode.value,
+          "remote-shell--spotlight-collapsed":
+            spotlightMode.value && spotlightSidebarCollapsed.value,
         }}
         style={remotePaletteStyle(palette)}
       >
         {spotlightMode.value ? (
           <aside class="remote-shell__spotlight-sidebar">
             <div class="remote-shell__spotlight-toolbar">
+              {!spotlightSidebarCollapsed.value ? (
+                <button
+                  class="remote-shell__spotlight-exit"
+                  type="button"
+                  aria-label="退出专注模式"
+                  title="退出专注模式"
+                  onClick={exitSpotlightMode}
+                >
+                  <span aria-hidden="true" />
+                </button>
+              ) : null}
               <button
-                class="remote-shell__spotlight-exit"
+                class={{
+                  "remote-shell__spotlight-collapse": true,
+                  "remote-shell__spotlight-collapse--collapsed":
+                    spotlightSidebarCollapsed.value,
+                }}
                 type="button"
-                aria-label="退出专注模式"
-                title="退出专注模式"
-                onClick={exitSpotlightMode}
+                aria-label={spotlightSidebarCollapsed.value ? "展开专注侧栏" : "收起专注侧栏"}
+                title={spotlightSidebarCollapsed.value ? "展开专注侧栏" : "收起专注侧栏"}
+                onClick={() => {
+                  spotlightSidebarCollapsed.value = !spotlightSidebarCollapsed.value;
+                }}
               >
                 <span aria-hidden="true" />
               </button>
-              <label
-                class="remote-shell__spotlight-rank-mode"
-                title="等级模式"
-              >
-                <input
-                  type="checkbox"
-                  aria-label="等级模式"
-                  checked={spotlightRankMode.value}
-                  onChange={updateSpotlightRankMode}
-                />
-              </label>
+              {!spotlightSidebarCollapsed.value ? (
+                <label
+                  class="remote-shell__spotlight-rank-mode"
+                  title="等级模式"
+                >
+                  <input
+                    type="checkbox"
+                    aria-label="等级模式"
+                    checked={spotlightRankMode.value}
+                    onChange={updateSpotlightRankMode}
+                  />
+                </label>
+              ) : null}
             </div>
             <nav class="remote-shell__spotlight-list" aria-label="Spotlight agents">
               {spotlightAgentBindings().map((item) => (
@@ -2160,6 +2190,7 @@ export default defineComponent({
                   type="button"
                   key={`${item.workspace.workspace_id}:${item.agent.agent_id}`}
                   title={`${item.agent.title}\n${item.workspace.name}`}
+                  aria-label={`${item.agent.title} / ${item.workspace.name}`}
                   onClick={() =>
                     selectAgent(item.workspace, item.row, item.col, item.agent)
                   }

@@ -485,6 +485,8 @@ struct GsdvGuiApp {
     spotlight_leader_agent_id: Option<String>,
     /// Whether the app is rendering the cross-workspace spotlight browser.
     spotlight_mode: bool,
+    /// Whether spotlight keeps only its compact Agent selector strip visible.
+    spotlight_sidebar_collapsed: bool,
     /// Theme restored when spotlight mode exits after forcing its dark surface.
     spotlight_return_theme: Option<theme::ThemeMode>,
     /// Whether F11 hides navigation chrome and keeps only center content plus bottom bar.
@@ -1000,6 +1002,7 @@ impl GsdvGuiApp {
             spotlight_next_stopped_order: 0,
             spotlight_leader_agent_id: None,
             spotlight_mode: false,
+            spotlight_sidebar_collapsed: false,
             spotlight_return_theme: None,
             app_fullscreen: false,
             default_agent_kind: agent_launch.kind,
@@ -3021,8 +3024,17 @@ impl GsdvGuiApp {
 
         if self.spotlight_mode {
             let mut exit_requested = false;
+            TopBottomPanel::bottom("window_bottombar")
+                .exact_height(BOTTOM_BAR_HEIGHT)
+                .frame(bottom_bar_frame())
+                .show(ctx, |ui| self.bottom_bar(ui));
+            let spotlight_sidebar_width = if self.spotlight_sidebar_collapsed {
+                app_spotlight::SPOTLIGHT_COLLAPSED_SIDEBAR_WIDTH
+            } else {
+                app_spotlight::SPOTLIGHT_SIDEBAR_WIDTH
+            };
             SidePanel::left("spotlight_agent_sidebar")
-                .exact_width(app_spotlight::SPOTLIGHT_SIDEBAR_WIDTH)
+                .exact_width(spotlight_sidebar_width)
                 .frame(
                     Frame::new()
                         .fill(Color32::from_rgb(0x11, 0x18, 0x21))
@@ -3037,9 +3049,13 @@ impl GsdvGuiApp {
             if exit_requested {
                 self.exit_spotlight_mode(ctx);
             }
+            if ctx.input(|input| input.modifiers.alt) {
+                self.fullscreen_workspace_action_overlay(ctx);
+            }
             self.app_dialog(ctx);
             self.agent_input_translation_popup(ctx);
             self.toast_overlay(ctx);
+            self.bottom_bar_overlay(ctx);
         } else {
             TopBottomPanel::bottom("window_bottombar")
                 .exact_height(BOTTOM_BAR_HEIGHT)
