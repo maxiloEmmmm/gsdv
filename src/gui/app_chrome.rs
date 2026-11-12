@@ -200,6 +200,16 @@ pub(super) fn agent_slot_context_menu(
         ui.close_menu();
     }
     ui.menu_button(i18n::text(language, "Spotlight registration"), |ui| {
+        if spotlight_level.is_some() {
+            if ui
+                .button(i18n::text(language, "Remove spotlight registration"))
+                .clicked()
+            {
+                *action = Some(AgentTabAction::RemoveSpotlight(slot.clone()));
+                ui.close_menu();
+            }
+            ui.separator();
+        }
         for level in 1..=3 {
             if ui
                 .selectable_label(
@@ -216,16 +226,6 @@ pub(super) fn agent_slot_context_menu(
                 .clicked()
             {
                 *action = Some(AgentTabAction::SetSpotlightLevel(slot.clone(), level));
-                ui.close_menu();
-            }
-        }
-        if spotlight_level.is_some() {
-            ui.separator();
-            if ui
-                .button(i18n::text(language, "Remove spotlight registration"))
-                .clicked()
-            {
-                *action = Some(AgentTabAction::RemoveSpotlight(slot.clone()));
                 ui.close_menu();
             }
         }

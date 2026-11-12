@@ -1341,7 +1341,7 @@ impl GsdvGuiApp {
     }
 
     /// 绘制全屏 Alt 临时操作浮层。
-    fn fullscreen_workspace_action_overlay(&mut self, ctx: &egui::Context) {
+    pub(super) fn fullscreen_workspace_action_overlay(&mut self, ctx: &egui::Context) {
         const WIDTH: f32 = 334.0;
         const HEIGHT: f32 = 36.0;
         const MARGIN: f32 = 12.0;
