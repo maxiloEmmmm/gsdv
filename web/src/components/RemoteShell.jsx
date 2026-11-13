@@ -1,17 +1,14 @@
 import Button from "ant-design-vue/es/button";
 import Drawer from "ant-design-vue/es/drawer";
 import { defineComponent, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { sessionActivity, sessionEvents } from "../sessionEvents";
+import { withSessionMarkdown } from "../sessionMarkdown";
+import { renderSessionMermaid } from "../sessionMermaid";
 
 /**
  * Limits browser-held terminal output to the agreed scrollback window.
  */
-const MAX_TERMINAL_ROWS = 500;
-const MAX_TERMINAL_COLS = 500;
-const MAX_TERMINAL_VISIBLE_ROWS = 200;
 const TERMINAL_BOTTOM_THRESHOLD_PX = 2;
-// Matches the server's per-message limit for interactive terminal wheel input.
-const MAX_TERMINAL_SCROLL_LINES = 50;
-const TERMINAL_WHEEL_GESTURE_IDLE_MS = 120;
 const AGENT_RECONNECT_BASE_DELAY_MS = 400;
 const AGENT_RECONNECT_MAX_DELAY_MS = 8000;
 const WORKSPACE_RECONNECT_BASE_DELAY_MS = 500;
@@ -21,11 +18,11 @@ const REMOTE_SHELL_VIEWPORT_HEIGHT_VAR = "--remote-shell-viewport-height";
  * Fallback palette used before the first Rust terminal snapshot arrives.
  */
 const DEFAULT_TERMINAL_PALETTE = {
-  foreground: "#d1fae5",
-  background: "#0f172a",
-  cursor: "#d1fae5",
-  muted: "#94a3b8",
-  primary: "#2563eb",
+  foreground: "#e5e7eb",
+  background: "#0b0d10",
+  cursor: "#f8fafc",
+  muted: "#8b929c",
+  primary: "#3b82f6",
 };
 
 /**
@@ -56,10 +53,6 @@ export default defineComponent({
     const terminalOutputElement = ref(null);
     const imageInputElement = ref(null);
     const scrollFrame = ref(0);
-    let terminalWheelFrame = 0;
-    let terminalWheelTab = null;
-    let terminalTouchGesture = null;
-    let terminalResizeHandler = null;
     let visualViewportHandler = null;
     let visualViewportSyncTimers = [];
     let workspaceSocket = null;
@@ -277,15 +270,18 @@ export default defineComponent({
     /**
      * Builds the documented WebSocket URL for one agent binding.
      */
-    function agentOutputUrl(binding) {
+    function agentOutputUrl(tab) {
+      const binding = tab.binding;
       const params = new URLSearchParams({
         workspace_id: binding.workspace.workspace_id,
         row_index: String(binding.row.row_index),
         col_index: String(binding.col.col_index),
         agent_id: binding.agent.agent_id,
+        session_id: tab.sessionId,
+        seek: String(tab.seek),
       });
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      return `${protocol}//${window.location.host}/api/agent/output/ws?${params}`;
+      return `${protocol}//${window.location.host}/api/agent/session/ws?${params}`;
     }
 
     /**
@@ -521,6 +517,36 @@ export default defineComponent({
     }
 
     /**
+     * Returns the visible runtime state for one Agent.
+     *
+     * Example: manually stopped busy Agent -> stopped.
+     */
+    function agentDisplayActivity(agent, persistedActivity = null) {
+      if (agent?.manually_stopped === true) {
+        return "stopped";
+      }
+      if (["busy", "idle", "error"].includes(persistedActivity)) {
+        return persistedActivity;
+      }
+      const activity = agent?.activity;
+      return ["busy", "idle", "error"].includes(activity)
+        ? activity
+        : "unknown";
+    }
+
+    /**
+     * Returns one open tab's session-derived activity with hook state as fallback.
+     *
+     * Example: stale hook plus task_started record -> busy.
+     */
+    function tabDisplayActivity(tab) {
+      return agentDisplayActivity(
+        tab?.binding?.agent,
+        tab?.sessionActivity ?? null,
+      );
+    }
+
+    /**
      * Forces Vue to re-render after mutating tab fields in place.
      */
     function refreshTabs() {
@@ -536,34 +562,33 @@ export default defineComponent({
         id: agentTabId(workspace, row, col, agent),
         binding,
         title: agent.title,
-        rows: [],
-        cols: 0,
-        gridRows: 0,
-        cursor: null,
+        events: [],
+        eventIndexes: new Map(),
+        eventSerial: 0,
+        sessionActivity: null,
+        sessionId: agent.session_id ?? "",
+        // A successful /clear hides the current session until its replacement arrives.
+        awaitingSessionReset: false,
+        // The old session is retained so reconnects cannot refill cleared history.
+        clearedSessionId: null,
+        agentKind: agent.agent_kind ?? "codex",
+        seek: 0,
+        initialEndSeek: 0,
+        decoder: new TextDecoder(),
+        lineBuffer: "",
         palette: { ...DEFAULT_TERMINAL_PALETTE },
-        sequence: null,
-        status: "Connecting to agent terminal...",
+        status: "Connecting to agent session...",
         error: "",
         draft: "",
         socket: null,
         reconnectTimer: 0,
         reconnectAttempt: 0,
-        lastResizeKey: "",
+        renderFrame: 0,
         closing: false,
         // Whether ordinary terminal history follows new output.
         followOutput: true,
         // Last native scroll position saved for this tab.
         scrollTop: 0,
-        // Whether the server's interactive terminal consumes wheel input.
-        terminalScroll: false,
-        // Fractional interactive wheel input waiting for a frame-sized send.
-        pendingWheelLines: 0,
-        // Last pointer cell used by terminal mouse-reporting applications.
-        pendingWheelCell: null,
-        // Timer that separates two trackpad or mouse wheel gestures.
-        wheelGestureTimer: 0,
-        // Whether the current wheel gesture already received immediate feedback.
-        wheelGestureActive: false,
       };
     }
 
@@ -578,19 +603,37 @@ export default defineComponent({
      * Clears terminal state before a fresh agent snapshot arrives.
      */
     function clearTerminal(tab, message) {
-      tab.rows = [];
-      tab.terminalScroll = false;
+      tab.events = [];
+      tab.eventIndexes = new Map();
+      tab.eventSerial = 0;
+      tab.sessionActivity = null;
+      tab.decoder = new TextDecoder();
+      tab.lineBuffer = "";
+      tab.seek = 0;
+      tab.initialEndSeek = 0;
       tab.followOutput = true;
       tab.scrollTop = 0;
-      tab.cols = 0;
-      tab.gridRows = 0;
-      tab.cursor = null;
-      tab.sequence = null;
       tab.error = "";
       tab.status = message;
-      if (activeTabId.value === tab.id) {
-        renderTerminalEmpty(message);
-      }
+      refreshTabs();
+    }
+
+    /**
+     * Clears rendered history while preserving the current stream cursor.
+     *
+     * Example: successful /clear at seek 42 -> empty view still reading from 42.
+     */
+    function clearSessionView(tab, message) {
+      tab.events = [];
+      tab.eventIndexes = new Map();
+      tab.eventSerial = 0;
+      tab.sessionActivity = null;
+      tab.decoder = new TextDecoder();
+      tab.lineBuffer = "";
+      tab.followOutput = true;
+      tab.scrollTop = 0;
+      tab.error = "";
+      tab.status = message;
       refreshTabs();
     }
 
@@ -605,23 +648,15 @@ export default defineComponent({
         window.clearTimeout(tab.reconnectTimer);
         tab.reconnectTimer = 0;
       }
-      if (terminalWheelTab === tab) {
-        cancelInteractiveTerminalScroll(tab);
-      } else {
-        if (tab.wheelGestureTimer !== 0) {
-          window.clearTimeout(tab.wheelGestureTimer);
-          tab.wheelGestureTimer = 0;
-        }
-        tab.pendingWheelLines = 0;
-        tab.pendingWheelCell = null;
-        tab.wheelGestureActive = false;
+      if (tab.renderFrame !== 0) {
+        window.cancelAnimationFrame(tab.renderFrame);
+        tab.renderFrame = 0;
       }
       tab.closing = closing;
       if (tab.socket) {
         tab.socket.close();
         tab.socket = null;
       }
-      tab.lastResizeKey = "";
       refreshTabs();
     }
 
@@ -718,7 +753,6 @@ export default defineComponent({
       visualViewportSyncTimers = [80, 220, 480].map((delay) =>
         window.setTimeout(() => {
           syncVisualViewportHeight();
-          sendTerminalResize();
         }, delay),
       );
     }
@@ -729,7 +763,6 @@ export default defineComponent({
     function observeVisualViewportSize() {
       visualViewportHandler = () => {
         scheduleVisualViewportSync();
-        sendTerminalResize();
       };
       scheduleVisualViewportSync();
       window.addEventListener("resize", visualViewportHandler);
@@ -1143,28 +1176,30 @@ export default defineComponent({
     }
 
     /**
-     * Connects the browser to the selected agent output WebSocket.
+     * Connects one browser tab to its append-only session stream.
+     *
+     * Example: reconnect at seek 4096 -> server resumes from byte 4096.
      */
-    function connectAgentSocket(tab, preserveTerminal = false) {
+    function connectAgentSocket(tab, preserveSession = false) {
       closeAgentSocket(tab);
       tab.closing = false;
-      if (preserveTerminal && tab.rows.length > 0) {
-        tab.status = "Reconnecting to agent terminal...";
+      if (preserveSession && (tab.events.length > 0 || tab.seek > 0)) {
+        tab.status = "Reconnecting to agent session...";
         tab.error = "";
         refreshTabs();
       } else {
-        clearTerminal(tab, "Connecting to agent terminal...");
+        clearTerminal(tab, "Connecting to agent session...");
       }
 
-      const socket = new WebSocket(agentOutputUrl(tab.binding));
+      const socket = new WebSocket(agentOutputUrl(tab));
+      socket.binaryType = "arraybuffer";
       tab.socket = socket;
       refreshTabs();
 
       socket.onopen = () => {
         if (tab.socket === socket && tabStillOpen(tab)) {
-          tab.status = "Waiting for terminal snapshot...";
+          tab.status = "Loading agent session...";
           tab.error = "";
-          sendTerminalResize(tab, socket);
           refreshTabs();
         }
       };
@@ -1173,12 +1208,12 @@ export default defineComponent({
         if (tab.socket !== socket || !tabStillOpen(tab)) {
           return;
         }
-        handleSocketMessage(tab, socket, event.data);
+        handleSessionSocketMessage(tab, event.data);
       };
 
       socket.onerror = () => {
         if (tab.socket === socket && tabStillOpen(tab)) {
-          tab.error = "Agent terminal connection failed.";
+          tab.error = "Agent session connection failed.";
           refreshTabs();
         }
       };
@@ -1186,8 +1221,7 @@ export default defineComponent({
       socket.onclose = () => {
         if (tab.socket === socket && tabStillOpen(tab)) {
           tab.socket = null;
-          tab.lastResizeKey = "";
-          scheduleAgentReconnect(tab, "Agent terminal disconnected.");
+          scheduleAgentReconnect(tab, "Agent session disconnected.");
         }
       };
     }
@@ -1210,7 +1244,7 @@ export default defineComponent({
         AGENT_RECONNECT_BASE_DELAY_MS * 2 ** exponent,
       );
       tab.reconnectAttempt += 1;
-      tab.status = "Reconnecting to agent terminal...";
+      tab.status = "Reconnecting to agent session...";
       tab.error = `${reason} Retrying...`;
       tab.reconnectTimer = window.setTimeout(() => {
         tab.reconnectTimer = 0;
@@ -1222,183 +1256,193 @@ export default defineComponent({
     }
 
     /**
-     * Handles one JSON message from the documented agent output stream.
+     * Handles one text reset or binary JSONL range from the session stream.
+     *
+     * Example: 16-byte header plus JSONL -> validate seek, parse, render locally.
      */
-    function handleSocketMessage(tab, socket, rawMessage) {
+    function handleSessionSocketMessage(tab, rawMessage) {
+      if (typeof rawMessage === "string") {
+        applySessionReset(tab, rawMessage);
+        return;
+      }
+      if (!(rawMessage instanceof ArrayBuffer) || rawMessage.byteLength < 16) {
+        reconnectCurrentAgent(tab, "Invalid session frame.");
+        return;
+      }
+      const view = new DataView(rawMessage);
+      const fromSeek = Number(view.getBigUint64(0, true));
+      const toSeek = Number(view.getBigUint64(8, true));
+      if (
+        !Number.isSafeInteger(fromSeek) ||
+        !Number.isSafeInteger(toSeek) ||
+        fromSeek !== tab.seek ||
+        toSeek < fromSeek
+      ) {
+        reconnectCurrentAgent(tab, "Session range changed.");
+        return;
+      }
+      const payload = new Uint8Array(rawMessage, 16);
+      appendSessionBytes(tab, payload, toSeek);
+    }
+
+    /**
+     * Applies provider/session metadata and clears only on a real session switch.
+     *
+     * Example: reset from session a to b -> discard a and restart at seek 0.
+     */
+    function applySessionReset(tab, rawMessage) {
       let message;
       try {
         message = JSON.parse(rawMessage);
       } catch (_error) {
-        tab.error = "Received invalid terminal message.";
+        reconnectCurrentAgent(tab, "Invalid session metadata.");
+        return;
+      }
+      if (message.type !== "session_reset") {
+        return;
+      }
+      const sessionId = String(message.session_id ?? "");
+      const seek = Number(message.seek ?? 0);
+      const availableSeek = Number(message.available_seek ?? seek);
+      if (
+        sessionId !== tab.sessionId ||
+        !Number.isSafeInteger(seek) ||
+        seek !== tab.seek
+      ) {
+        clearTerminal(tab, "Loading agent session...");
+        tab.sessionId = sessionId;
+        tab.seek = Number.isSafeInteger(seek) ? seek : 0;
+      }
+      if (
+        tab.awaitingSessionReset &&
+        sessionId.length > 0 &&
+        sessionId !== tab.clearedSessionId
+      ) {
+        tab.awaitingSessionReset = false;
+        tab.clearedSessionId = null;
+      }
+      tab.initialEndSeek = Number.isSafeInteger(availableSeek)
+        ? Math.max(tab.seek, availableSeek)
+        : tab.seek;
+      tab.agentKind = message.agent_kind === "claude" ? "claude" : "codex";
+      tab.reconnectAttempt = 0;
+      tab.status = sessionId ? "Agent session connected." : "Waiting for session id...";
+      tab.error = "";
+      refreshTabs();
+    }
+
+    /**
+     * Decodes complete JSONL records while retaining a split trailing line.
+     *
+     * Example: chunk ending mid-record -> keep suffix until the next chunk.
+     */
+    function appendSessionBytes(tab, bytes, toSeek) {
+      if (
+        tab.awaitingSessionReset &&
+        tab.sessionId === tab.clearedSessionId
+      ) {
+        // /clear does not create its replacement session until the next prompt.
+        // Keep the transport cursor current without restoring the old history.
+        tab.seek = toSeek;
+        tab.status = "Waiting for the next prompt...";
+        tab.error = "";
         refreshTabs();
         return;
       }
-
-      if (message.type === "snapshot") {
-        applySnapshotMessage(tab, message);
-        return;
-      }
-
-      if (message.type === "append") {
-        applyAppendMessage(tab, message);
-        return;
-      }
-
-      if (message.type === "patch") {
-        applyPatchMessage(tab, message);
-        return;
-      }
-
-      if (message.type === "ping") {
-        const nextSequence = message.sequence;
-        if (
-          !Number.isFinite(nextSequence) ||
-          !Number.isFinite(tab.sequence) ||
-          nextSequence !== tab.sequence + 1
-        ) {
-          reconnectCurrentAgent(tab);
-          return;
-        }
-        // 触发条件：服务端心跳递增了连接序号。
-        // 不能只回 pong：下一条 append 会被误判为断档。
-        // 防止回归：Web tab 重连时清空已有 Agent 内容。
-        tab.sequence = nextSequence;
-        socket.send(JSON.stringify({ type: "pong", sequence: message.sequence }));
-      }
-    }
-
-    /**
-     * Applies a full terminal snapshot from a newly opened connection.
-     */
-    function applySnapshotMessage(tab, message) {
-      const rows = Array.isArray(message.rows) ? message.rows : [];
       const isActive = activeTabId.value === tab.id;
-      const followOutput = isActive ? terminalShouldFollowOutput(tab) : false;
-      const scrollTop = isActive
-        ? terminalOutputElement.value?.scrollTop ?? tab.scrollTop
-        : tab.scrollTop;
-      tab.rows = trimTerminalRows(rows);
-      tab.cols = Number.isFinite(message.cols) ? message.cols : 0;
-      tab.gridRows = Number.isFinite(message.screen_rows)
-        ? message.screen_rows
-        : tab.rows.length;
-      tab.cursor = message.cursor ?? null;
-      tab.palette = terminalPalette(message.palette);
-      const terminalScroll = message.terminal_scroll === true;
-      if (tab.terminalScroll !== terminalScroll && terminalWheelTab === tab) {
-        cancelInteractiveTerminalScroll(tab);
+      const initialLoading = tab.seek < tab.initialEndSeek;
+      const followOutput = initialLoading || (isActive ? terminalShouldFollowOutput(tab) : false);
+      const decoded = tab.decoder.decode(bytes, { stream: true });
+      const lines = `${tab.lineBuffer}${decoded}`.split("\n");
+      tab.lineBuffer = lines.pop() ?? "";
+      for (const line of lines) {
+        appendSessionLine(tab, line);
       }
-      tab.terminalScroll = terminalScroll;
-      tab.sequence = Number.isFinite(message.sequence) ? message.sequence : null;
-      tab.reconnectAttempt = 0;
-      tab.status = "Agent terminal connected.";
+      tab.seek = toSeek;
+      if (tab.seek >= tab.initialEndSeek) {
+        tab.followOutput = true;
+      }
+      tab.status = "Agent session connected.";
       tab.error = "";
-      if (isActive) {
-        renderTerminalRows(tab.rows);
-        if (followOutput) {
-          scrollTerminalToBottom(tab);
-        } else {
-          restoreTerminalScroll(tab, scrollTop);
-        }
-      }
-      refreshTabs();
+      scheduleSessionRender(tab, followOutput);
     }
 
     /**
-     * Applies changed TUI rows without rebuilding the terminal container.
-     * Example: rows [{ index: 4, row }] -> replace only DOM row 4.
+     * Coalesces large initial session loads to at most one Vue render per frame.
+     *
+     * Example: ten 256 KiB frames arrive together -> one DOM update.
      */
-    function applyPatchMessage(tab, message) {
-      const nextSequence = message.sequence;
-      const currentSequence = tab.sequence;
-      const patches = Array.isArray(message.rows) ? message.rows : [];
-      if (
-        !Number.isFinite(nextSequence) ||
-        !Number.isFinite(currentSequence) ||
-        nextSequence !== currentSequence + 1 ||
-        patches.some(
-          (patch) =>
-            !Number.isInteger(patch?.index) ||
-            patch.index < 0 ||
-            patch.index >= tab.rows.length ||
-            !patch.row,
-        )
-      ) {
-        reconnectCurrentAgent(tab);
+    function scheduleSessionRender(tab, followOutput) {
+      if (tab.renderFrame !== 0) {
         return;
       }
-
-      for (const patch of patches) {
-        tab.rows[patch.index] = patch.row;
-      }
-      tab.sequence = nextSequence;
-      tab.cursor = message.cursor ?? tab.cursor;
-      if (activeTabId.value === tab.id) {
-        patchTerminalRows(patches, tab.rows.length);
-      }
-    }
-
-    /**
-     * Appends new terminal rows when the sequence is contiguous.
-     */
-    function applyAppendMessage(tab, message) {
-      const nextSequence = message.sequence;
-      const currentSequence = tab.sequence;
-      if (
-        !Number.isFinite(nextSequence) ||
-        !Number.isFinite(currentSequence) ||
-        nextSequence !== currentSequence + 1
-      ) {
-        reconnectCurrentAgent(tab);
-        return;
-      }
-
-      const rows = Array.isArray(message.rows) ? message.rows : [];
-      const isActive = activeTabId.value === tab.id;
-      const followOutput = isActive ? terminalShouldFollowOutput(tab) : false;
-      const scrollTop = isActive
-        ? terminalOutputElement.value?.scrollTop ?? tab.scrollTop
-        : tab.scrollTop;
-      const previousRowCount = tab.rows.length;
-      const combinedRows = tab.rows.concat(rows);
-      const removedRowCount = Math.max(
-        0,
-        combinedRows.length - MAX_TERMINAL_ROWS,
-      );
-      tab.rows = trimTerminalRows(combinedRows);
-      tab.sequence = nextSequence;
-      tab.cursor = message.cursor ?? tab.cursor;
-      if (isActive) {
-        const removedHeight = appendTerminalRows(
-          rows,
-          removedRowCount,
-          previousRowCount,
-        );
-        if (removedHeight === null) {
-          renderTerminalRows(tab.rows);
-        }
-        if (followOutput) {
-          scrollTerminalToBottom(tab);
-        } else {
-          restoreTerminalScroll(
-            tab,
-            Math.max(0, scrollTop - (removedHeight ?? 0)),
+      tab.renderFrame = window.requestAnimationFrame(() => {
+        tab.renderFrame = 0;
+        refreshTabs();
+        nextTick(async () => {
+          if (followOutput) {
+            scrollTerminalToBottom(tab);
+          }
+          const rendered = await renderSessionMermaid(
+            terminalOutputElement.value,
           );
-        }
-      }
-      refreshTabs();
+          if (
+            rendered &&
+            followOutput &&
+            activeTabId.value === tab.id &&
+            terminalShouldFollowOutput(tab)
+          ) {
+            scrollTerminalToBottom(tab);
+          }
+        });
+      });
     }
 
     /**
-     * Reconnects after an output or heartbeat sequence gap for a fresh snapshot.
-     * Example: sequence 1 then 3 -> reconnect.
+     * Parses and upserts the visible events produced by one JSONL record.
+     *
+     * Example: duplicate tool id -> replace its existing rendered event.
      */
-    function reconnectCurrentAgent(tab) {
+    function appendSessionLine(tab, line) {
+      if (!line.trim()) {
+        return;
+      }
+      let record;
+      try {
+        record = JSON.parse(line);
+      } catch (_error) {
+        return;
+      }
+      const fallbackKey = `line:${tab.eventSerial}`;
+      tab.eventSerial += 1;
+      const nextActivity = sessionActivity(tab.agentKind, record);
+      if (nextActivity) {
+        tab.sessionActivity = nextActivity;
+      }
+      for (const event of sessionEvents(tab.agentKind, record, fallbackKey)) {
+        const renderedEvent = withSessionMarkdown(event);
+        if (!renderedEvent) {
+          continue;
+        }
+        const key = `${renderedEvent.kind}:${renderedEvent.key}`;
+        const index = tab.eventIndexes.get(key);
+        if (index === undefined) {
+          tab.eventIndexes.set(key, tab.events.length);
+          tab.events.push({ ...renderedEvent, id: key });
+        } else {
+          tab.events[index] = { ...renderedEvent, id: key };
+        }
+      }
+    }
+
+    /**
+     * Reconnects from the browser's last complete byte range after a gap.
+     *
+     * Example: expected seek 4096, received 8192 -> resume again at 4096.
+     */
+    function reconnectCurrentAgent(tab, reason) {
       closeAgentSocket(tab);
-      // 触发条件：append/ping sequence 不是当前 sequence + 1。
-      // 不能直接继续 append：缺失的行无法从 append-only 协议恢复。
-      // 防止回归：输出丢包后页面仍显示为貌似正常的半截日志。
-      scheduleAgentReconnect(tab, "Terminal stream changed.");
+      scheduleAgentReconnect(tab, reason);
     }
 
     /**
@@ -1482,6 +1526,11 @@ export default defineComponent({
         }
         input.value = "";
         tab.draft = "";
+        if (text === "/clear") {
+          tab.awaitingSessionReset = true;
+          tab.clearedSessionId = tab.sessionId;
+          clearSessionView(tab, "Waiting for the next prompt...");
+        }
       } catch (error) {
         tab.error = error instanceof Error ? error.message : String(error);
         refreshTabs();
@@ -1874,16 +1923,7 @@ export default defineComponent({
      * Renders the currently active tab into the shared terminal output node.
      */
     function renderActiveTerminal() {
-      const tab = activeTab();
-      if (!tab) {
-        renderTerminalEmpty("Select an agent from the workspace drawer.");
-        return;
-      }
-      if (tab.rows.length === 0) {
-        renderTerminalEmpty(tab.status);
-        return;
-      }
-      renderTerminalRows(tab.rows);
+      refreshTabs();
     }
 
     /**
@@ -1893,21 +1933,70 @@ export default defineComponent({
       keyMenuOpen.value = false;
       handleTerminalScroll();
       cancelTerminalScroll();
-      cancelInteractiveTerminalScroll(activeTab());
       activeTabId.value = tabId;
       const tab = activeTab();
-      nextTick(() => {
+      nextTick(async () => {
         renderActiveTerminal();
+        await renderSessionMermaid(terminalOutputElement.value);
         if (terminalShouldFollowOutput(tab)) {
           scrollTerminalToBottom(tab);
         } else {
           restoreTerminalScroll(tab);
         }
-        sendTerminalResize(tab);
         if (draftInputElement.value && tab) {
           draftInputElement.value.value = tab.draft;
         }
       });
+    }
+
+    /**
+     * Groups consecutive tool events into one compact render row.
+     *
+     * Example: tool + result + tool + result -> one collapsed Tools (4) row.
+     */
+    function sessionRenderRows(events, agentBusy) {
+      const rows = [];
+      let tools = [];
+      // Flush only at a non-tool boundary so one agent operation stays compact.
+      // Example: two buffered tool events -> one tool_group row.
+      const flushTools = (mayBeRunning) => {
+        const resultKeys = new Set(
+          tools
+            .filter((event) => event.kind === "tool_result")
+            .map((event) => event.key),
+        );
+        const renderedTools = tools.map((event) => ({
+          ...event,
+          running:
+            mayBeRunning &&
+            event.kind === "tool" &&
+            !resultKeys.has(event.key),
+        }));
+        const running = renderedTools.some((event) => event.running);
+        if (tools.length === 1) {
+          rows.push(renderedTools[0]);
+        } else if (tools.length > 1) {
+          rows.push({
+            kind: "tool_group",
+            id: `tool-group:${tools[0].id}:${tools[tools.length - 1].id}`,
+            events: renderedTools,
+            running,
+          });
+        }
+        tools = [];
+      };
+      for (const event of events) {
+        if (event.kind === "tool" || event.kind === "tool_result") {
+          tools.push(event);
+          continue;
+        }
+        flushTools(false);
+        rows.push(event);
+      }
+      // Only a trailing tool block can belong to the currently running turn.
+      // Historical blocks may miss results after an abort and must stay closed.
+      flushTools(agentBusy);
+      return rows;
     }
 
     /**
@@ -1934,9 +2023,80 @@ export default defineComponent({
           } else {
             restoreTerminalScroll(active);
           }
-          sendTerminalResize(active);
         });
       }
+    }
+
+    /**
+     * Renders one normalized session event with native selectable text.
+     *
+     * Example: tool result -> collapsed details row; assistant -> message row.
+     */
+    function renderSessionEvent(event) {
+      if (event.kind === "tool_group") {
+        return (
+          <details
+            class="remote-shell__session-tool-group"
+            key={event.id}
+            open={event.running}
+          >
+            <summary>Tools ({event.events.length})</summary>
+            <div class="remote-shell__session-tool-group-items">
+              {event.events.map(renderSessionEvent)}
+            </div>
+          </details>
+        );
+      }
+      if (event.kind === "tool" || event.kind === "tool_result") {
+        return (
+          <details
+            class={[
+              "remote-shell__session-tool",
+              `remote-shell__session-tool--${event.kind}`,
+            ]}
+            key={event.id}
+            open={event.running}
+          >
+            <summary>{event.title}</summary>
+            <pre>{event.text}</pre>
+          </details>
+        );
+      }
+      if (event.kind === "reasoning") {
+        return (
+          <details class="remote-shell__session-reasoning" key={event.id}>
+            <summary>{event.title}</summary>
+            <div
+              class="remote-shell__session-text remote-shell__session-markdown"
+              innerHTML={event.html}
+            />
+          </details>
+        );
+      }
+      if (event.kind === "compacted") {
+        return (
+          <div class="remote-shell__session-compacted" key={event.id}>
+            <span>{event.text}</span>
+          </div>
+        );
+      }
+      return (
+        <article
+          class={[
+            "remote-shell__session-item",
+            `remote-shell__session-item--${event.kind}`,
+          ]}
+          key={event.id}
+        >
+          <div class="remote-shell__session-content">
+            <div class="remote-shell__session-label">{event.title}</div>
+            <div
+              class="remote-shell__session-text remote-shell__session-markdown"
+              innerHTML={event.html}
+            />
+          </div>
+        </article>
+      );
     }
 
     /**
@@ -2037,6 +2197,13 @@ export default defineComponent({
           key={agent.agent_id}
           onClick={() => selectAgent(workspace, row, col, agent)}
         >
+          <span
+            class={[
+              "remote-shell__agent-state-dot",
+              `remote-shell__agent-state-dot--${agentDisplayActivity(agent)}`,
+            ]}
+            aria-hidden="true"
+          />
           {agent.title}
         </button>
       ));
@@ -2104,8 +2271,6 @@ export default defineComponent({
       closeWorkspaceSocket(true);
       closeAllAgentSockets();
       cancelTerminalScroll();
-      cancelInteractiveTerminalScroll();
-      disconnectTerminalResizeObserver();
       disconnectVisualViewportObserver();
     }
 
@@ -2114,7 +2279,6 @@ export default defineComponent({
       loadWorkspaceTree();
       connectWorkspaceSocket();
       renderActiveTerminal();
-      observeTerminalOutputSize();
     });
     onBeforeUnmount(cleanupRemoteShell);
 
@@ -2206,9 +2370,9 @@ export default defineComponent({
                   <span
                     class={[
                       "remote-shell__spotlight-status",
-                      `remote-shell__spotlight-status--${item.agent.activity || "unknown"}`,
+                      `remote-shell__spotlight-status--${agentDisplayActivity(item.agent)}`,
                     ]}
-                    aria-label={item.agent.activity || "unknown"}
+                    aria-label={agentDisplayActivity(item.agent)}
                   />
                 </button>
               ))}
@@ -2229,7 +2393,8 @@ export default defineComponent({
             </span>
           </Button>
           <div class="remote-shell__heading">
-            <div class="remote-shell__title">GSDV Remote</div>
+            <div class="remote-shell__title">GSDV</div>
+            <span class="remote-shell__heading-divider" aria-hidden="true" />
             <div class="remote-shell__subtitle">
               {binding
                 ? `${binding.workspace.name} / ${binding.agent.title}`
@@ -2251,10 +2416,19 @@ export default defineComponent({
                 key={item.id}
                 onClick={() => activateAgentTab(item.id)}
               >
+                <span
+                  class={[
+                    "remote-shell__agent-state-dot",
+                    `remote-shell__agent-state-dot--${tabDisplayActivity(item)}`,
+                  ]}
+                  aria-hidden="true"
+                />
                 <span class="remote-shell__tab-label">{item.title}</span>
-                {item.status === "dis" ? (
-                  <span class="remote-shell__tab-state">dis</span>
-                ) : null}
+                <span class="remote-shell__tab-state">
+                  {item.status === "dis"
+                    ? "dis"
+                    : tabDisplayActivity(item)}
+                </span>
                 <span
                   class="remote-shell__tab-close"
                   role="button"
@@ -2268,27 +2442,60 @@ export default defineComponent({
           </div>
         ) : null}
 
-        <main class="remote-shell__terminal" aria-label="Agent terminal output">
+        <main class="remote-shell__terminal" aria-label="Agent session output">
           <div
-            class={{
-              "remote-shell__terminal-output": true,
-              "remote-shell__terminal-output--interactive":
-                tab?.terminalScroll === true,
-            }}
+            class="remote-shell__terminal-output remote-shell__session"
             ref={terminalOutputElement}
             onScroll={handleTerminalScroll}
-            onWheel={handleTerminalWheel}
-            onTouchstart={handleTerminalTouchStart}
-            onTouchmove={handleTerminalTouchMove}
-            onTouchend={handleTerminalTouchEnd}
-            onTouchcancel={handleTerminalTouchEnd}
-          />
+          >
+            {tab?.events.length ? (
+              sessionRenderRows(
+                tab.events,
+                tabDisplayActivity(tab) === "busy",
+              ).map(renderSessionEvent)
+            ) : (
+              <div class="remote-shell__terminal-empty">
+                {tab?.status ?? "Select an agent from the workspace drawer."}
+              </div>
+            )}
+          </div>
           {terminalBanner ? (
             <div class="remote-shell__terminal-banner">
               {terminalBanner}
             </div>
           ) : null}
         </main>
+
+        {binding ? (
+          <div
+            class={[
+              "remote-shell__activity-strip",
+              `remote-shell__activity-strip--${tabDisplayActivity(tab)}`,
+            ]}
+            role="status"
+            aria-live="polite"
+          >
+            <span
+              class={[
+                "remote-shell__agent-state-dot",
+                `remote-shell__agent-state-dot--${tabDisplayActivity(tab)}`,
+              ]}
+              aria-hidden="true"
+            />
+            {tabDisplayActivity(tab) === "busy" ? (
+              <>
+                <span>Agent is responding</span>
+                <span class="remote-shell__activity-dots" aria-hidden="true">
+                  <i />
+                  <i />
+                  <i />
+                </span>
+              </>
+            ) : (
+              <span>{tabDisplayActivity(tab)}</span>
+            )}
+          </div>
+        ) : null}
 
         <footer class="remote-shell__composer">
           <div class="remote-shell__key-control">
@@ -2366,6 +2573,7 @@ export default defineComponent({
 
         <Drawer
           title="Workspaces"
+          rootClassName="remote-shell__drawer"
           placement="left"
           open={drawerOpen.value}
           width={320}

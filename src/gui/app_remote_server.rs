@@ -62,6 +62,8 @@ struct RemoteApiState {
     repaint_ctx: egui::Context,
     /// 合并 remote API 唤醒频率的 repaint 控制器。
     repaint_controller: repaint_gate::RepaintController,
+    /// Shared per-Agent session-file actors used by all browser connections.
+    session_stream_hub: SessionStreamHub,
 }
 
 /// 从 HTTP handler 发往 GUI AppEvent drain 的请求信封。
@@ -87,6 +89,8 @@ enum RemoteApiRequest {
     AgentImage(RemoteAgentImage),
     /// 订阅目标 agent terminal 输出。
     AgentOutputSubscribe(RemoteAgentTarget),
+    /// Subscribes to Agent-change signals without reading terminal cells.
+    AgentSessionSubscribe(RemoteAgentTarget),
     /// 按浏览器视口调整目标 agent terminal grid。
     AgentResize(RemoteAgentResize),
     /// 将 Web 交互式终端滚轮交给目标 agent。
@@ -111,6 +115,8 @@ enum RemoteApiPayload {
     AgentOk,
     /// agent 输出订阅响应。
     AgentOutputSubscription(RemoteAgentOutputSubscription),
+    /// Lightweight persisted-session stream descriptor.
+    AgentSessionSubscription(SessionStreamDescriptor),
 }
 
 /// remote API 错误响应。
@@ -192,7 +198,7 @@ struct RemoteAgentKey {
     /// Agent operation target.
     target: RemoteAgentTarget,
     /// Owning output WebSocket session id.
-    session_id: u64,
+    session_id: Option<u64>,
     /// Validated key to write to the PTY.
     key: TerminalRemoteKey,
 }
@@ -215,6 +221,12 @@ struct RemoteAgentOutputQuery {
     col_index: usize,
     /// Agent 运行实例稳定 id。
     agent_id: String,
+    /// Browser's current persisted session id for reconnect resume.
+    #[serde(default)]
+    session_id: String,
+    /// Browser's last acknowledged byte offset in that session file.
+    #[serde(default)]
+    seek: u64,
 }
 
 /// Agent 输出 WebSocket 订阅数据。
@@ -365,6 +377,10 @@ struct RemoteAgent {
     agent_id: String,
     /// UI 展示标题。
     title: String,
+    /// Agent provider used to parse its persisted session JSONL.
+    agent_kind: AgentKind,
+    /// Last session id reported by Agent hooks.
+    session_id: Option<String>,
     /// Whether this Agent belongs to the persisted spotlight browser.
     in_spotlight: bool,
     /// Persisted spotlight priority from 1 through 3.
@@ -494,6 +510,9 @@ impl GsdvGuiApp {
             RemoteApiRequest::AgentImage(input) => self.handle_remote_agent_image(ctx, input),
             RemoteApiRequest::AgentOutputSubscribe(target) => {
                 self.handle_remote_agent_output_subscribe(ctx, target)
+            }
+            RemoteApiRequest::AgentSessionSubscribe(target) => {
+                self.handle_remote_agent_session_subscribe(ctx, target)
             }
             RemoteApiRequest::AgentResize(input) => self.handle_remote_agent_resize(ctx, input),
             RemoteApiRequest::AgentScroll(input) => self.handle_remote_agent_scroll(input),
@@ -636,6 +655,32 @@ impl GsdvGuiApp {
         ))
     }
 
+    /// Creates a lightweight session-file subscription descriptor for one Agent.
+    ///
+    /// Example: Codex Agent -> Agent-change receiver without cloning terminal rows.
+    fn handle_remote_agent_session_subscribe(
+        &mut self,
+        ctx: &egui::Context,
+        target: RemoteAgentTarget,
+    ) -> RemoteApiResult {
+        let Some((workspace_index, slot_id)) = self.remote_agent_slot(&target) else {
+            return RemoteApiResult::Err(remote_not_found());
+        };
+        self.ensure_agent_terminal_host(ctx, workspace_index, &slot_id);
+        let Some(host) = self.remote_agent_host_mut(workspace_index, &slot_id) else {
+            if self.remote_agent_spawn_pending(workspace_index, &slot_id) {
+                return RemoteApiResult::Err(remote_agent_starting());
+            }
+            return RemoteApiResult::Err(remote_not_found());
+        };
+        RemoteApiResult::Ok(RemoteApiPayload::AgentSessionSubscription(
+            SessionStreamDescriptor {
+                stream_key: format!("{}:{}", target.workspace_id, target.agent_id),
+                source: host.session_source(),
+            },
+        ))
+    }
+
     /// 在 AppEvent drain 中处理当前 Web 会话的交互式终端滚轮。
     /// 例：lines=3 -> 复用桌面终端上滚三行的处理。
     fn handle_remote_agent_scroll(&mut self, input: RemoteAgentScroll) -> RemoteApiResult {
@@ -659,7 +704,11 @@ impl GsdvGuiApp {
         let Some(host) = self.remote_agent_host_mut(workspace_index, &slot_id) else {
             return RemoteApiResult::Err(remote_not_found());
         };
-        host.send_remote_key(input.session_id, input.key);
+        if let Some(session_id) = input.session_id {
+            host.send_remote_key(session_id, input.key);
+        } else {
+            host.send_remote_key_direct(input.key);
+        }
         RemoteApiResult::Ok(RemoteApiPayload::AgentOk)
     }
 
@@ -815,6 +864,7 @@ async fn run_remote_server_listener(
         event_tx: event_tx.clone(),
         repaint_ctx,
         repaint_controller,
+        session_stream_hub: SessionStreamHub::default(),
     });
     if let Err(error) = axum::serve(listener, app).await {
         let _ = event_tx.send(AppEvent::RemoteServerFailed {
@@ -837,6 +887,10 @@ fn remote_router(state: RemoteApiState) -> Router {
         .route("/api/agent/esc", post(remote_agent_esc_handler))
         .route("/api/agent/image", post(remote_agent_image_handler))
         .route("/api/agent/output/ws", get(remote_agent_output_ws_handler))
+        .route(
+            "/api/agent/session/ws",
+            get(remote_agent_session_ws_handler),
+        )
         .fallback(remote_web_handler)
         .with_state(state)
 }
@@ -1004,6 +1058,35 @@ async fn remote_agent_output_ws_handler(
     ws.on_upgrade(|socket| handle_remote_agent_output_socket(socket, subscription, state, target))
 }
 
+/// Handles lightweight persisted Agent session WebSocket subscriptions.
+///
+/// Example: `seek=4096` -> only JSONL bytes appended after byte 4096.
+async fn remote_agent_session_ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<RemoteApiState>,
+    query: Result<Query<RemoteAgentOutputQuery>, QueryRejection>,
+) -> axum::response::Response {
+    let query = match query_payload(query) {
+        Ok(query) => query,
+        Err(response) => return response,
+    };
+    let target = RemoteAgentTarget {
+        workspace_id: query.workspace_id,
+        row_index: query.row_index,
+        col_index: query.col_index,
+        agent_id: query.agent_id,
+    };
+    let descriptor =
+        match dispatch_remote_agent_session_subscription(state.clone(), target.clone()).await {
+            Ok(descriptor) => descriptor,
+            Err(error) => return remote_error_response(error),
+        };
+    let client = state
+        .session_stream_hub
+        .subscribe(descriptor, query.session_id, query.seek);
+    ws.on_upgrade(|socket| run_remote_agent_session_socket(socket, client, state, target))
+}
+
 /// Dispatches an API request through the unique AppEvent queue.
 async fn dispatch_remote_api_request(
     state: RemoteApiState,
@@ -1062,6 +1145,39 @@ async fn dispatch_remote_agent_output_subscription(
             RemoteApiResult::Ok(_) => {
                 return Err(remote_internal_error(
                     "remote api returned unexpected output subscription payload",
+                ));
+            }
+            RemoteApiResult::Err(error)
+                if remote_error_is_agent_starting(&error)
+                    && attempts < REMOTE_AGENT_START_RETRY_ATTEMPTS =>
+            {
+                attempts += 1;
+                tokio::time::sleep(REMOTE_AGENT_START_RETRY_INTERVAL).await;
+            }
+            RemoteApiResult::Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Dispatches one session-stream descriptor request through the GUI owner.
+async fn dispatch_remote_agent_session_subscription(
+    state: RemoteApiState,
+    target: RemoteAgentTarget,
+) -> Result<SessionStreamDescriptor, RemoteApiError> {
+    let mut attempts = 0_usize;
+    loop {
+        match dispatch_remote_api_request_once(
+            state.clone(),
+            RemoteApiRequest::AgentSessionSubscribe(target.clone()),
+        )
+        .await
+        {
+            RemoteApiResult::Ok(RemoteApiPayload::AgentSessionSubscription(subscription)) => {
+                return Ok(subscription);
+            }
+            RemoteApiResult::Ok(_) => {
+                return Err(remote_internal_error(
+                    "remote api returned unexpected session subscription payload",
                 ));
             }
             RemoteApiResult::Err(error)
@@ -1136,7 +1252,7 @@ fn dispatch_remote_agent_scroll(
 fn dispatch_remote_agent_key(
     state: &RemoteApiState,
     target: RemoteAgentTarget,
-    session_id: u64,
+    session_id: Option<u64>,
     key: TerminalRemoteKey,
 ) {
     let (reply, _response) = oneshot::channel();
@@ -1187,6 +1303,11 @@ fn remote_api_result_response(result: RemoteApiResult) -> axum::response::Respon
         RemoteApiResult::Ok(RemoteApiPayload::AgentOutputSubscription(_)) => remote_error_response(
             remote_internal_error("agent output subscription is websocket-only"),
         ),
+        RemoteApiResult::Ok(RemoteApiPayload::AgentSessionSubscription(_)) => {
+            remote_error_response(remote_internal_error(
+                "agent session subscription is websocket-only",
+            ))
+        }
         RemoteApiResult::Err(error) => remote_error_response(error),
     }
 }
@@ -1278,12 +1399,82 @@ async fn run_remote_agent_output_socket(
                     dispatch_remote_agent_key(
                         &state,
                         target.clone(),
-                        subscription.session_id,
+                        Some(subscription.session_id),
                         key,
                     );
                     continue;
                 }
                 if matches!(message, Message::Close(_)) {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Runs one persisted-session WebSocket without reading terminal render state.
+///
+/// Example: Agent wakeup grows JSONL -> one binary range frame; key text -> PTY input.
+async fn run_remote_agent_session_socket(
+    mut socket: WebSocket,
+    mut client: crate::gui::session_stream::SessionStreamClient,
+    state: RemoteApiState,
+    target: RemoteAgentTarget,
+) {
+    loop {
+        tokio::select! {
+            server_message = client.messages.recv() => {
+                let Some(server_message) = server_message else {
+                    return;
+                };
+                match server_message {
+                    SessionStreamMessage::Reset {
+                        session_id,
+                        agent_kind,
+                        seek,
+                        available_seek,
+                    } => {
+                        let payload = json!({
+                            "type": "session_reset",
+                            "session_id": session_id,
+                            "agent_kind": agent_kind.to_string(),
+                            "seek": seek,
+                            "available_seek": available_seek,
+                        });
+                        if socket.send(Message::Text(payload.to_string().into())).await.is_err() {
+                            return;
+                        }
+                    }
+                    SessionStreamMessage::Chunk {
+                        from_seek,
+                        to_seek,
+                        bytes,
+                    } => {
+                        let mut frame = Vec::with_capacity(16 + bytes.len());
+                        frame.extend_from_slice(&from_seek.to_le_bytes());
+                        frame.extend_from_slice(&to_seek.to_le_bytes());
+                        frame.extend_from_slice(&bytes);
+                        if socket.send(Message::Binary(frame.into())).await.is_err() {
+                            return;
+                        }
+                        client.acknowledge(to_seek);
+                    }
+                }
+            }
+            browser_message = socket.recv() => {
+                let Some(Ok(browser_message)) = browser_message else {
+                    return;
+                };
+                if let Some(key) = remote_agent_output_key_message(&browser_message) {
+                    dispatch_remote_agent_key(
+                        &state,
+                        target.clone(),
+                        None,
+                        key,
+                    );
+                    continue;
+                }
+                if matches!(browser_message, Message::Close(_)) {
                     return;
                 }
             }
@@ -1667,6 +1858,8 @@ fn remote_agent_from_column_slot(
         data::AgentColumnSlot::Main => Some(RemoteAgent {
             agent_id: workspace.agent_id.clone(),
             title: "main".to_string(),
+            agent_kind: workspace.agent_kind,
+            session_id: workspace.session_id.clone(),
             in_spotlight: spotlight_agents.contains_key(&workspace.agent_id),
             spotlight_level: spotlight_agents.get(&workspace.agent_id).copied(),
             activity: workspace.activity,
@@ -1682,6 +1875,8 @@ fn remote_agent_from_column_slot(
             .map(|subagent| RemoteAgent {
                 agent_id: subagent.agent_id.clone(),
                 title: subagent.name.clone(),
+                agent_kind: subagent.agent_kind,
+                session_id: subagent.session_id.clone(),
                 in_spotlight: spotlight_agents.contains_key(&subagent.agent_id),
                 spotlight_level: spotlight_agents.get(&subagent.agent_id).copied(),
                 activity: subagent.activity,

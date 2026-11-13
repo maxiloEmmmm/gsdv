@@ -12,6 +12,7 @@ mod perf_log;
 pub(crate) mod remote_workspace;
 mod repaint_gate;
 mod reviewer_adapter;
+mod session_stream;
 mod terminal_host;
 mod theme;
 mod workflow;

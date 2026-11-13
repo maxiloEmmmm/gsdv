@@ -1,19 +1,14 @@
 #!/usr/bin/env bash
-# Drives a real GSDV agent terminal through Chrome and measures TUI scroll updates.
-# Example: bash tests/e2e/third_party/web_terminal_real_agent_scroll.sh http://127.0.0.1:9518 http://127.0.0.1:20158 codex
+# Measures native session-history scrolling and reconnect through Chrome CDP.
+# Example: bash tests/e2e/third_party/web_terminal_real_agent_scroll.sh http://127.0.0.1:9518 http://127.0.0.1:20051 codex
 set -euo pipefail
 
 debug_url="${1:?Chrome DevTools HTTP endpoint required}"
 page_url="${2:?Served GSDV Web URL required}"
 agent_kind="${3:?Agent kind label required}"
-if [ "$#" -ge 4 ]; then
-  agent_command="$4"
-elif [ "$agent_kind" = "codex" ]; then
-  agent_command="/model"
-else
-  agent_command="/help"
-fi
-scroll_direction="${5:-alternate}"
+screenshot_path="${4:-}"
+viewport_width="${5:-800}"
+viewport_height="${6:-420}"
 target="$(curl --fail --silent --show-error -X PUT "$debug_url/json/new?about:blank")"
 target_id="$(jq -er .id <<< "$target")"
 target_ws="$(jq -er .webSocketDebuggerUrl <<< "$target")"
@@ -63,30 +58,16 @@ evaluate() {
 probe="$(jq -Rs . <<'JS'
 (() => {
   const NativeWebSocket = window.WebSocket;
-  window.agentScrollProbe = {frames: [], scrolls: [], terminalScroll: false, screenRows: null};
+  window.sessionProbe = {urls: [], sent: [], socket: null};
   window.WebSocket = class extends NativeWebSocket {
     constructor(...args) {
       super(...args);
-      if (!String(args[0]).includes('/api/agent/output/ws')) return;
-      this.addEventListener('message', event => {
-        let message;
-        try { message = JSON.parse(event.data); } catch (_) { return; }
-        if (message.type === 'snapshot') {
-          agentScrollProbe.terminalScroll = message.terminal_scroll === true;
-          agentScrollProbe.screenRows = message.screen_rows;
-        }
-        if (message.type === 'snapshot' || message.type === 'patch') {
-          agentScrollProbe.frames.push({type: message.type, at: performance.now()});
-        }
-      });
+      if (!String(args[0]).includes('/api/agent/session/ws')) return;
+      sessionProbe.urls.push(String(args[0]));
+      sessionProbe.socket = this;
     }
     send(raw) {
-      try {
-        const message = JSON.parse(raw);
-        if (message.type === 'scroll') {
-          agentScrollProbe.scrolls.push({...message, at: performance.now()});
-        }
-      } catch (_) {}
+      if (this === sessionProbe.socket) sessionProbe.sent.push(String(raw));
       return super.send(raw);
     }
   };
@@ -94,11 +75,11 @@ probe="$(jq -Rs . <<'JS'
 JS
 )"
 cdp Page.enable
-cdp Emulation.setDeviceMetricsOverride '{"width":800,"height":420,"deviceScaleFactor":1,"mobile":false}'
+cdp Emulation.setDeviceMetricsOverride "$(jq -cn --argjson width "$viewport_width" \
+  --argjson height "$viewport_height" \
+  '{width:$width,height:$height,deviceScaleFactor:1,mobile:false}')"
 cdp Page.addScriptToEvaluateOnNewDocument "$(jq -cn --argjson source "$probe" '{source:$source}')"
 cdp Page.navigate "$(jq -cn --arg url "$page_url" '{url:$url}')"
-evaluate "window.realAgentScrollCommand=$(jq -Rn --arg value "$agent_command" '$value')"
-evaluate "window.realAgentScrollDirection=$(jq -Rn --arg value "$scroll_direction" '$value')"
 evaluate '(async()=>{
   for(let i=0;i<200&&!document.querySelector(".remote-shell__menu-button");i++) await new Promise(r=>setTimeout(r,50));
   document.querySelector(".remote-shell__menu-button")?.click();
@@ -106,50 +87,65 @@ evaluate '(async()=>{
   document.querySelector(".remote-shell__drawer-node--root")?.click();
   for(let i=0;i<100&&!document.querySelector(".remote-shell__agent-node");i++) await new Promise(r=>setTimeout(r,50));
   document.querySelector(".remote-shell__agent-node")?.click();
-  for(let i=0;i<400&&agentScrollProbe.frames.length===0;i++) await new Promise(r=>setTimeout(r,50));
-  if(agentScrollProbe.frames.length===0) throw new Error(`real agent snapshot did not arrive: ${JSON.stringify({
-    agents:document.querySelectorAll(".remote-shell__agent-node").length,
-    tabs:document.querySelectorAll(".remote-shell__tab").length,
-    banner:document.querySelector(".remote-shell__terminal-banner")?.textContent,
-    output:document.querySelector(".remote-shell__terminal-output")?.textContent.slice(0,160)
-  })}`);
-  if(window.realAgentScrollCommand) {
-    const input=document.querySelector(".remote-shell__input");
-    input.value=window.realAgentScrollCommand;
-    input.dispatchEvent(new InputEvent("input",{bubbles:true,inputType:"insertText",data:window.realAgentScrollCommand}));
-    document.querySelector(".remote-shell__send-button")?.click();
-  }
-  for(let i=0;i<200&&!agentScrollProbe.terminalScroll;i++) await new Promise(r=>setTimeout(r,50));
-  if(!agentScrollProbe.terminalScroll) throw new Error("real agent never enabled terminal scroll mode");
-  await new Promise(r=>setTimeout(r,2500));
-  agentScrollProbe.frames=[];agentScrollProbe.scrolls=[];
+  for(let i=0;i<600&&document.querySelectorAll(".remote-shell__session-item,.remote-shell__session-tool").length<20;i++) await new Promise(r=>setTimeout(r,50));
   const out=document.querySelector(".remote-shell__terminal-output");
-  const rect=out.getBoundingClientRect();
-  for(let i=0;i<24;i++) {
-    const deltaY=window.realAgentScrollDirection==="up"?-72:
-      window.realAgentScrollDirection==="down"?72:i%2===0?72:-72;
-    out.dispatchEvent(new WheelEvent("wheel",{bubbles:true,cancelable:true,
-      deltaMode:WheelEvent.DOM_DELTA_PIXEL,deltaY,
-      clientX:rect.left+rect.width/2,
-      clientY:rect.top+Math.min(50,rect.height*0.25)}));
-    await new Promise(r=>setTimeout(r,20));
+  const count=document.querySelectorAll(".remote-shell__session-item,.remote-shell__session-tool").length;
+  if(count<20) throw new Error(`session did not render: count=${count}, banner=${document.querySelector(".remote-shell__terminal-banner")?.textContent}, text=${out?.textContent.slice(0,120)}`);
+  if(out.scrollHeight<=out.clientHeight*2) throw new Error(`session history is not scrollable: ${out.scrollHeight}/${out.clientHeight}`);
+  let stableHeight=0,stableFrames=0;
+  for(let i=0;i<200&&stableFrames<8;i++) {
+    await new Promise(r=>setTimeout(r,25));
+    if(out.scrollHeight===stableHeight) stableFrames+=1; else {stableHeight=out.scrollHeight;stableFrames=0;}
   }
-  await new Promise(r=>setTimeout(r,800));
-  const patches=agentScrollProbe.frames.filter(frame=>frame.type==="patch");
-  const snapshots=agentScrollProbe.frames.filter(frame=>frame.type==="snapshot");
-  const intervals=patches.slice(1).map((frame,index)=>frame.at-patches[index].at).sort((a,b)=>a-b);
-  const median=intervals.length?intervals[Math.floor(intervals.length/2)]:null;
-  const firstPatchMs=patches.length&&agentScrollProbe.scrolls.length?
-    patches[0].at-agentScrollProbe.scrolls[0].at:null;
-  if(agentScrollProbe.scrolls.length<12) throw new Error(`wheel input stalled: ${agentScrollProbe.scrolls.length}`);
-  if(patches.length<1) throw new Error(`scroll produced no patch; screenRows=${agentScrollProbe.screenRows}; scrolls=${JSON.stringify(agentScrollProbe.scrolls.slice(0,3))}; frames=${agentScrollProbe.frames.map(frame=>frame.type)}`);
-  if(snapshots.length!==0) throw new Error(`scroll fell back to full snapshots: ${snapshots.length}`);
-  if(firstPatchMs===null||firstPatchMs>150) throw new Error(`first scroll feedback is delayed: ${firstPatchMs}ms`);
-  if(median!==null&&median>80) throw new Error(`patch cadence is still slideshow-like: ${median.toFixed(1)}ms`);
-  return {scrolls:agentScrollProbe.scrolls.length,patches:patches.length,
-    snapshots:snapshots.length,firstPatchMs,medianPatchMs:median,
-    text:out.textContent.slice(0,120)};
+  const bottomDistance=out.scrollHeight-out.clientHeight-out.scrollTop;
+  if(bottomDistance>2) throw new Error(`initial session did not follow bottom: ${bottomDistance}px`);
+  const emptyMessages=[...document.querySelectorAll(".remote-shell__session-item")]
+    .filter(node=>!node.textContent.trim()).length;
+  if(emptyMessages!==0) throw new Error(`empty session messages rendered: ${emptyMessages}`);
+  const links=[...document.querySelectorAll(".remote-shell__session-markdown a")];
+  if(links.some(link=>link.target!=="_blank"||!link.relList.contains("noopener")||!link.relList.contains("noreferrer"))) throw new Error("Markdown link did not open safely in a new tab");
+  return {count,scrollTop:out.scrollTop,scrollHeight:out.scrollHeight,clientHeight:out.clientHeight,bottomDistance,emptyMessages,links:links.length};
 })()'
-jq -er --arg kind "$agent_kind" \
-  '.result.result.value | {agent:$kind,scrolls,patches,snapshots,firstPatchMs,medianPatchMs,text}' \
-  <<< "$cdp_response"
+initial="$(jq -c '.result.result.value' <<< "$cdp_response")"
+if [ -n "$screenshot_path" ]; then
+  evaluate 'new Promise(resolve=>setTimeout(()=>resolve(true),500))'
+  cdp Page.captureScreenshot '{"format":"png","captureBeyondViewport":false}'
+  jq -er '.result.data' <<< "$cdp_response" | base64 -d >"$screenshot_path"
+fi
+
+evaluate 'sessionProbe.wheelBefore=document.querySelector(".remote-shell__terminal-output").scrollTop'
+cdp Input.synthesizeScrollGesture '{"x":500,"y":200,"yDistance":480,"speed":2400,"gestureSourceType":"mouse"}'
+evaluate '(async()=>{
+  const out=document.querySelector(".remote-shell__terminal-output");
+  const started=performance.now();
+  const before=sessionProbe.wheelBefore;
+  for(let i=0;i<10&&out.scrollTop===before;i++) await new Promise(requestAnimationFrame);
+  const responseMs=performance.now()-started;
+  const sent=sessionProbe.sent.map(raw=>{try{return JSON.parse(raw).type}catch(_){return "invalid"}});
+  if(!(out.scrollTop<before)) throw new Error(`native wheel did not move: ${before} -> ${out.scrollTop}`);
+  if(sent.includes("scroll")||sent.includes("resize")) throw new Error(`wheel leaked to PTY protocol: ${sent}`);
+  if(responseMs>100) throw new Error(`native wheel response is delayed: ${responseMs}ms`);
+  return {before,after:out.scrollTop,responseMs,sent};
+})()'
+wheel="$(jq -c '.result.result.value' <<< "$cdp_response")"
+
+evaluate '(async()=>{
+  const out=document.querySelector(".remote-shell__terminal-output");
+  const countBefore=document.querySelectorAll(".remote-shell__session-item,.remote-shell__session-tool").length;
+  const socket=sessionProbe.socket;
+  socket.close();
+  for(let i=0;i<200&&sessionProbe.urls.length<2;i++) await new Promise(r=>setTimeout(r,25));
+  if(sessionProbe.urls.length<2) throw new Error("session socket did not reconnect");
+  const reconnect=new URL(sessionProbe.urls.at(-1));
+  const seek=Number(reconnect.searchParams.get("seek"));
+  if(!(seek>0)) throw new Error(`reconnect did not resume seek: ${reconnect}`);
+  for(let i=0;i<100&&sessionProbe.socket.readyState!==WebSocket.OPEN;i++) await new Promise(r=>setTimeout(r,25));
+  const countAfter=document.querySelectorAll(".remote-shell__session-item,.remote-shell__session-tool").length;
+  if(countAfter!==countBefore) throw new Error(`same-session reconnect cleared output: ${countBefore} -> ${countAfter}`);
+  if(out.scrollTop<0) throw new Error("invalid scroll position after reconnect");
+  return {connections:sessionProbe.urls.length,seek,countBefore,countAfter};
+})()'
+reconnect="$(jq -c '.result.result.value' <<< "$cdp_response")"
+
+jq -cn --arg agent "$agent_kind" --argjson initial "$initial" --argjson wheel "$wheel" \
+  --argjson reconnect "$reconnect" '{agent:$agent,initial:$initial,wheel:$wheel,reconnect:$reconnect}'

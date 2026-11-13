@@ -3,8 +3,8 @@
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
     sans-serif;
-  color: #111827;
-  background: #f8fafc;
+  color: #e5e7eb;
+  background: #090a0c;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -46,22 +46,23 @@ textarea {
   height: 100%;
   height: var(--remote-shell-viewport-height, 100%);
   max-height: var(--remote-shell-viewport-height, 100%);
-  --remote-terminal-fg: #d1fae5;
-  --remote-terminal-bg: #0f172a;
-  --remote-terminal-cursor: #d1fae5;
-  --remote-terminal-muted: #94a3b8;
-  --remote-terminal-primary: #2563eb;
-  background: #f8fafc;
+  --remote-terminal-fg: #e5e7eb;
+  --remote-terminal-bg: #0b0d10;
+  --remote-terminal-cursor: #f8fafc;
+  --remote-terminal-muted: #8b929c;
+  --remote-terminal-primary: #3b82f6;
+  background: #090a0c;
 }
 
 .remote-shell__header {
   display: flex;
   align-items: center;
-  gap: 12px;
-  min-height: 56px;
-  padding: 8px 12px;
-  border-bottom: 1px solid #dbe3ef;
-  background: #ffffff;
+  gap: 8px;
+  min-height: 38px;
+  height: 38px;
+  padding: 4px 10px;
+  border-bottom: 1px solid #292c31;
+  background: #111315;
 }
 
 .remote-shell__menu-button {
@@ -69,8 +70,8 @@ textarea {
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
+  width: 30px;
+  height: 30px;
   padding: 0;
 }
 
@@ -89,13 +90,18 @@ textarea {
 }
 
 .remote-shell__heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   min-width: 0;
+  overflow: hidden;
 }
 
 .remote-shell__title {
   overflow: hidden;
-  color: #111827;
-  font-size: 16px;
+  flex: 0 0 auto;
+  color: #f1f3f5;
+  font-size: 13px;
   font-weight: 650;
   line-height: 1.35;
   text-overflow: ellipsis;
@@ -103,24 +109,32 @@ textarea {
 }
 
 .remote-shell__subtitle {
+  min-width: 0;
   overflow: hidden;
-  color: #6b7280;
-  font-size: 12px;
-  line-height: 1.35;
+  color: #9ba1aa;
+  font-size: 11px;
+  line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.remote-shell__heading-divider {
+  flex: 0 0 auto;
+  width: 1px;
+  height: 14px;
+  background: #3a3e44;
 }
 
 .remote-shell__tabs {
   display: flex;
   flex: 0 0 auto;
-  gap: 4px;
-  min-height: 30px;
-  padding: 4px 8px;
+  gap: 6px;
+  min-height: 34px;
+  padding: 5px 10px;
   overflow-x: auto;
   overflow-y: hidden;
-  border-bottom: 1px solid #dbe3ef;
-  background: #ffffff;
+  border-bottom: 1px solid #292c31;
+  background: #0d0f11;
 }
 
 .remote-shell__tab {
@@ -129,21 +143,21 @@ textarea {
   align-items: center;
   gap: 5px;
   max-width: 168px;
-  height: 22px;
-  padding: 0 6px;
-  border: 1px solid #dbe3ef;
+  height: 24px;
+  padding: 0 7px;
+  border: 1px solid #34383e;
   border-radius: 5px;
-  background: #f8fafc;
-  color: #334155;
-  font-size: 12px;
-  line-height: 20px;
+  background: #15181b;
+  color: #c9cdd3;
+  font-size: 11px;
+  line-height: 22px;
   cursor: pointer;
 }
 
 .remote-shell__tab--active {
-  border-color: #93c5fd;
-  background: #eff6ff;
-  color: #1d4ed8;
+  border-color: #3b82f6;
+  background: #18212d;
+  color: #eef5ff;
 }
 
 .remote-shell__tab--disconnected {
@@ -159,8 +173,8 @@ textarea {
 
 .remote-shell__tab-state {
   flex: 0 0 auto;
-  color: #b91c1c;
-  font-size: 10px;
+  color: #9299a3;
+  font-size: 9px;
 }
 
 .remote-shell__tab-close {
@@ -171,43 +185,43 @@ textarea {
   width: 14px;
   height: 14px;
   border-radius: 3px;
-  color: #64748b;
+  color: #7c838d;
   font-size: 11px;
   line-height: 1;
 }
 
 .remote-shell__tab-close:hover {
-  background: #e2e8f0;
-  color: #0f172a;
+  background: #2c3035;
+  color: #f1f3f5;
 }
 
 .remote-shell__terminal {
   position: relative;
   flex: 1 1 auto;
   min-height: 0;
-  padding: 12px;
+  padding: 0;
   overflow: hidden;
-  background: #f8fafc;
+  background: #0b0d10;
 }
 
 .remote-shell__terminal-output {
   width: 100%;
   height: 100%;
   margin: 0;
-  padding: 12px;
+  padding: 0;
   overflow: auto;
   overscroll-behavior: contain;
   touch-action: pan-x pan-y pinch-zoom;
   -webkit-overflow-scrolling: touch;
-  border: 1px solid var(--remote-terminal-muted);
-  border-radius: 8px;
+  border: 0;
+  border-radius: 0;
   background: var(--remote-terminal-bg);
   color: var(--remote-terminal-fg);
-  font-family:
-    "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
   font-size: 13px;
   line-height: 1.55;
-  white-space: pre;
+  white-space: normal;
+  scrollbar-gutter: stable;
 }
 
 .remote-shell__terminal-output--interactive {
@@ -215,8 +229,290 @@ textarea {
 }
 
 .remote-shell__terminal-empty {
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: 20px;
   color: var(--remote-terminal-muted);
   white-space: normal;
+}
+
+.remote-shell__session {
+  overflow-anchor: none;
+}
+
+.remote-shell__session-item {
+  padding: 5px 20px;
+}
+
+.remote-shell__session-item--user {
+  background: transparent;
+}
+
+.remote-shell__session-content {
+  width: 100%;
+  max-width: 1600px;
+  margin: 0 auto;
+}
+
+.remote-shell__session-item--user .remote-shell__session-content {
+  padding: 3px 0 3px 11px;
+  border-left: 2px solid #3fcf8e;
+}
+
+.remote-shell__session-item--user .remote-shell__session-label {
+  display: none;
+}
+
+.remote-shell__session-label {
+  overflow: hidden;
+  color: var(--remote-terminal-muted);
+  margin-bottom: 1px;
+  font-size: 10px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remote-shell__session-text,
+.remote-shell__session-tool pre {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: inherit;
+  font: inherit;
+  line-height: inherit;
+  white-space: pre-wrap;
+}
+
+.remote-shell__session-text {
+  color: #dfe3e8;
+}
+
+.remote-shell__session-markdown > :first-child {
+  margin-top: 0;
+}
+
+.remote-shell__session-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.remote-shell__session-markdown p,
+.remote-shell__session-markdown ul,
+.remote-shell__session-markdown ol,
+.remote-shell__session-markdown blockquote,
+.remote-shell__session-markdown pre,
+.remote-shell__session-markdown table {
+  margin: 0 0 6px;
+}
+
+.remote-shell__session-markdown h1,
+.remote-shell__session-markdown h2,
+.remote-shell__session-markdown h3,
+.remote-shell__session-markdown h4 {
+  margin: 16px 0 8px;
+  color: #f1f3f5;
+  font-weight: 650;
+  letter-spacing: 0;
+  line-height: 1.35;
+}
+
+.remote-shell__session-markdown h1 {
+  font-size: 18px;
+}
+
+.remote-shell__session-markdown h2 {
+  font-size: 16px;
+}
+
+.remote-shell__session-markdown h3,
+.remote-shell__session-markdown h4 {
+  font-size: 14px;
+}
+
+.remote-shell__session-markdown ul,
+.remote-shell__session-markdown ol {
+  padding-left: 22px;
+}
+
+.remote-shell__session-markdown li + li {
+  margin-top: 3px;
+}
+
+.remote-shell__session-markdown strong {
+  color: #f5f6f8;
+  font-weight: 700;
+}
+
+.remote-shell__session-markdown a {
+  color: #69a7f5;
+  text-decoration: none;
+}
+
+.remote-shell__session-markdown a:hover {
+  text-decoration: underline;
+}
+
+.remote-shell__session-markdown :not(pre) > code {
+  padding: 1px 5px;
+  border: 1px solid #30353b;
+  border-radius: 4px;
+  background: #191c20;
+  color: #f0c36a;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.92em;
+}
+
+.remote-shell__session-markdown pre {
+  padding: 11px 12px;
+  overflow-x: auto;
+  border: 1px solid #2b3036;
+  border-radius: 4px;
+  background: #111315;
+}
+
+.remote-shell__session-markdown pre code {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.remote-shell__mermaid {
+  margin: 8px 0;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid #2b3036;
+  border-radius: 4px;
+  background: #0f1114;
+}
+
+.remote-shell__mermaid svg {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}
+
+.remote-shell__mermaid-error {
+  border-color: #7f1d1d !important;
+}
+
+.remote-shell__session-markdown blockquote {
+  padding-left: 12px;
+  border-left: 3px solid #3b82f6;
+  color: #a8afb8;
+}
+
+.remote-shell__session-markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  overflow: hidden;
+  font-size: 12px;
+}
+
+.remote-shell__session-markdown th,
+.remote-shell__session-markdown td {
+  padding: 6px 8px;
+  border: 1px solid #30343a;
+  text-align: left;
+  vertical-align: top;
+}
+
+.remote-shell__session-markdown th {
+  background: #181b1f;
+  color: #f0f2f4;
+}
+
+.remote-shell__session-markdown hr {
+  height: 1px;
+  margin: 14px 0;
+  border: 0;
+  background: #292d32;
+}
+
+.remote-shell__session-tool {
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: 7px 24px;
+  color: var(--remote-terminal-muted);
+}
+
+.remote-shell__session-tool summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.remote-shell__session-tool pre {
+  margin-top: 9px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  border: 1px solid #2b3036;
+  border-radius: 4px;
+  background: #111315;
+  color: var(--remote-terminal-fg);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 12px;
+}
+
+.remote-shell__session-tool-group {
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: 7px 24px;
+  color: var(--remote-terminal-muted);
+}
+
+.remote-shell__session-tool-group > summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.remote-shell__session-tool-group-items {
+  padding: 4px 0 0 12px;
+  border-left: 1px solid #2b3036;
+}
+
+.remote-shell__session-tool-group-items .remote-shell__session-tool {
+  padding-inline: 8px;
+}
+
+.remote-shell__session-reasoning {
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: 7px 24px;
+  color: #8f969f;
+}
+
+.remote-shell__session-reasoning summary {
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.remote-shell__session-reasoning .remote-shell__session-text {
+  padding: 9px 0 2px 16px;
+  color: #9ba1aa;
+  font-size: 12px;
+}
+
+.remote-shell__session-compacted {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: 8px 20px;
+  color: #767d87;
+  font-size: 10px;
+}
+
+.remote-shell__session-compacted::before,
+.remote-shell__session-compacted::after {
+  flex: 1 1 auto;
+  height: 1px;
+  background: #25292e;
+  content: "";
 }
 
 .remote-shell__terminal-row {
@@ -270,9 +566,56 @@ textarea {
   display: flex;
   align-items: flex-end;
   gap: 8px;
-  padding: 10px 12px 12px;
-  border-top: 1px solid #dbe3ef;
-  background: #ffffff;
+  padding: 8px 10px 10px;
+  border-top: 1px solid #292c31;
+  background: #111315;
+}
+
+.remote-shell__activity-strip {
+  display: flex;
+  flex: 0 0 26px;
+  align-items: center;
+  gap: 7px;
+  height: 26px;
+  padding: 0 14px;
+  border-top: 1px solid #292c31;
+  background: #0f1114;
+  color: #858c96;
+  font-size: 11px;
+}
+
+.remote-shell__activity-strip--busy {
+  color: #d9dde3;
+}
+
+.remote-shell__activity-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 10px;
+}
+
+.remote-shell__activity-dots i {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: #f4b942;
+  animation: remote-shell-reply-dot 1.2s ease-in-out infinite;
+}
+
+.remote-shell__activity-dots i:nth-child(2) {
+  animation-delay: 120ms;
+}
+
+.remote-shell__activity-dots i:nth-child(3) {
+  animation-delay: 240ms;
+}
+
+@keyframes remote-shell-reply-dot {
+  50% {
+    opacity: 0.3;
+    transform: translateY(-2px);
+  }
 }
 
 .remote-shell__input {
@@ -298,8 +641,8 @@ textarea {
 }
 
 .remote-shell__input:disabled {
-  background: #f3f4f6;
-  color: #9ca3af;
+  background: #191c20;
+  color: #6f7680;
   cursor: not-allowed;
 }
 
@@ -314,6 +657,58 @@ textarea {
 .remote-shell__action-button {
   font-size: 12px;
   font-weight: 650;
+}
+
+.remote-shell .ant-btn {
+  border-color: #3a3f46;
+  background: #171a1e;
+  color: #d9dde2;
+  box-shadow: none;
+}
+
+.remote-shell .ant-btn:not(:disabled):hover,
+.remote-shell .ant-btn:not(:disabled):focus-visible {
+  border-color: #4b89dc;
+  background: #1c2530;
+  color: #f3f6fa;
+}
+
+.remote-shell .ant-btn-primary {
+  border-color: #3b82f6;
+  background: #3b82f6;
+  color: #ffffff;
+}
+
+.remote-shell__agent-state-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #69707a;
+}
+
+.remote-shell__agent-state-dot--busy {
+  background: #f4b942;
+  box-shadow: 0 0 0 3px rgb(244 185 66 / 13%);
+  animation: remote-shell-busy-pulse 1.8s ease-in-out infinite;
+}
+
+.remote-shell__agent-state-dot--idle {
+  background: #3fcf8e;
+}
+
+.remote-shell__agent-state-dot--error {
+  background: #ef6461;
+}
+
+.remote-shell__agent-state-dot--stopped {
+  background: #555b64;
+}
+
+@keyframes remote-shell-busy-pulse {
+  50% {
+    box-shadow: 0 0 0 4px rgb(244 185 66 / 22%);
+  }
 }
 
 .remote-shell__key-control {
@@ -365,9 +760,10 @@ textarea {
 .remote-shell--spotlight {
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr) 26px auto;
   grid-template-areas:
     "spotlight terminal"
+    "spotlight activity"
     "spotlight composer";
   background: #0b1016;
   color: #e6edf3;
@@ -579,19 +975,25 @@ textarea {
   background: #111821;
 }
 
+.remote-shell--spotlight .remote-shell__activity-strip {
+  grid-area: activity;
+  border-color: #293646;
+  background: #0e1319;
+}
+
 .remote-shell__drawer-footer {
   position: sticky;
   bottom: 0;
   margin-top: 16px;
   padding-top: 12px;
-  border-top: 1px solid #e5e7eb;
-  background: #ffffff;
+  border-top: 1px solid #2a2e33;
+  background: #111315;
 }
 
 .remote-shell__drawer-tree {
   display: grid;
   gap: 2px;
-  color: #111827;
+  color: #dfe3e8;
   font-size: 14px;
 }
 
@@ -612,11 +1014,11 @@ textarea {
 }
 
 .remote-shell__drawer-node {
-  color: #374151;
+  color: #b7bdc6;
 }
 
 .remote-shell__drawer-node:hover {
-  background: #f1f5f9;
+  background: #1c2025;
 }
 
 .remote-shell__drawer-node--root {
@@ -626,7 +1028,7 @@ textarea {
 .remote-shell__drawer-caret {
   flex: 0 0 auto;
   width: 12px;
-  color: #64748b;
+  color: #737b86;
   font-size: 11px;
   line-height: 1;
 }
@@ -644,25 +1046,42 @@ textarea {
 
 .remote-shell__drawer-state {
   padding: 8px;
-  color: #64748b;
+  color: #8f969f;
   font-size: 13px;
   line-height: 1.4;
 }
 
 .remote-shell__drawer-state--error {
-  color: #b91c1c;
+  color: #ef7774;
 }
 
 .remote-shell__agent-node {
   border: 1px solid transparent;
-  background: #eff6ff;
-  color: #1d4ed8;
+  background: transparent;
+  color: #c7ccd3;
 }
 
 .remote-shell__agent-node:hover,
 .remote-shell__agent-node--selected {
-  border-color: #bfdbfe;
-  background: #dbeafe;
+  border-color: #344961;
+  background: #17212c;
+  color: #eef5ff;
+}
+
+.remote-shell__drawer .ant-drawer-content,
+.remote-shell__drawer .ant-drawer-header,
+.remote-shell__drawer .ant-drawer-body {
+  background: #111315;
+  color: #e5e7eb;
+}
+
+.remote-shell__drawer .ant-drawer-header {
+  border-bottom-color: #2a2e33;
+}
+
+.remote-shell__drawer .ant-drawer-title,
+.remote-shell__drawer .ant-drawer-close {
+  color: #e5e7eb;
 }
 
 @media (max-width: 480px) {
@@ -672,6 +1091,20 @@ textarea {
 
   .remote-shell__terminal {
     padding: 8px;
+  }
+
+  .remote-shell__session-item {
+    padding: 14px 12px;
+  }
+
+  .remote-shell__session-tool,
+  .remote-shell__session-tool-group,
+  .remote-shell__session-reasoning {
+    padding-inline: 12px;
+  }
+
+  .remote-shell__tab-state {
+    display: none;
   }
 
   .remote-shell__composer {

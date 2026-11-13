@@ -343,6 +343,24 @@ pub struct TerminalRemoteOutputSource {
     output_rx: watch::Receiver<u64>,
 }
 
+/// Cheap Agent metadata read by the remote session-file stream.
+#[derive(Debug, Clone)]
+pub struct TerminalSessionMetadata {
+    /// Agent provider that owns the persisted session format.
+    pub agent_kind: AgentKind,
+    /// Last session id received from Agent hooks.
+    pub session_id: Option<String>,
+}
+
+/// Agent-change signal plus current session metadata, without terminal-grid access.
+#[derive(Clone)]
+pub struct TerminalSessionSource {
+    /// Latest provider/session binding synchronized by the GUI owner.
+    metadata: Arc<Mutex<TerminalSessionMetadata>>,
+    /// PTY output changes used only to trigger one session-file stat.
+    output_rx: watch::Receiver<u64>,
+}
+
 /// Remote WebSocket 对一个 Agent terminal 的独占控制句柄。
 pub struct TerminalRemoteSessionControl {
     /// 本次 remote 连接的递增 id，用于忽略旧连接退出事件。
@@ -543,6 +561,8 @@ pub struct GuiTerminalHost {
     runtime_theme_mode: Arc<Mutex<gui_theme::ThemeMode>>,
     /// Agent remote 输出订阅的轻量变化信号。
     remote_output_tx: watch::Sender<u64>,
+    /// Provider/session metadata shared with the lightweight Web session stream.
+    session_metadata: Arc<Mutex<TerminalSessionMetadata>>,
     /// Agent terminal 被 remote WebSocket 独占时的连接状态。
     remote_session: Option<TerminalRemoteSession>,
     /// Agent terminal 的 IME 组合态，用于 Windows 输入法按键过滤。
@@ -716,6 +736,25 @@ impl TerminalRemoteOutputSource {
         }
 
         TerminalRemoteUpdate::Snapshot(snapshot)
+    }
+}
+
+impl TerminalSessionSource {
+    /// Waits for an Agent output or metadata change.
+    ///
+    /// Example: Codex writes PTY output -> session stream performs one file stat.
+    pub async fn changed(&mut self) -> bool {
+        self.output_rx.changed().await.is_ok()
+    }
+
+    /// Clones the small provider/session snapshot without touching the terminal grid.
+    ///
+    /// Example: Hook switches A to B -> returns session B on the next signal.
+    pub fn metadata(&self) -> TerminalSessionMetadata {
+        self.metadata
+            .lock()
+            .map(|metadata| metadata.clone())
+            .unwrap_or_else(|error| error.into_inner().clone())
     }
 }
 
@@ -1205,6 +1244,10 @@ impl GuiTerminalHost {
         let runtime_state = Arc::new(Mutex::new(TerminalRuntimeState::default()));
         let runtime_theme_mode = Arc::new(Mutex::new(theme_mode));
         let (remote_output_tx, _) = watch::channel(0_u64);
+        let session_metadata = Arc::new(Mutex::new(TerminalSessionMetadata {
+            agent_kind: workspace.agent_kind,
+            session_id: workspace.session_id.clone(),
+        }));
         let shell = terminal_command(workspace, kind);
         let args = terminal_args(workspace, kind, id, agent_launch, agent_session_id);
         let env = terminal_env(workspace, kind, network_settings);
@@ -1263,6 +1306,7 @@ impl GuiTerminalHost {
             runtime_state,
             runtime_theme_mode,
             remote_output_tx,
+            session_metadata,
             remote_session: None,
             ime_state: TerminalImeState::default(),
             font: FontId::monospace(14.0),
@@ -1284,6 +1328,10 @@ impl GuiTerminalHost {
         let runtime_state = Arc::new(Mutex::new(TerminalRuntimeState::default()));
         let runtime_theme_mode = Arc::new(Mutex::new(theme_mode));
         let (remote_output_tx, _) = watch::channel(0_u64);
+        let session_metadata = Arc::new(Mutex::new(TerminalSessionMetadata {
+            agent_kind: workspace.agent_kind,
+            session_id: None,
+        }));
         let args = helix_args(&spec);
         let launch_command = command_display("hx", &args);
         let backend = spawn_backend_with_env(
@@ -1331,6 +1379,7 @@ impl GuiTerminalHost {
             runtime_state,
             runtime_theme_mode,
             remote_output_tx,
+            session_metadata,
             remote_session: None,
             ime_state: TerminalImeState::default(),
             font: FontId::monospace(14.0),
@@ -1349,6 +1398,26 @@ impl GuiTerminalHost {
             self.session_id = workspace.session_id.clone();
         }
         self.activity = workspace.activity;
+        let metadata_changed = self
+            .session_metadata
+            .lock()
+            .map(|metadata| {
+                metadata.agent_kind != workspace.agent_kind
+                    || metadata.session_id != workspace.session_id
+            })
+            .unwrap_or(true);
+        if metadata_changed {
+            let mut metadata = self
+                .session_metadata
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            metadata.agent_kind = workspace.agent_kind;
+            metadata.session_id = workspace.session_id.clone();
+            drop(metadata);
+            // Session rollover may arrive from a Hook before the PTY emits more bytes.
+            self.remote_output_tx
+                .send_modify(|sequence| *sequence = sequence.wrapping_add(1));
+        }
         if self.kind == TerminalSurfaceKind::Agent {
             self.terminal_output_roots = terminal_output_search_roots(workspace);
         }
@@ -1374,6 +1443,16 @@ impl GuiTerminalHost {
         TerminalRemoteOutputSource {
             term: self.backend.term.clone(),
             theme_mode: self.runtime_theme_mode.clone(),
+            output_rx: self.remote_output_tx.subscribe(),
+        }
+    }
+
+    /// Returns the Agent-change source used by the session JSONL Web stream.
+    ///
+    /// Example: two Web clients -> cloned receivers share one wakeup sequence.
+    pub fn session_source(&self) -> TerminalSessionSource {
+        TerminalSessionSource {
+            metadata: self.session_metadata.clone(),
             output_rx: self.remote_output_tx.subscribe(),
         }
     }
@@ -1462,6 +1541,13 @@ impl GuiTerminalHost {
         {
             return;
         }
+        self.send_remote_key_direct(key);
+    }
+
+    /// Sends one whitelisted key without requiring ownership of terminal rendering.
+    ///
+    /// Example: session-file WebSocket `Up` -> terminal receives CSI A.
+    pub fn send_remote_key_direct(&mut self, key: TerminalRemoteKey) {
         match key {
             TerminalRemoteKey::Up => self.write_bytes(b"\x1b[A"),
             TerminalRemoteKey::Down => self.write_bytes(b"\x1b[B"),
