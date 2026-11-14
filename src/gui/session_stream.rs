@@ -56,6 +56,15 @@ pub enum SessionStreamMessage {
         /// Shared bytes reused by subscribers with the same seek.
         bytes: Bytes,
     },
+    /// Raw bytes for complete records immediately before a browser's history boundary.
+    History {
+        /// Inclusive source-file byte offset of the older records.
+        from_seek: u64,
+        /// Exclusive source-file byte offset matching the requested boundary.
+        to_seek: u64,
+        /// Complete JSONL records that can be prepended without buffering.
+        bytes: Bytes,
+    },
 }
 
 /// One browser subscription to a shared Agent stream.
@@ -76,6 +85,17 @@ impl SessionStreamClient {
         let _ = self
             .command_tx
             .send(SessionStreamCommand::Acknowledge { id: self.id, seek });
+    }
+
+    /// Requests complete records before the browser's earliest loaded byte.
+    ///
+    /// Example: session `a` before byte 4096 -> up to 100 preceding records.
+    pub fn load_history(&self, session_id: String, before_seek: u64) {
+        let _ = self.command_tx.send(SessionStreamCommand::LoadHistory {
+            id: self.id,
+            session_id,
+            before_seek,
+        });
     }
 }
 
@@ -116,6 +136,15 @@ enum SessionStreamCommand {
         id: u64,
         /// Exclusive delivered file offset.
         seek: u64,
+    },
+    /// Reads one older page without changing the live append cursor.
+    LoadHistory {
+        /// Actor-local subscriber id.
+        id: u64,
+        /// Session id held by the requesting browser.
+        session_id: String,
+        /// Exclusive upper byte boundary of the requested history page.
+        before_seek: u64,
     },
     /// Removes one browser cursor.
     Unsubscribe {
@@ -344,6 +373,13 @@ impl SessionStreamActor {
                 }
                 self.distribute_available_bytes().await;
             }
+            SessionStreamCommand::LoadHistory {
+                id,
+                session_id,
+                before_seek,
+            } => {
+                self.send_history_to(id, &session_id, before_seek).await;
+            }
             SessionStreamCommand::Unsubscribe { id } => {
                 self.subscribers.remove(&id);
             }
@@ -537,6 +573,69 @@ impl SessionStreamActor {
         tail_line_start(&mut open.file, file_size, INITIAL_SESSION_LINES)
             .await
             .unwrap_or(0)
+    }
+
+    /// Sends one preceding JSONL page without moving the subscriber's live seek.
+    ///
+    /// Example: boundary 4096 -> read the prior 100 records and keep live seek 8192.
+    async fn send_history_to(&mut self, id: u64, session_id: &str, before_seek: u64) {
+        let valid_subscriber = self
+            .subscribers
+            .get(&id)
+            .is_some_and(|subscriber| subscriber.reset_sent && subscriber.session_id == session_id);
+        let valid_identity = self
+            .identity
+            .as_ref()
+            .is_some_and(|identity| identity.session_id == session_id);
+        let observed_size = self
+            .open_file
+            .as_ref()
+            .map(|open| open.observed.len)
+            .unwrap_or(0);
+        if !valid_subscriber || !valid_identity || before_seek == 0 || before_seek > observed_size {
+            return;
+        }
+
+        let history = async {
+            let open = self.open_file.as_mut()?;
+            let from_seek = tail_line_start(&mut open.file, before_seek, INITIAL_SESSION_LINES)
+                .await
+                .ok()?;
+            let byte_count = usize::try_from(before_seek - from_seek).ok()?;
+            open.file
+                .seek(std::io::SeekFrom::Start(from_seek))
+                .await
+                .ok()?;
+            let mut bytes = vec![0_u8; byte_count];
+            open.file.read_exact(&mut bytes).await.ok()?;
+            Some((from_seek, Bytes::from(bytes)))
+        }
+        .await;
+        let Some((from_seek, bytes)) = history else {
+            // Closing the subscriber lets the browser reconnect and clear its
+            // loading state instead of leaving a failed history request stuck.
+            self.subscribers.remove(&id);
+            return;
+        };
+        let Some(messages) = self
+            .subscribers
+            .get(&id)
+            .map(|subscriber| subscriber.messages.clone())
+        else {
+            return;
+        };
+        if messages
+            .try_send(SessionStreamMessage::History {
+                from_seek,
+                to_seek: before_seek,
+                bytes,
+            })
+            .is_err()
+        {
+            // A full queue means the browser cannot consume interactive history
+            // safely; reconnecting restores a coherent live cursor.
+            self.subscribers.remove(&id);
+        }
     }
 
     /// Groups subscribers by seek and reads each complete live delta once.

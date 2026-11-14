@@ -311,6 +311,10 @@ struct RemoteAgentOutputClientMessage {
     row: Option<u16>,
     /// key 消息携带的白名单按键名。
     key: Option<String>,
+    /// Persisted session id used to reject stale history requests.
+    session_id: Option<String>,
+    /// Exclusive upper byte boundary for an older JSONL page.
+    before_seek: Option<u64>,
 }
 
 /// HTTP JSON 图片输入请求。
@@ -1459,12 +1463,31 @@ async fn run_remote_agent_session_socket(
                         }
                         client.acknowledge(to_seek);
                     }
+                    SessionStreamMessage::History {
+                        from_seek,
+                        to_seek,
+                        bytes,
+                    } => {
+                        let mut frame = Vec::with_capacity(16 + bytes.len());
+                        frame.extend_from_slice(&from_seek.to_le_bytes());
+                        frame.extend_from_slice(&to_seek.to_le_bytes());
+                        frame.extend_from_slice(&bytes);
+                        if socket.send(Message::Binary(frame.into())).await.is_err() {
+                            return;
+                        }
+                    }
                 }
             }
             browser_message = socket.recv() => {
                 let Some(Ok(browser_message)) = browser_message else {
                     return;
                 };
+                if let Some((session_id, before_seek)) =
+                    remote_agent_session_history_message(&browser_message)
+                {
+                    client.load_history(session_id, before_seek);
+                    continue;
+                }
                 if let Some(key) = remote_agent_output_key_message(&browser_message) {
                     dispatch_remote_agent_key(
                         &state,
@@ -1599,6 +1622,25 @@ fn remote_agent_output_message_is_pong(message: &Message) -> bool {
         }),
         _ => false,
     }
+}
+
+/// Extracts one bounded persisted-session history request.
+///
+/// Example: session `a` before byte 4096 -> `Some(("a", 4096))`.
+fn remote_agent_session_history_message(message: &Message) -> Option<(String, u64)> {
+    let Message::Text(text) = message else {
+        return None;
+    };
+    let message = serde_json::from_str::<RemoteAgentOutputClientMessage>(text.as_str()).ok()?;
+    if message.message_type != "load_history" {
+        return None;
+    }
+    let session_id = message.session_id?;
+    let before_seek = message.before_seek?;
+    if session_id.is_empty() || before_seek == 0 {
+        return None;
+    }
+    Some((session_id, before_seek))
 }
 
 /// Extracts a browser terminal resize request from a WebSocket message.

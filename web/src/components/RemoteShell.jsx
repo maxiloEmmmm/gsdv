@@ -81,10 +81,19 @@ export default defineComponent({
       if (!tab || tab.initialLoading) {
         return [];
       }
-      return sessionRenderRows(
+      const rows = sessionRenderRows(
         tab.events,
         tabDisplayActivity(tab) === "busy",
       );
+      if (tab.historyStartSeek > 0) {
+        rows.unshift({
+          kind: "history_loader",
+          id: `history-loader:${tab.sessionId}:${tab.historyStartSeek}`,
+          loading: tab.historyLoading,
+          error: tab.historyError,
+        });
+      }
+      return rows;
     });
 
     /**
@@ -624,6 +633,10 @@ export default defineComponent({
         clearedSessionId: null,
         agentKind: agent.agent_kind ?? "codex",
         seek: 0,
+        // Earliest browser-held byte; older pages move only this cursor.
+        historyStartSeek: 0,
+        historyLoading: false,
+        historyError: "",
         initialEndSeek: 0,
         initialLoading: true,
         hasLoadedInitialSession: false,
@@ -663,6 +676,9 @@ export default defineComponent({
       tab.decoder = new TextDecoder();
       tab.lineBuffer = "";
       tab.seek = 0;
+      tab.historyStartSeek = 0;
+      tab.historyLoading = false;
+      tab.historyError = "";
       tab.initialEndSeek = 0;
       tab.initialLoading = true;
       tab.hasLoadedInitialSession = false;
@@ -685,6 +701,9 @@ export default defineComponent({
       tab.sessionActivity = null;
       tab.decoder = new TextDecoder();
       tab.lineBuffer = "";
+      tab.historyStartSeek = 0;
+      tab.historyLoading = false;
+      tab.historyError = "";
       tab.initialLoading = false;
       tab.hasLoadedInitialSession = true;
       tab.followOutput = true;
@@ -709,6 +728,7 @@ export default defineComponent({
         window.cancelAnimationFrame(tab.renderFrame);
         tab.renderFrame = 0;
       }
+      tab.historyLoading = false;
       tab.closing = closing;
       if (tab.socket) {
         tab.socket.close();
@@ -1346,16 +1366,23 @@ export default defineComponent({
       const view = new DataView(rawMessage);
       const fromSeek = Number(view.getBigUint64(0, true));
       const toSeek = Number(view.getBigUint64(8, true));
-      if (
-        !Number.isSafeInteger(fromSeek) ||
-        !Number.isSafeInteger(toSeek) ||
-        fromSeek !== tab.seek ||
-        toSeek < fromSeek
-      ) {
+      const validRange =
+        Number.isSafeInteger(fromSeek) &&
+        Number.isSafeInteger(toSeek) &&
+        toSeek >= fromSeek;
+      const isHistoryRange =
+        validRange &&
+        tab.historyLoading &&
+        toSeek === tab.historyStartSeek;
+      const payload = new Uint8Array(rawMessage, 16);
+      if (isHistoryRange) {
+        prependSessionBytes(tab, payload, fromSeek);
+        return;
+      }
+      if (!validRange || fromSeek !== tab.seek) {
         reconnectCurrentAgent(tab, "Session range changed.");
         return;
       }
-      const payload = new Uint8Array(rawMessage, 16);
       appendSessionBytes(tab, payload, toSeek);
     }
 
@@ -1378,14 +1405,15 @@ export default defineComponent({
       const sessionId = String(message.session_id ?? "");
       const seek = Number(message.seek ?? 0);
       const availableSeek = Number(message.available_seek ?? seek);
-      if (
+      const resetsSessionView =
         sessionId !== tab.sessionId ||
         !Number.isSafeInteger(seek) ||
-        seek !== tab.seek
-      ) {
+        seek !== tab.seek;
+      if (resetsSessionView) {
         clearTerminal(tab, "Loading agent session...");
         tab.sessionId = sessionId;
         tab.seek = Number.isSafeInteger(seek) ? seek : 0;
+        tab.historyStartSeek = tab.seek;
       }
       if (
         tab.awaitingSessionReset &&
@@ -1461,6 +1489,121 @@ export default defineComponent({
     }
 
     /**
+     * Requests the preceding 100 complete records for the active session.
+     *
+     * Example: earliest byte 4096 -> request the JSONL page ending at 4096.
+     */
+    function loadEarlierSession(tab = activeTab()) {
+      if (!tab || tab.historyLoading || tab.historyStartSeek <= 0) {
+        return;
+      }
+      if (tab.socket?.readyState !== WebSocket.OPEN) {
+        tab.historyError = "Session connection is unavailable.";
+        refreshTabs();
+        return;
+      }
+      tab.historyLoading = true;
+      tab.historyError = "";
+      tab.socket.send(
+        JSON.stringify({
+          type: "load_history",
+          session_id: tab.sessionId,
+          before_seek: tab.historyStartSeek,
+        }),
+      );
+      refreshTabs();
+    }
+
+    /**
+     * Prepends one complete history page while keeping the current content anchored.
+     *
+     * Example: range [2048, 4096) -> move only historyStartSeek to 2048.
+     */
+    function prependSessionBytes(tab, bytes, fromSeek) {
+      const output =
+        activeTabId.value === tab.id ? terminalOutputElement.value : null;
+      const anchorRow = sessionRows.value.find(
+        (row) => row.kind !== "history_loader",
+      );
+      const anchorElement = anchorRow
+        ? [...document.querySelectorAll(".remote-shell__session-virtual-row")].find(
+            (element) => element.dataset.rowKey === anchorRow.id,
+          )
+        : null;
+      const anchorOffset =
+        output && anchorElement
+          ? anchorElement.getBoundingClientRect().top -
+            output.getBoundingClientRect().top
+          : 0;
+      const historyState = {
+        agentKind: tab.agentKind,
+        events: [],
+        eventIndexes: new Map(),
+        eventSerial: tab.eventSerial,
+        sessionActivity: null,
+      };
+      const decoded = new TextDecoder().decode(bytes);
+      for (const line of decoded.split("\n")) {
+        // Historical task state is stale by definition and must not replace
+        // the current busy/idle state derived from the live tail.
+        appendSessionLine(historyState, line, false);
+      }
+      tab.eventSerial = historyState.eventSerial;
+      // Stable provider ids can span page boundaries. Keep the newer copy so
+      // loading history cannot roll a completed event back to an older form.
+      const olderEvents = historyState.events.filter(
+        (event) => !tab.eventIndexes.has(event.id),
+      );
+      tab.events = olderEvents.concat(tab.events);
+      tab.eventIndexes = new Map(
+        tab.events.map((event, index) => [event.id, index]),
+      );
+      tab.historyStartSeek = fromSeek;
+      tab.historyLoading = false;
+      tab.historyError = "";
+      refreshTabs();
+
+      if (!output) {
+        return;
+      }
+      nextTick(() => {
+        const anchorIndex = sessionRows.value.findIndex(
+          (row) => row.id === anchorRow?.id,
+        );
+        if (anchorIndex < 0) {
+          return;
+        }
+        // Virtual row estimates change as older rows mount. Anchoring the same
+        // message twice prevents those measurements from moving the viewport.
+        sessionVirtualizer.value.scrollToIndex(anchorIndex, { align: "start" });
+        const correctAnchor = () => {
+          const currentOutput = terminalOutputElement.value;
+          if (activeTabId.value !== tab.id || !currentOutput) {
+            return;
+          }
+          const currentAnchor = [
+            ...document.querySelectorAll(
+              ".remote-shell__session-virtual-row",
+            ),
+          ].find((element) => element.dataset.rowKey === anchorRow.id);
+          if (!currentAnchor) {
+            return;
+          }
+          const currentOffset =
+            currentAnchor.getBoundingClientRect().top -
+            currentOutput.getBoundingClientRect().top;
+          currentOutput.scrollTop += currentOffset - anchorOffset;
+          tab.scrollTop = currentOutput.scrollTop;
+          tab.followOutput = false;
+        };
+        window.requestAnimationFrame(() => {
+          correctAnchor();
+          window.requestAnimationFrame(correctAnchor);
+        });
+      });
+    }
+
+    /**
      * Coalesces large initial session loads to at most one Vue render per frame.
      *
      * Example: ten 256 KiB frames arrive together -> one DOM update.
@@ -1496,7 +1639,7 @@ export default defineComponent({
      *
      * Example: duplicate tool id -> replace its existing rendered event.
      */
-    function appendSessionLine(tab, line) {
+    function appendSessionLine(tab, line, updateActivity = true) {
       if (!line.trim()) {
         return;
       }
@@ -1509,7 +1652,7 @@ export default defineComponent({
       const fallbackKey = `line:${tab.eventSerial}`;
       tab.eventSerial += 1;
       const nextActivity = sessionActivity(tab.agentKind, record);
-      if (nextActivity) {
+      if (updateActivity && nextActivity) {
         tab.sessionActivity = nextActivity;
       }
       for (const event of sessionEvents(tab.agentKind, record, fallbackKey)) {
@@ -2127,6 +2270,34 @@ export default defineComponent({
      * Example: tool result -> collapsed details row; assistant -> message row.
      */
     function renderSessionEvent(event) {
+      if (event.kind === "history_loader") {
+        return (
+          <div class="remote-shell__session-history-loader" key={event.id}>
+            <button
+              type="button"
+              class={[
+                "remote-shell__session-history-button",
+                event.error
+                  ? "remote-shell__session-history-button--error"
+                  : "",
+              ]}
+              aria-label="Load 100 earlier records"
+              title={event.error || "Load 100 earlier records"}
+              disabled={event.loading}
+              onClick={() => loadEarlierSession()}
+            >
+              {event.loading ? (
+                <span
+                  class="remote-shell__session-history-spinner"
+                  aria-hidden="true"
+                />
+              ) : (
+                <span aria-hidden="true">↑</span>
+              )}
+            </button>
+          </div>
+        );
+      }
       if (event.kind === "tool_group") {
         return (
           <details
@@ -2566,6 +2737,9 @@ export default defineComponent({
                   <div
                     class="remote-shell__session-virtual-row"
                     data-index={virtualRow.index}
+                    data-row-key={
+                      sessionRows.value[virtualRow.index]?.id ?? virtualRow.key
+                    }
                     key={virtualRow.key}
                     ref={measureSessionRow}
                     style={{
