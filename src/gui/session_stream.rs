@@ -12,8 +12,10 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-/// Maximum raw JSONL bytes sent in one WebSocket binary frame.
-const SESSION_CHUNK_BYTES: u64 = 256 * 1024;
+/// Complete JSONL records sent when a browser opens a session for the first time.
+const INITIAL_SESSION_LINES: usize = 100;
+/// Maximum block read while locating the initial JSONL tail boundary.
+const TAIL_SCAN_BLOCK_BYTES: u64 = 64 * 1024;
 /// Minimum delay between recursive provider-directory searches.
 const SESSION_LOCATE_RETRY: Duration = Duration::from_secs(1);
 
@@ -40,7 +42,7 @@ pub enum SessionStreamMessage {
         session_id: String,
         /// Agent implementation used by the browser parser.
         agent_kind: AgentKind,
-        /// Server-approved next byte, reset to zero after replacement or truncation.
+        /// Server-approved next byte, set to the initial tail after a fresh reset.
         seek: u64,
         /// File end observed when this reset was created.
         available_seek: u64,
@@ -220,7 +222,7 @@ struct SessionStreamActor {
 impl SessionStreamHub {
     /// Subscribes one browser while reusing the existing per-Agent actor.
     ///
-    /// Example: two browsers at seek 0 -> one actor and one disk read per chunk.
+    /// Example: two fresh browsers -> one actor serving the last 100 JSONL records.
     pub fn subscribe(
         &self,
         descriptor: SessionStreamDescriptor,
@@ -332,7 +334,7 @@ impl SessionStreamActor {
                             .map(|subscriber| subscriber.seek > open.observed.len)
                     })
                     .unwrap_or(false);
-                self.send_reset_to(id, invalid_seek);
+                self.send_reset_to(id, invalid_seek, None).await;
                 self.distribute_available_bytes().await;
             }
             SessionStreamCommand::Acknowledge { id, seek } => {
@@ -363,6 +365,11 @@ impl SessionStreamActor {
         }
         if self.open_file.is_none() {
             self.open_current_session().await;
+            if self.open_file.is_some() {
+                // The hook may arrive before the JSONL path exists. Reset again
+                // after opening so fresh browsers start at the final 100 records.
+                self.broadcast_reset(true).await;
+            }
             self.distribute_available_bytes().await;
             return;
         }
@@ -385,7 +392,7 @@ impl SessionStreamActor {
         if !observed.same_file(previous) || observed.len < previous.len {
             self.open_file = None;
             self.open_current_session().await;
-            self.broadcast_reset(true);
+            self.broadcast_reset(true).await;
             self.distribute_available_bytes().await;
             return;
         }
@@ -406,7 +413,7 @@ impl SessionStreamActor {
         self.open_file = None;
         self.next_locate_at = Instant::now();
         self.open_current_session().await;
-        self.broadcast_reset(true);
+        self.broadcast_reset(true).await;
         self.distribute_available_bytes().await;
     }
 
@@ -440,9 +447,14 @@ impl SessionStreamActor {
 
     /// Sends current identity to one subscriber unless it already received it.
     ///
-    /// Example: reconnect with matching session id preserves the requested seek.
-    fn send_reset_to(&mut self, id: u64, force_seek_reset: bool) {
-        let Some(identity) = self.identity.as_ref() else {
+    /// Example: fresh browser at seek 0 -> start from the final 100 JSONL records.
+    async fn send_reset_to(
+        &mut self,
+        id: u64,
+        force_seek_reset: bool,
+        forced_initial_seek: Option<u64>,
+    ) {
+        let Some(identity) = self.identity.clone() else {
             return;
         };
         let available_seek = self
@@ -450,15 +462,30 @@ impl SessionStreamActor {
             .as_ref()
             .map(|open| open.observed.len)
             .unwrap_or(0);
-        let Some(subscriber) = self.subscribers.get_mut(&id) else {
+        let Some(subscriber) = self.subscribers.get(&id) else {
             return;
         };
         if subscriber.reset_sent && !force_seek_reset {
             return;
         }
-        if force_seek_reset || subscriber.session_id != identity.session_id {
+        let needs_initial_seek = force_seek_reset
+            || subscriber.session_id != identity.session_id
+            || subscriber.seek == 0;
+        let preserved_seek = subscriber.seek;
+        let initial_seek = if needs_initial_seek {
+            match forced_initial_seek {
+                Some(seek) => seek,
+                None => self.initial_session_seek(available_seek).await,
+            }
+        } else {
+            preserved_seek
+        };
+        let Some(subscriber) = self.subscribers.get_mut(&id) else {
+            return;
+        };
+        if needs_initial_seek {
             subscriber.session_id.clone_from(&identity.session_id);
-            subscriber.seek = 0;
+            subscriber.seek = initial_seek;
             subscriber.in_flight = false;
         }
         let sent = subscriber
@@ -479,19 +506,42 @@ impl SessionStreamActor {
     /// Resets every browser and drops any slow client whose queue is full.
     ///
     /// Example: inode replacement -> every surviving browser seeks from zero.
-    fn broadcast_reset(&mut self, force_seek_reset: bool) {
+    async fn broadcast_reset(&mut self, force_seek_reset: bool) {
+        let forced_initial_seek = if force_seek_reset {
+            let available_seek = self
+                .open_file
+                .as_ref()
+                .map(|open| open.observed.len)
+                .unwrap_or(0);
+            Some(self.initial_session_seek(available_seek).await)
+        } else {
+            None
+        };
         let ids = self.subscribers.keys().copied().collect::<Vec<_>>();
         for id in ids {
             if let Some(subscriber) = self.subscribers.get_mut(&id) {
                 subscriber.reset_sent = false;
             }
-            self.send_reset_to(id, force_seek_reset);
+            self.send_reset_to(id, force_seek_reset, forced_initial_seek)
+                .await;
         }
     }
 
-    /// Groups subscribers by seek and reads each distinct range exactly once.
+    /// Locates the first byte of the final complete JSONL records.
     ///
-    /// Example: seeks [0, 0, 4096] -> two seek/read operations.
+    /// Example: 10,000-line file -> seek at the beginning of line 9,901.
+    async fn initial_session_seek(&mut self, file_size: u64) -> u64 {
+        let Some(open) = self.open_file.as_mut() else {
+            return 0;
+        };
+        tail_line_start(&mut open.file, file_size, INITIAL_SESSION_LINES)
+            .await
+            .unwrap_or(0)
+    }
+
+    /// Groups subscribers by seek and reads each complete live delta once.
+    ///
+    /// Example: seeks [4096, 4096, 8192] at size 12288 -> two reads to 12288.
     async fn distribute_available_bytes(&mut self) {
         let (session_id, observed_size) = match (&self.identity, &self.open_file) {
             (Some(identity), Some(open)) => (identity.session_id.clone(), open.observed.len),
@@ -508,7 +558,7 @@ impl SessionStreamActor {
             }
         }
         for (from_seek, ids) in groups {
-            let to_seek = observed_size.min(from_seek.saturating_add(SESSION_CHUNK_BYTES));
+            let to_seek = observed_size;
             let Some(open) = self.open_file.as_mut() else {
                 return;
             };
@@ -520,7 +570,10 @@ impl SessionStreamActor {
             {
                 continue;
             }
-            let mut bytes = vec![0_u8; (to_seek - from_seek) as usize];
+            let Ok(byte_count) = usize::try_from(to_seek - from_seek) else {
+                continue;
+            };
+            let mut bytes = vec![0_u8; byte_count];
             if open.file.read_exact(&mut bytes).await.is_err() {
                 continue;
             }
@@ -543,6 +596,43 @@ impl SessionStreamActor {
             }
         }
     }
+}
+
+/// Scans backward in bounded blocks and returns the start of the final lines.
+///
+/// Example: `a\nb\nc\n` with two lines -> byte offset 2 (`b`).
+async fn tail_line_start(
+    file: &mut File,
+    file_size: u64,
+    line_count: usize,
+) -> std::io::Result<u64> {
+    if file_size == 0 || line_count == 0 {
+        return Ok(file_size);
+    }
+    let mut cursor = file_size;
+    let mut boundaries = 0_usize;
+    while cursor > 0 {
+        let block_start = cursor.saturating_sub(TAIL_SCAN_BLOCK_BYTES);
+        let byte_count = usize::try_from(cursor - block_start).unwrap_or(0);
+        let mut bytes = vec![0_u8; byte_count];
+        file.seek(std::io::SeekFrom::Start(block_start)).await?;
+        file.read_exact(&mut bytes).await?;
+        for index in (0..bytes.len()).rev() {
+            if bytes[index] != b'\n' {
+                continue;
+            }
+            let absolute = block_start + index as u64;
+            if absolute + 1 == file_size {
+                continue;
+            }
+            boundaries += 1;
+            if boundaries == line_count {
+                return Ok(absolute + 1);
+            }
+        }
+        cursor = block_start;
+    }
+    Ok(0)
 }
 
 /// Locates a Codex or Claude JSONL file when the Hook session id changes.

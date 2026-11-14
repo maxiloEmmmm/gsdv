@@ -1,6 +1,14 @@
 import Button from "ant-design-vue/es/button";
 import Drawer from "ant-design-vue/es/drawer";
-import { defineComponent, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { useVirtualizer } from "@tanstack/vue-virtual";
+import {
+  computed,
+  defineComponent,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+} from "vue";
 import { sessionActivity, sessionEvents } from "../sessionEvents";
 import { withSessionMarkdown } from "../sessionMarkdown";
 import { renderSessionMermaid } from "../sessionMermaid";
@@ -14,6 +22,8 @@ const AGENT_RECONNECT_MAX_DELAY_MS = 8000;
 const WORKSPACE_RECONNECT_BASE_DELAY_MS = 500;
 const WORKSPACE_RECONNECT_MAX_DELAY_MS = 8000;
 const REMOTE_SHELL_VIEWPORT_HEIGHT_VAR = "--remote-shell-viewport-height";
+const SESSION_ROW_ESTIMATE_PX = 72;
+const SESSION_ROW_OVERSCAN = 6;
 /**
  * Fallback palette used before the first Rust terminal snapshot arrives.
  */
@@ -60,6 +70,47 @@ export default defineComponent({
     let workspaceReconnectAttempt = 0;
     let workspaceSocketClosing = false;
     let spotlightLeaderId = null;
+
+    /**
+     * Returns render rows only after the initial session snapshot is complete.
+     *
+     * Example: 500 MiB history at seek 20 MiB -> no message VDOM yet.
+     */
+    const sessionRows = computed(() => {
+      const tab = activeTab();
+      if (!tab || tab.initialLoading) {
+        return [];
+      }
+      return sessionRenderRows(
+        tab.events,
+        tabDisplayActivity(tab) === "busy",
+      );
+    });
+
+    /**
+     * Virtualizes variable-height session rows against the terminal viewport.
+     *
+     * Example: 20,000 history rows -> mount only the visible rows plus overscan.
+     */
+    const sessionVirtualizer = useVirtualizer(
+      computed(() => ({
+        count: sessionRows.value.length,
+        getScrollElement: () => terminalOutputElement.value,
+        estimateSize: () => SESSION_ROW_ESTIMATE_PX,
+        getItemKey: (index) =>
+          `${activeTabId.value ?? "none"}:${sessionRows.value[index]?.id ?? index}`,
+        overscan: SESSION_ROW_OVERSCAN,
+      })),
+    );
+
+    /**
+     * Returns the small set of rows currently mounted by the virtualizer.
+     *
+     * Example: viewport around row 100 -> rows 94 through 112.
+     */
+    const visibleSessionRows = computed(() =>
+      sessionVirtualizer.value.getVirtualItems(),
+    );
 
     /**
      * Loads workspace metadata from the documented remote HTTP route.
@@ -574,6 +625,8 @@ export default defineComponent({
         agentKind: agent.agent_kind ?? "codex",
         seek: 0,
         initialEndSeek: 0,
+        initialLoading: true,
+        hasLoadedInitialSession: false,
         decoder: new TextDecoder(),
         lineBuffer: "",
         palette: { ...DEFAULT_TERMINAL_PALETTE },
@@ -611,6 +664,8 @@ export default defineComponent({
       tab.lineBuffer = "";
       tab.seek = 0;
       tab.initialEndSeek = 0;
+      tab.initialLoading = true;
+      tab.hasLoadedInitialSession = false;
       tab.followOutput = true;
       tab.scrollTop = 0;
       tab.error = "";
@@ -630,6 +685,8 @@ export default defineComponent({
       tab.sessionActivity = null;
       tab.decoder = new TextDecoder();
       tab.lineBuffer = "";
+      tab.initialLoading = false;
+      tab.hasLoadedInitialSession = true;
       tab.followOutput = true;
       tab.scrollTop = 0;
       tab.error = "";
@@ -882,13 +939,30 @@ export default defineComponent({
     function scrollTerminalToBottom(tab = activeTab()) {
       cancelTerminalScroll();
       scrollFrame.value = window.requestAnimationFrame(() => {
-        scrollFrame.value = 0;
         const output = terminalOutputElement.value;
         if (output && tab?.followOutput && activeTabId.value === tab.id) {
+          const lastIndex = sessionRows.value.length - 1;
+          if (lastIndex >= 0) {
+            sessionVirtualizer.value.scrollToIndex(lastIndex, { align: "end" });
+          }
           output.scrollTop = output.scrollHeight;
           tab.scrollTop = output.scrollTop;
           tab.followOutput = true;
         }
+        // Dynamic row measurements settle after the first paint. Pin once more
+        // so opening a large session starts at its real, measured bottom.
+        scrollFrame.value = window.requestAnimationFrame(() => {
+          scrollFrame.value = 0;
+          const settledOutput = terminalOutputElement.value;
+          if (
+            settledOutput &&
+            tab?.followOutput &&
+            activeTabId.value === tab.id
+          ) {
+            settledOutput.scrollTop = settledOutput.scrollHeight;
+            tab.scrollTop = settledOutput.scrollTop;
+          }
+        });
       });
     }
 
@@ -1324,9 +1398,20 @@ export default defineComponent({
       tab.initialEndSeek = Number.isSafeInteger(availableSeek)
         ? Math.max(tab.seek, availableSeek)
         : tab.seek;
+      tab.initialLoading =
+        !tab.hasLoadedInitialSession &&
+        sessionId.length > 0 &&
+        tab.seek < tab.initialEndSeek;
+      if (!tab.initialLoading) {
+        tab.hasLoadedInitialSession = true;
+      }
       tab.agentKind = message.agent_kind === "claude" ? "claude" : "codex";
       tab.reconnectAttempt = 0;
-      tab.status = sessionId ? "Agent session connected." : "Waiting for session id...";
+      tab.status = tab.initialLoading
+        ? "Loading agent session..."
+        : sessionId
+          ? "Agent session connected."
+          : "Waiting for session id...";
       tab.error = "";
       refreshTabs();
     }
@@ -1350,8 +1435,8 @@ export default defineComponent({
         return;
       }
       const isActive = activeTabId.value === tab.id;
-      const initialLoading = tab.seek < tab.initialEndSeek;
-      const followOutput = initialLoading || (isActive ? terminalShouldFollowOutput(tab) : false);
+      const initialLoading = tab.initialLoading;
+      const followOutput = isActive ? terminalShouldFollowOutput(tab) : false;
       const decoded = tab.decoder.decode(bytes, { stream: true });
       const lines = `${tab.lineBuffer}${decoded}`.split("\n");
       tab.lineBuffer = lines.pop() ?? "";
@@ -1359,12 +1444,20 @@ export default defineComponent({
         appendSessionLine(tab, line);
       }
       tab.seek = toSeek;
-      if (tab.seek >= tab.initialEndSeek) {
+      if (initialLoading && tab.seek < tab.initialEndSeek) {
+        // Initial history may span thousands of frames. Parsing without a Vue
+        // refresh prevents a growing full-session VDOM and scrolling animation.
+        tab.status = "Loading agent session...";
+        return;
+      }
+      if (initialLoading) {
+        tab.initialLoading = false;
+        tab.hasLoadedInitialSession = true;
         tab.followOutput = true;
       }
       tab.status = "Agent session connected.";
       tab.error = "";
-      scheduleSessionRender(tab, followOutput);
+      scheduleSessionRender(tab, initialLoading || followOutput);
     }
 
     /**
@@ -1937,6 +2030,7 @@ export default defineComponent({
       const tab = activeTab();
       nextTick(async () => {
         renderActiveTerminal();
+        sessionVirtualizer.value.measure();
         await renderSessionMermaid(terminalOutputElement.value);
         if (terminalShouldFollowOutput(tab)) {
           scrollTerminalToBottom(tab);
@@ -2097,6 +2191,17 @@ export default defineComponent({
           </div>
         </article>
       );
+    }
+
+    /**
+     * Measures one mounted session row for variable-height virtualization.
+     *
+     * Example: expanded Tool row -> update its cached height.
+     */
+    function measureSessionRow(element) {
+      if (element) {
+        sessionVirtualizer.value.measureElement(element);
+      }
     }
 
     /**
@@ -2448,11 +2553,29 @@ export default defineComponent({
             ref={terminalOutputElement}
             onScroll={handleTerminalScroll}
           >
-            {tab?.events.length ? (
-              sessionRenderRows(
-                tab.events,
-                tabDisplayActivity(tab) === "busy",
-              ).map(renderSessionEvent)
+            {tab?.initialLoading ? (
+              <div class="remote-shell__terminal-empty">{tab.status}</div>
+            ) : sessionRows.value.length ? (
+              <div
+                class="remote-shell__session-virtual-space"
+                style={{
+                  height: `${sessionVirtualizer.value.getTotalSize()}px`,
+                }}
+              >
+                {visibleSessionRows.value.map((virtualRow) => (
+                  <div
+                    class="remote-shell__session-virtual-row"
+                    data-index={virtualRow.index}
+                    key={virtualRow.key}
+                    ref={measureSessionRow}
+                    style={{
+                      transform: `translateY(${virtualRow.start}px)`,
+                    }}
+                  >
+                    {renderSessionEvent(sessionRows.value[virtualRow.index])}
+                  </div>
+                ))}
+              </div>
             ) : (
               <div class="remote-shell__terminal-empty">
                 {tab?.status ?? "Select an agent from the workspace drawer."}

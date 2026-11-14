@@ -240,6 +240,18 @@ textarea {
   overflow-anchor: none;
 }
 
+.remote-shell__session-virtual-space {
+  position: relative;
+  width: 100%;
+}
+
+.remote-shell__session-virtual-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+}
+
 .remote-shell__session-item {
   padding: 5px 20px;
 }
