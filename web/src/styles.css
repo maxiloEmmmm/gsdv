@@ -252,6 +252,60 @@ textarea {
   width: 100%;
 }
 
+.remote-shell__session-history-loader {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 38px;
+}
+
+.remote-shell__session-history-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid #343941;
+  border-radius: 6px;
+  background: #171a1f;
+  color: #aeb5bf;
+  font: inherit;
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.remote-shell__session-history-button:hover:not(:disabled) {
+  border-color: #59616d;
+  background: #20242a;
+  color: #f3f4f6;
+}
+
+.remote-shell__session-history-button:disabled {
+  cursor: wait;
+  opacity: 0.75;
+}
+
+.remote-shell__session-history-button--error {
+  border-color: #b94a55;
+  color: #f18a94;
+}
+
+.remote-shell__session-history-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid #59616d;
+  border-top-color: #f3f4f6;
+  border-radius: 50%;
+  animation: remote-shell-history-spin 0.7s linear infinite;
+}
+
+@keyframes remote-shell-history-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .remote-shell__session-item {
   padding: 5px 20px;
 }
