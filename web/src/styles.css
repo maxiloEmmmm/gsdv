@@ -354,6 +354,12 @@ textarea {
   color: #dfe3e8;
 }
 
+.remote-shell__session-markdown {
+  /* markdown-it separates block tags with newlines. Rendering those text
+     nodes with pre-wrap creates fake blank rows before headings and blocks. */
+  white-space: normal;
+}
+
 .remote-shell__session-markdown > :first-child {
   margin-top: 0;
 }
@@ -375,11 +381,11 @@ textarea {
 .remote-shell__session-markdown h2,
 .remote-shell__session-markdown h3,
 .remote-shell__session-markdown h4 {
-  margin: 16px 0 8px;
+  margin: 10px 0 4px;
   color: #f1f3f5;
   font-weight: 650;
   letter-spacing: 0;
-  line-height: 1.35;
+  line-height: 1.25;
 }
 
 .remote-shell__session-markdown h1 {
@@ -387,7 +393,7 @@ textarea {
 }
 
 .remote-shell__session-markdown h2 {
-  font-size: 16px;
+  font-size: 15px;
 }
 
 .remote-shell__session-markdown h3,
@@ -541,6 +547,270 @@ textarea {
 
 .remote-shell__session-tool-group-items .remote-shell__session-tool {
   padding-inline: 8px;
+}
+
+.remote-shell__questionnaire {
+  max-width: 1200px;
+  margin: 8px 20px;
+  overflow: hidden;
+  border: 1px solid #343a42;
+  border-radius: 6px;
+  background: #121519;
+  color: #e6e9ed;
+}
+
+.remote-shell__questionnaire--answered {
+  border-color: #2d4a3d;
+}
+
+.remote-shell__questionnaire-tabs {
+  display: flex;
+  min-height: 38px;
+  overflow-x: auto;
+  border-bottom: 1px solid #2a2f35;
+  background: #0d0f12;
+  scrollbar-width: thin;
+}
+
+.remote-shell__questionnaire-tab {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 7px;
+  min-width: 96px;
+  height: 38px;
+  padding: 0 12px;
+  border: 0;
+  border-right: 1px solid #252a30;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: #8f969f;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.remote-shell__questionnaire-tab:hover {
+  background: #161a1f;
+  color: #d9dde2;
+}
+
+.remote-shell__questionnaire-tab > span {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  border: 1px solid #3a414a;
+  border-radius: 50%;
+  color: #aab0b8;
+  font-size: 10px;
+}
+
+.remote-shell__questionnaire-tab--complete > span {
+  border-color: #31765b;
+  background: #173b2d;
+  color: #91e5bf;
+}
+
+.remote-shell__questionnaire-tab--active {
+  border-bottom-color: #4c8dff;
+  background: #181c21;
+  color: #f2f4f6;
+}
+
+.remote-shell__questionnaire-tab--submit {
+  min-width: 82px;
+  margin-left: auto;
+  border-right: 0;
+  color: #b8c8e8;
+}
+
+.remote-shell__questionnaire-panel {
+  padding: 14px 16px 16px;
+}
+
+.remote-shell__questionnaire-heading {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 7px;
+  color: #9ea6af;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.remote-shell__questionnaire-heading small {
+  padding-left: 9px;
+  border-left: 1px solid #39404a;
+  color: #76b8ff;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.remote-shell__questionnaire-question {
+  max-width: 1000px;
+  margin: 0 0 13px;
+  color: #eef0f3;
+  font-size: 14px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.remote-shell__questionnaire-options {
+  margin: 0 0 12px;
+  border-top: 1px solid #2b3036;
+}
+
+.remote-shell__questionnaire-option-wrap {
+  border-bottom: 1px solid #2b3036;
+}
+
+.remote-shell__questionnaire-option {
+  display: flex;
+  width: 100%;
+  min-height: 44px;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 2px;
+  padding: 8px 11px;
+  border: 0;
+  border-left: 2px solid transparent;
+  background: transparent;
+  color: #dce0e5;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.remote-shell__questionnaire-option:hover:not(:disabled) {
+  background: #181d22;
+}
+
+.remote-shell__questionnaire-option--selected {
+  border-left-color: #3fcf8e;
+  background: #14211c;
+}
+
+.remote-shell__questionnaire-option:disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+
+.remote-shell__questionnaire-option > span {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.remote-shell__questionnaire-option > small {
+  color: #929aa4;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.remote-shell__questionnaire-preview {
+  padding: 0 11px 8px;
+  color: #8f969f;
+  font-size: 11px;
+}
+
+.remote-shell__questionnaire-preview summary {
+  cursor: pointer;
+}
+
+.remote-shell__questionnaire-preview pre {
+  max-height: 240px;
+  margin: 8px 0 0;
+  padding: 9px 10px;
+  overflow: auto;
+  border: 1px solid #2b3036;
+  border-radius: 4px;
+  background: #0c0e10;
+  color: #cfd4da;
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+
+.remote-shell__questionnaire-answer {
+  display: block;
+  width: 100%;
+  min-height: 68px;
+  max-height: 220px;
+  box-sizing: border-box;
+  resize: vertical;
+  padding: 9px 11px;
+  border: 1px solid #39414a;
+  border-radius: 4px;
+  outline: none;
+  background: #0d1013;
+  color: #f0f2f4;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.remote-shell__questionnaire-answer:focus {
+  border-color: #4c8dff;
+  box-shadow: 0 0 0 2px rgb(76 141 255 / 14%);
+}
+
+.remote-shell__questionnaire-answer:disabled {
+  color: #9ea6af;
+}
+
+.remote-shell__questionnaire-review {
+  border-top: 1px solid #2b3036;
+}
+
+.remote-shell__questionnaire-review-row {
+  display: grid;
+  grid-template-columns: minmax(90px, 180px) 1fr;
+  gap: 16px;
+  padding: 10px 2px;
+  border-bottom: 1px solid #2b3036;
+}
+
+.remote-shell__questionnaire-review-row > span {
+  color: #939ba5;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.remote-shell__questionnaire-review-row > p {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #e7eaee;
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.remote-shell__questionnaire-submit {
+  display: block;
+  min-width: 104px;
+  height: 34px;
+  margin: 14px 0 0 auto;
+  padding: 0 16px;
+  border: 1px solid #3978dc;
+  border-radius: 4px;
+  background: #2563b9;
+  color: #fff;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.remote-shell__questionnaire-submit:hover:not(:disabled) {
+  background: #2f70cb;
+}
+
+.remote-shell__questionnaire-submit:disabled {
+  border-color: #30363d;
+  background: #22272d;
+  color: #747c86;
+  cursor: default;
 }
 
 .remote-shell__session-reasoning {
@@ -1167,6 +1437,24 @@ textarea {
   .remote-shell__session-tool-group,
   .remote-shell__session-reasoning {
     padding-inline: 12px;
+  }
+
+  .remote-shell__questionnaire {
+    margin-inline: 6px;
+  }
+
+  .remote-shell__questionnaire-tab {
+    min-width: 78px;
+    padding-inline: 9px;
+  }
+
+  .remote-shell__questionnaire-panel {
+    padding: 12px;
+  }
+
+  .remote-shell__questionnaire-review-row {
+    grid-template-columns: 1fr;
+    gap: 4px;
   }
 
   .remote-shell__tab-state {

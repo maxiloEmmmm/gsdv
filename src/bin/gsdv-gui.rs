@@ -82,12 +82,58 @@ fn main() -> eframe::Result<()> {
         }
         return Ok(());
     }
+    let tui_fps = if first_arg.as_deref() == Some("tui") {
+        match parse_tui_fps(std::env::args().skip(2)) {
+            Ok(fps) => Some(fps),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        }
+    } else {
+        None
+    };
     if let Err(error) = install_self() {
         eprintln!("failed to install gsdv integration: {error:#}");
         std::process::exit(1);
     }
     internal::spawn_internal_server();
-    gui::run()
+    if let Some(fps) = tui_fps {
+        if let Err(error) = gui::run_tui(fps) {
+            eprintln!("gsdv tui failed: {error:#}");
+            std::process::exit(1);
+        }
+        Ok(())
+    } else {
+        gui::run()
+    }
+}
+
+/// 解析 TUI 专用帧率参数。
+///
+/// 适用场景：`gsdv tui --fps 4`。示例：未传参数 -> 4。
+fn parse_tui_fps(args: impl IntoIterator<Item = String>) -> std::result::Result<u16, String> {
+    let mut fps = 4_u16;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        let value = if let Some(value) = arg.strip_prefix("--fps=") {
+            Some(value.to_string())
+        } else if arg == "--fps" {
+            args.next()
+        } else {
+            None
+        };
+        let Some(value) = value else {
+            continue;
+        };
+        fps = value
+            .parse::<u16>()
+            .map_err(|_| format!("invalid TUI fps: {value}"))?;
+    }
+    if !(1..=60).contains(&fps) {
+        return Err(format!("TUI fps must be between 1 and 60, got {fps}"));
+    }
+    Ok(fps)
 }
 
 fn install_self() -> Result<()> {

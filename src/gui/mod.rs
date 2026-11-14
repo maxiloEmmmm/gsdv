@@ -21,4 +21,4 @@ mod workflow;
 mod workflow_test;
 
 pub use agent::{AgentKind, AgentLaunchConfig};
-pub use app::run;
+pub use app::{run, run_tui};

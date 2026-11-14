@@ -18,6 +18,8 @@ const INITIAL_SESSION_LINES: usize = 100;
 const TAIL_SCAN_BLOCK_BYTES: u64 = 64 * 1024;
 /// Minimum delay between recursive provider-directory searches.
 const SESSION_LOCATE_RETRY: Duration = Duration::from_secs(1);
+/// Metadata cadence while at least one browser is subscribed to an Agent.
+const SESSION_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 
 /// One Agent stream shared by all browser WebSockets for that Agent.
 #[derive(Clone, Default)]
@@ -308,10 +310,12 @@ fn spawn_session_stream_actor(source: TerminalSessionSource) -> SessionStreamHan
 }
 
 impl SessionStreamActor {
-    /// Runs the Agent-change/stat/read loop and command mailbox.
+    /// Runs the Agent-change plus subscribed metadata refresh loop.
     ///
-    /// Example: PTY wakeup with unchanged file size -> one stat and no read.
+    /// Example: JSONL append without PTY output -> delivered within 250 ms.
     async fn run(&mut self) {
+        let mut refresh = tokio::time::interval(SESSION_REFRESH_INTERVAL);
+        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 changed = self.source.changed() => {
@@ -321,6 +325,12 @@ impl SessionStreamActor {
                     if !self.subscribers.is_empty() {
                         self.refresh_from_agent_change().await;
                     }
+                }
+                _ = refresh.tick(), if !self.subscribers.is_empty() => {
+                    // AskUserQuestion can persist without any later PTY event.
+                    // Metadata polling is active only for browser-held Agents;
+                    // unchanged files cause no read, allocation, or WS traffic.
+                    self.refresh_from_agent_change().await;
                 }
                 command = self.commands.recv() => {
                     let Some(command) = command else {

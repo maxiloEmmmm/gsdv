@@ -625,6 +625,10 @@ export default defineComponent({
         events: [],
         eventIndexes: new Map(),
         eventSerial: 0,
+        questionnaireResults: new Map(),
+        // Inputs accepted by the PTY but not yet observed in provider JSONL.
+        pendingInputs: [],
+        localInputSerial: 0,
         sessionActivity: null,
         sessionId: agent.session_id ?? "",
         // A successful /clear hides the current session until its replacement arrives.
@@ -672,6 +676,9 @@ export default defineComponent({
       tab.events = [];
       tab.eventIndexes = new Map();
       tab.eventSerial = 0;
+      tab.questionnaireResults = new Map();
+      tab.pendingInputs = [];
+      tab.localInputSerial = 0;
       tab.sessionActivity = null;
       tab.decoder = new TextDecoder();
       tab.lineBuffer = "";
@@ -698,6 +705,9 @@ export default defineComponent({
       tab.events = [];
       tab.eventIndexes = new Map();
       tab.eventSerial = 0;
+      tab.questionnaireResults = new Map();
+      tab.pendingInputs = [];
+      tab.localInputSerial = 0;
       tab.sessionActivity = null;
       tab.decoder = new TextDecoder();
       tab.lineBuffer = "";
@@ -1540,6 +1550,7 @@ export default defineComponent({
         events: [],
         eventIndexes: new Map(),
         eventSerial: tab.eventSerial,
+        questionnaireResults: new Map(tab.questionnaireResults),
         sessionActivity: null,
       };
       const decoded = new TextDecoder().decode(bytes);
@@ -1549,6 +1560,7 @@ export default defineComponent({
         appendSessionLine(historyState, line, false);
       }
       tab.eventSerial = historyState.eventSerial;
+      tab.questionnaireResults = historyState.questionnaireResults;
       // Stable provider ids can span page boundaries. Keep the newer copy so
       // loading history cannot roll a completed event back to an older form.
       const olderEvents = historyState.events.filter(
@@ -1660,14 +1672,124 @@ export default defineComponent({
         if (!renderedEvent) {
           continue;
         }
+        const questionnaireKey = `questionnaire:${renderedEvent.key}`;
+        const questionnaireIndex = tab.eventIndexes.get(questionnaireKey);
+        if (
+          renderedEvent.kind === "questionnaire_result" ||
+          (renderedEvent.kind === "tool_result" &&
+            questionnaireIndex !== undefined)
+        ) {
+          const result = {
+            text: renderedEvent.text,
+            cancelled: renderedEvent.cancelled === true,
+          };
+          tab.questionnaireResults.set(renderedEvent.key, result);
+          if (questionnaireIndex !== undefined) {
+            const questionnaire = tab.events[questionnaireIndex];
+            questionnaire.answerResult = renderedEvent.text;
+            if (questionnaire.submitting && questionnaire.pendingReply) {
+              void finishQuestionnaireSubmit(tab, questionnaire);
+            } else {
+              questionnaire.answered = !result.cancelled;
+              questionnaire.submitting = false;
+            }
+          }
+          continue;
+        }
+        if (renderedEvent.kind === "user") {
+          reconcilePendingInput(tab, renderedEvent.text);
+        }
         const key = `${renderedEvent.kind}:${renderedEvent.key}`;
         const index = tab.eventIndexes.get(key);
         if (index === undefined) {
           tab.eventIndexes.set(key, tab.events.length);
-          tab.events.push({ ...renderedEvent, id: key });
+          const questionnaireResult = tab.questionnaireResults.get(
+            renderedEvent.key,
+          );
+          const questionnaireState = renderedEvent.kind === "questionnaire"
+            ? {
+                  activeQuestion: 0,
+                  answers: renderedEvent.questions.map(() => ""),
+                  submitting: false,
+                  submissionStage: "",
+                  pendingReply: "",
+                  answered:
+                    questionnaireResult !== undefined &&
+                    !questionnaireResult.cancelled,
+                  answerResult: questionnaireResult?.text ?? "",
+                }
+            : {};
+          tab.events.push({ ...renderedEvent, ...questionnaireState, id: key });
         } else {
-          tab.events[index] = { ...renderedEvent, id: key };
+          tab.events[index] = {
+            ...tab.events[index],
+            ...renderedEvent,
+            id: key,
+          };
         }
+      }
+    }
+
+    /**
+     * Adds a submitted user message before the provider persists it.
+     *
+     * Example: busy Claude accepts "next" -> render "next" immediately.
+     */
+    function appendPendingInput(tab, text) {
+      const key = `local-input:${tab.localInputSerial}`;
+      tab.localInputSerial += 1;
+      const event = withSessionMarkdown({
+        kind: "user",
+        text,
+        title: "You",
+        key,
+      });
+      if (!event) {
+        return null;
+      }
+      const id = `user:${key}`;
+      tab.pendingInputs.push({ id, text });
+      tab.eventIndexes.set(id, tab.events.length);
+      tab.events.push({ ...event, id });
+      scheduleSessionRender(tab, true);
+      return id;
+    }
+
+    /**
+     * Removes one local input after delivery fails or provider JSONL confirms it.
+     *
+     * Example: local-input:2 fails -> remove only that optimistic message.
+     */
+    function removePendingInput(tab, id) {
+      const pendingIndex = tab.pendingInputs.findIndex(
+        (input) => input.id === id,
+      );
+      if (pendingIndex < 0) {
+        return;
+      }
+      tab.pendingInputs.splice(pendingIndex, 1);
+      const eventIndex = tab.eventIndexes.get(id);
+      if (eventIndex === undefined) {
+        return;
+      }
+      tab.events.splice(eventIndex, 1);
+      tab.eventIndexes = new Map(
+        tab.events.map((event, index) => [event.id, index]),
+      );
+    }
+
+    /**
+     * Replaces the oldest matching local input with its persisted provider event.
+     *
+     * Example: queued "next" reaches JSONL -> remove its local duplicate.
+     */
+    function reconcilePendingInput(tab, text) {
+      const normalized = text.trim();
+      const pending = tab.pendingInputs.find(
+        (input) => input.text.trim() === normalized,
+      );
+      if (pending) {
+        removePendingInput(tab, pending.id);
       }
     }
 
@@ -1734,22 +1856,24 @@ export default defineComponent({
     }
 
     /**
-     * Sends the current input text through the documented agent input route.
+     * Sends prepared text through the documented agent input route.
+     *
+     * Example: questionnaire summary -> optimistic message plus PTY submit.
      */
-    async function submitDraft() {
-      const tab = activeTab();
+    async function submitAgentText(tab, text) {
       const binding = tab?.binding ?? null;
-      const input = draftInputElement.value;
-      const text = input?.value.trim() ?? "";
-
       if (!binding || text.length === 0) {
-        return;
+        return false;
       }
 
       const body = {
         ...agentRequestBody(binding),
         text,
       };
+      // Claude may execute input queued during a reply without persisting a
+      // standalone user record. Keep the accepted text visible in that case.
+      const pendingInputId =
+        text === "/clear" ? null : appendPendingInput(tab, text);
 
       try {
         const response = await fetch("/api/agent/input", {
@@ -1760,17 +1884,173 @@ export default defineComponent({
         if (!response.ok) {
           throw new Error(`input api failed: ${response.status}`);
         }
-        input.value = "";
-        tab.draft = "";
+        // A successful response now means the complete text + submit sequence
+        // reached the PTY channel. Reflect that before JSONL catches up.
+        tab.sessionActivity = "busy";
         if (text === "/clear") {
           tab.awaitingSessionReset = true;
           tab.clearedSessionId = tab.sessionId;
           clearSessionView(tab, "Waiting for the next prompt...");
         }
+        refreshTabs();
+        return true;
       } catch (error) {
+        if (pendingInputId) {
+          removePendingInput(tab, pendingInputId);
+        }
         tab.error = error instanceof Error ? error.message : String(error);
         refreshTabs();
+        return false;
       }
+    }
+
+    /**
+     * Sends the current composer draft through the shared Agent input path.
+     */
+    async function submitDraft() {
+      const tab = activeTab();
+      const input = draftInputElement.value;
+      const text = input?.value.trim() ?? "";
+      if (!tab || !input || text.length === 0) {
+        return;
+      }
+      const submitted = await submitAgentText(tab, text);
+      if (submitted) {
+        input.value = "";
+        tab.draft = "";
+        refreshTabs();
+      }
+    }
+
+    /**
+     * Selects one question or the final submit tab on an interactive card.
+     *
+     * Example: question 1 -> submit tab index 3.
+     */
+    function selectQuestionnaireTab(event, index) {
+      event.activeQuestion = index;
+      refreshTabs();
+      nextTick(() => sessionVirtualizer.value.measure());
+    }
+
+    /**
+     * Stores one free-form questionnaire answer.
+     *
+     * Example: question 0 + "Use option A" -> first answer draft.
+     */
+    function setQuestionnaireAnswer(event, index, answer) {
+      if (event.answered || event.submitting) {
+        return;
+      }
+      event.answers[index] = answer;
+      refreshTabs();
+    }
+
+    /**
+     * Applies one provider option to its question's editable answer.
+     *
+     * Example: single-select option -> replace; multi-select -> toggle label.
+     */
+    function selectQuestionnaireOption(event, questionIndex, option) {
+      const question = event.questions[questionIndex];
+      if (!question || event.answered || event.submitting) {
+        return;
+      }
+      if (!question.multiSelect) {
+        setQuestionnaireAnswer(event, questionIndex, option.label);
+        return;
+      }
+      const selected = new Set(
+        (event.answers[questionIndex] ?? "")
+          .split("、")
+          .map((value) => value.trim())
+          .filter(Boolean),
+      );
+      if (selected.has(option.label)) {
+        selected.delete(option.label);
+      } else {
+        selected.add(option.label);
+      }
+      setQuestionnaireAnswer(
+        event,
+        questionIndex,
+        [...selected].join("、"),
+      );
+    }
+
+    /**
+     * Returns whether one option is represented by the editable answer.
+     *
+     * Example: multi-select answer "A、B" contains option B.
+     */
+    function questionnaireOptionSelected(event, questionIndex, option) {
+      const question = event.questions[questionIndex];
+      const answer = event.answers[questionIndex] ?? "";
+      if (!question?.multiSelect) {
+        return answer === option.label;
+      }
+      return answer
+        .split("、")
+        .map((value) => value.trim())
+        .includes(option.label);
+    }
+
+    /**
+     * Formats all answers as plain Agent input requested by the user.
+     *
+     * Example: two answers -> two `question: answer` lines.
+     */
+    function questionnaireReply(event) {
+      return event.questions
+        .map(
+          (question, index) =>
+            `${question.question}: ${(event.answers[index] ?? "").trim()}`,
+        )
+        .join("\n");
+    }
+
+    /**
+     * Submits a completed questionnaire through the active Agent terminal.
+     *
+     * Example: all tabs answered -> one multi-line user message.
+     */
+    function submitQuestionnaire(event) {
+      const tab = activeTab();
+      const complete = event.answers.every((answer) => answer.trim().length > 0);
+      if (!tab || !complete || event.answered || event.submitting) {
+        return;
+      }
+      if (tab.socket?.readyState !== WebSocket.OPEN) {
+        tab.error = "Agent session is not connected.";
+        refreshTabs();
+        return;
+      }
+      event.submitting = true;
+      event.submissionStage = "canceling";
+      event.pendingReply = questionnaireReply(event);
+      refreshTabs();
+      // AskUserQuestion owns the Agent TUI while it is visible. Escape first,
+      // then let its persisted tool result trigger the normal composer submit.
+      tab.socket.send(JSON.stringify({ type: "key", key: "esc" }));
+    }
+
+    /**
+     * Sends questionnaire text after the native Agent prompt confirms cancellation.
+     *
+     * Example: matching tool result -> ordinary two-line user message.
+     */
+    async function finishQuestionnaireSubmit(tab, event) {
+      const reply = event.pendingReply;
+      event.pendingReply = "";
+      event.submissionStage = "sending";
+      refreshTabs();
+      const submitted = await submitAgentText(tab, reply);
+      event.submitting = false;
+      event.submissionStage = "";
+      if (submitted) {
+        event.answered = true;
+      }
+      refreshTabs();
     }
 
     /**
@@ -2187,29 +2467,21 @@ export default defineComponent({
     }
 
     /**
-     * Groups consecutive tool events into one compact render row.
+     * Groups consecutive tool events and exposes only the active tail.
      *
-     * Example: tool + result + tool + result -> one collapsed Tools (4) row.
+     * Example: active tool + result -> open group with only the result expanded.
      */
     function sessionRenderRows(events, agentBusy) {
       const rows = [];
       let tools = [];
-      // Flush only at a non-tool boundary so one agent operation stays compact.
-      // Example: two buffered tool events -> one tool_group row.
-      const flushTools = (mayBeRunning) => {
-        const resultKeys = new Set(
-          tools
-            .filter((event) => event.kind === "tool_result")
-            .map((event) => event.key),
-        );
-        const renderedTools = tools.map((event) => ({
+      // Only a trailing Tool block is current. A later assistant/user event
+      // closes both levels so completed history never keeps stealing space.
+      const flushTools = (active) => {
+        const lastIndex = tools.length - 1;
+        const renderedTools = tools.map((event, index) => ({
           ...event,
-          running:
-            mayBeRunning &&
-            event.kind === "tool" &&
-            !resultKeys.has(event.key),
+          expanded: active && index === lastIndex,
         }));
-        const running = renderedTools.some((event) => event.running);
         if (tools.length === 1) {
           rows.push(renderedTools[0]);
         } else if (tools.length > 1) {
@@ -2217,7 +2489,7 @@ export default defineComponent({
             kind: "tool_group",
             id: `tool-group:${tools[0].id}:${tools[tools.length - 1].id}`,
             events: renderedTools,
-            running,
+            expanded: active,
           });
         }
         tools = [];
@@ -2230,8 +2502,8 @@ export default defineComponent({
         flushTools(false);
         rows.push(event);
       }
-      // Only a trailing tool block can belong to the currently running turn.
-      // Historical blocks may miss results after an abort and must stay closed.
+      // Historical sessions can end with an aborted Tool and no result. Agent
+      // activity prevents that stale tail from opening after reload.
       flushTools(agentBusy);
       return rows;
     }
@@ -2298,12 +2570,165 @@ export default defineComponent({
           </div>
         );
       }
+      if (event.kind === "questionnaire") {
+        const submitIndex = event.questions.length;
+        const activeIndex = Math.min(event.activeQuestion, submitIndex);
+        const question = event.questions[activeIndex];
+        const complete = event.answers.every(
+          (answer) => answer.trim().length > 0,
+        );
+        return (
+          <section
+            class={{
+              "remote-shell__questionnaire": true,
+              "remote-shell__questionnaire--answered": event.answered,
+            }}
+            key={event.id}
+          >
+            <div
+              class="remote-shell__questionnaire-tabs"
+              role="tablist"
+              aria-label="Questions"
+            >
+              {event.questions.map((item, index) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  role="tab"
+                  class={{
+                    "remote-shell__questionnaire-tab": true,
+                    "remote-shell__questionnaire-tab--active":
+                      activeIndex === index,
+                    "remote-shell__questionnaire-tab--complete":
+                      event.answers[index]?.trim().length > 0,
+                  }}
+                  aria-selected={activeIndex === index}
+                  onClick={() => selectQuestionnaireTab(event, index)}
+                >
+                  <span>{index + 1}</span>
+                  {item.header}
+                </button>
+              ))}
+              <button
+                type="button"
+                role="tab"
+                class={{
+                  "remote-shell__questionnaire-tab": true,
+                  "remote-shell__questionnaire-tab--submit": true,
+                  "remote-shell__questionnaire-tab--active":
+                    activeIndex === submitIndex,
+                }}
+                aria-selected={activeIndex === submitIndex}
+                onClick={() => selectQuestionnaireTab(event, submitIndex)}
+              >
+                Submit
+              </button>
+            </div>
+            {question ? (
+              <div class="remote-shell__questionnaire-panel" role="tabpanel">
+                <div class="remote-shell__questionnaire-heading">
+                  <span>{question.header}</span>
+                  {question.multiSelect ? <small>Multiple</small> : null}
+                </div>
+                <p class="remote-shell__questionnaire-question">
+                  {question.question}
+                </p>
+                {question.options.length > 0 ? (
+                  <div class="remote-shell__questionnaire-options">
+                    {question.options.map((option) => (
+                      <div
+                        class="remote-shell__questionnaire-option-wrap"
+                        key={option.label}
+                      >
+                        <button
+                          type="button"
+                          class={{
+                            "remote-shell__questionnaire-option": true,
+                            "remote-shell__questionnaire-option--selected":
+                              questionnaireOptionSelected(
+                                event,
+                                activeIndex,
+                                option,
+                              ),
+                          }}
+                          disabled={event.answered || event.submitting}
+                          onClick={() =>
+                            selectQuestionnaireOption(
+                              event,
+                              activeIndex,
+                              option,
+                            )
+                          }
+                        >
+                          <span>{option.label}</span>
+                          {option.description ? (
+                            <small>{option.description}</small>
+                          ) : null}
+                        </button>
+                        {option.preview ? (
+                          <details class="remote-shell__questionnaire-preview">
+                            <summary>Preview</summary>
+                            <pre>{option.preview}</pre>
+                          </details>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+                <textarea
+                  class="remote-shell__questionnaire-answer"
+                  value={event.answers[activeIndex] ?? ""}
+                  rows="3"
+                  aria-label={`Answer ${question.header}`}
+                  placeholder="Answer"
+                  disabled={event.answered || event.submitting}
+                  onInput={(inputEvent) =>
+                    setQuestionnaireAnswer(
+                      event,
+                      activeIndex,
+                      inputEvent.target.value,
+                    )
+                  }
+                />
+              </div>
+            ) : (
+              <div class="remote-shell__questionnaire-panel" role="tabpanel">
+                <div class="remote-shell__questionnaire-review">
+                  {event.questions.map((item, index) => (
+                    <div
+                      class="remote-shell__questionnaire-review-row"
+                      key={item.id}
+                    >
+                      <span>{item.header}</span>
+                      <p>{event.answers[index]?.trim() || "-"}</p>
+                    </div>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  class="remote-shell__questionnaire-submit"
+                  disabled={!complete || event.answered || event.submitting}
+                  onClick={() => submitQuestionnaire(event)}
+                >
+                  {event.submitting
+                    ? event.submissionStage === "canceling"
+                      ? "Preparing..."
+                      : "Sending..."
+                    : event.answered
+                      ? "Submitted"
+                      : "Submit"}
+                </button>
+              </div>
+            )}
+          </section>
+        );
+      }
       if (event.kind === "tool_group") {
         return (
           <details
             class="remote-shell__session-tool-group"
             key={event.id}
-            open={event.running}
+            open={event.expanded}
           >
             <summary>Tools ({event.events.length})</summary>
             <div class="remote-shell__session-tool-group-items">
@@ -2320,7 +2745,18 @@ export default defineComponent({
               `remote-shell__session-tool--${event.kind}`,
             ]}
             key={event.id}
-            open={event.running}
+            open={event.expanded}
+          >
+            <summary>{event.title}</summary>
+            <pre>{event.text}</pre>
+          </details>
+        );
+      }
+      if (event.kind === "notification") {
+        return (
+          <details
+            class="remote-shell__session-tool remote-shell__session-tool--notification"
+            key={event.id}
           >
             <summary>{event.title}</summary>
             <pre>{event.text}</pre>

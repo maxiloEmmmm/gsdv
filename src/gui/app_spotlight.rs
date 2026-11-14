@@ -240,7 +240,7 @@ impl GsdvGuiApp {
     /// Collects spotlight Agents and orders stopped/error entries before active entries.
     ///
     /// Example: `[Busy A, Idle B]` -> `[Idle B, Busy A]`.
-    fn spotlight_agents(&self) -> Vec<SpotlightAgentEntry> {
+    pub(super) fn spotlight_agents(&self) -> Vec<SpotlightAgentEntry> {
         let mut entries = Vec::new();
         for (workspace_index, workspace) in self.workspaces.iter().enumerate() {
             if let Some(level) = self.spotlight_agents.get(&workspace.agent_id).copied() {
@@ -334,7 +334,11 @@ impl GsdvGuiApp {
     /// Routes Agent input and terminal rendering to one spotlight entry.
     ///
     /// Example: click Agent from workspace 2 -> workspace 2 main terminal owns input.
-    fn prepare_spotlight_workspace(&mut self, workspace_index: usize, slot: AgentSlotId) {
+    pub(super) fn prepare_spotlight_workspace(
+        &mut self,
+        workspace_index: usize,
+        slot: AgentSlotId,
+    ) {
         self.active_workspace = workspace_index;
         if let Some(workspace) = self.workspaces.get_mut(workspace_index) {
             workspace.route = Route::Workspace;

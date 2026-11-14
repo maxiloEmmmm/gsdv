@@ -600,7 +600,7 @@ impl GsdvGuiApp {
     }
 
     /// Returns the configured effort override for one agent slot.
-    fn agent_slot_effort(&self, index: usize, slot: &AgentSlotId) -> Option<String> {
+    pub(super) fn agent_slot_effort(&self, index: usize, slot: &AgentSlotId) -> Option<String> {
         let workspace = self.workspaces.get(index)?;
         match slot {
             AgentSlotId::Main => workspace.agent_effort.clone(),
@@ -613,7 +613,7 @@ impl GsdvGuiApp {
     }
 
     /// Returns the configured fast-mode override for one agent slot.
-    fn agent_slot_fast_mode(&self, index: usize, slot: &AgentSlotId) -> Option<bool> {
+    pub(super) fn agent_slot_fast_mode(&self, index: usize, slot: &AgentSlotId) -> Option<bool> {
         let workspace = self.workspaces.get(index)?;
         match slot {
             AgentSlotId::Main => workspace.agent_fast_mode,

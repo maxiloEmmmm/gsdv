@@ -44,6 +44,107 @@ function toolText(value) {
 }
 
 /**
+ * Parses tool arguments that providers may persist as JSON strings.
+ *
+ * Example: '{"questions":[]}' -> { questions: [] }.
+ */
+function toolInput(value) {
+  if (typeof value !== "string") {
+    return value;
+  }
+  try {
+    return JSON.parse(value);
+  } catch (_error) {
+    return null;
+  }
+}
+
+/**
+ * Normalizes one provider question without retaining unrelated tool fields.
+ *
+ * Example: AskUserQuestion option objects -> browser question data.
+ */
+function questionnaireQuestion(question, index) {
+  if (!question || typeof question !== "object") {
+    return null;
+  }
+  const prompt = String(question.question ?? "").trim();
+  if (!prompt) {
+    return null;
+  }
+  const options = Array.isArray(question.options)
+    ? question.options
+        .filter((option) => option && typeof option === "object")
+        .map((option) => ({
+          label: String(option.label ?? "").trim(),
+          description: String(option.description ?? "").trim(),
+          preview: String(option.preview ?? "").trim(),
+        }))
+        .filter((option) => option.label)
+    : [];
+  return {
+    id: String(question.id ?? `question-${index}`),
+    header: String(question.header ?? `Q${index + 1}`).trim(),
+    question: prompt,
+    multiSelect: question.multiSelect === true,
+    options,
+  };
+}
+
+/**
+ * Builds an interactive event for Claude AskUserQuestion or Codex input requests.
+ *
+ * Example: two questions -> one questionnaire event with two tabs.
+ */
+function questionnaireEvent(name, input, key) {
+  if (name !== "AskUserQuestion" && name !== "request_user_input") {
+    return null;
+  }
+  const parsed = toolInput(input);
+  const questions = Array.isArray(parsed?.questions)
+    ? parsed.questions
+        .map(questionnaireQuestion)
+        .filter(Boolean)
+    : [];
+  if (questions.length === 0) {
+    return null;
+  }
+  return {
+    kind: "questionnaire",
+    title: "Questions",
+    key,
+    questions,
+  };
+}
+
+/**
+ * Detects a completed Claude questionnaire result for historical locking.
+ *
+ * Example: AskUserQuestion result text -> questionnaire_result event.
+ */
+function claudeQuestionnaireResult(block, key) {
+  const answered =
+    typeof block?.content === "string" &&
+    block.content.startsWith("Your questions have been answered:");
+  const cancelled =
+    typeof block?.content === "string" &&
+    block.content.startsWith("The user doesn't want to proceed with this tool use.");
+  if (
+    block?.type !== "tool_result" ||
+    (!answered && !cancelled)
+  ) {
+    return null;
+  }
+  return {
+    kind: "questionnaire_result",
+    title: "Answers submitted",
+    text: block.content,
+    key,
+    cancelled,
+  };
+}
+
+/**
  * Builds one normalized browser event when it has visible content.
  *
  * Example: assistant + "done" -> one renderable assistant event.
@@ -127,11 +228,20 @@ function codexEvents(record, fallbackKey) {
     return event ? [event] : [];
   }
   if (payload.type === "function_call" || payload.type === "custom_tool_call") {
+    const toolKey = payload.call_id ?? baseKey;
+    const questionnaire = questionnaireEvent(
+      payload.name,
+      payload.arguments ?? payload.input,
+      toolKey,
+    );
+    if (questionnaire) {
+      return [questionnaire];
+    }
     const event = visibleEvent(
       "tool",
       toolText(payload.arguments ?? payload.input),
       payload.name || "Tool call",
-      baseKey,
+      toolKey,
     );
     return event ? [event] : [];
   }
@@ -139,11 +249,12 @@ function codexEvents(record, fallbackKey) {
     payload.type === "function_call_output" ||
     payload.type === "custom_tool_call_output"
   ) {
+    const toolKey = payload.call_id ?? baseKey;
     const event = visibleEvent(
       "tool_result",
       toolText(payload.output),
       "Tool result",
-      baseKey,
+      toolKey,
     );
     return event ? [event] : [];
   }
@@ -180,9 +291,17 @@ function claudeBlockEvent(block, role, baseKey, index) {
     return visibleEvent("reasoning", block.thinking, "Reasoning", key);
   }
   if (block.type === "tool_use") {
+    const questionnaire = questionnaireEvent(block.name, block.input, key);
+    if (questionnaire) {
+      return questionnaire;
+    }
     return visibleEvent("tool", toolText(block.input), block.name || "Tool call", key);
   }
   if (block.type === "tool_result") {
+    const questionnaireResult = claudeQuestionnaireResult(block, key);
+    if (questionnaireResult) {
+      return questionnaireResult;
+    }
     return visibleEvent(
       "tool_result",
       contentText(block.content) || toolText(block.content),
@@ -194,12 +313,96 @@ function claudeBlockEvent(block, role, baseKey, index) {
 }
 
 /**
+ * Parses Claude's XML-like internal user records without styling them as input.
+ *
+ * Example: <task-notification>...</task-notification> -> collapsed notification.
+ */
+function claudeInternalUserEvent(content, baseKey) {
+  if (typeof content !== "string") {
+    return undefined;
+  }
+  const trimmed = content.trimStart();
+  const isTaskNotification = trimmed.startsWith("<task-notification>");
+  const isCommand = trimmed.startsWith("<command-name>");
+  const isCommandOutput = trimmed.startsWith("<local-command-stdout>");
+  if (trimmed.startsWith("<local-command-caveat>")) {
+    return null;
+  }
+  if (!isTaskNotification && !isCommand && !isCommandOutput) {
+    return undefined;
+  }
+
+  const document = new DOMParser().parseFromString(
+    `<gsdv-record>${content}</gsdv-record>`,
+    "application/xml",
+  );
+  const elementText = (name) =>
+    document.querySelector(name)?.textContent?.trim() ?? "";
+  if (isTaskNotification) {
+    const summary = elementText("summary");
+    const taskId = elementText("task-id");
+    const status = elementText("status");
+    const text = [
+      taskId ? `Task: ${taskId}` : "",
+      status ? `Status: ${status}` : "",
+      elementText("event"),
+      elementText("result"),
+      elementText("note"),
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+    return visibleEvent(
+      "notification",
+      text || content,
+      summary || "Task notification",
+      baseKey,
+    );
+  }
+  if (isCommand) {
+    const name = elementText("command-name") || "Local command";
+    const text = elementText("command-args") || elementText("command-message");
+    return visibleEvent(
+      "notification",
+      text || name,
+      `Local command · ${name}`,
+      baseKey,
+    );
+  }
+  return visibleEvent(
+    "notification",
+    elementText("local-command-stdout") || content,
+    "Local command output",
+    baseKey,
+  );
+}
+
+/**
  * Parses one Claude project JSONL record into browser events.
  *
  * Example: assistant message with text and tool_use -> two events.
  */
 function claudeEvents(record, fallbackKey) {
-  if (!record || (record.type !== "user" && record.type !== "assistant")) {
+  if (!record || typeof record !== "object") {
+    return [];
+  }
+  if (record.type === "queue-operation") {
+    if (record.operation !== "enqueue") {
+      return [];
+    }
+    const baseKey = record.timestamp ?? fallbackKey;
+    const internalEvent = claudeInternalUserEvent(record.content ?? "", baseKey);
+    if (internalEvent !== undefined) {
+      return internalEvent ? [internalEvent] : [];
+    }
+    const event = visibleEvent(
+      "user",
+      record.content,
+      "You",
+      baseKey,
+    );
+    return event ? [event] : [];
+  }
+  if (record.type !== "user" && record.type !== "assistant") {
     return [];
   }
   const message = record.message;
@@ -208,6 +411,12 @@ function claudeEvents(record, fallbackKey) {
   }
   const role = message.role === "user" ? "user" : "assistant";
   const baseKey = record.uuid ?? message.id ?? fallbackKey;
+  if (role === "user" && typeof message.content === "string") {
+    const internalEvent = claudeInternalUserEvent(message.content, baseKey);
+    if (internalEvent !== undefined) {
+      return internalEvent ? [internalEvent] : [];
+    }
+  }
   const content = Array.isArray(message.content)
     ? message.content
     : [message.content];

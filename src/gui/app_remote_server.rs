@@ -22,11 +22,11 @@ use tokio::time::MissedTickBehavior;
 
 /// Remote 图片粘贴发送给 terminal TUI 的 Ctrl+V 控制字节。
 const REMOTE_AGENT_IMAGE_PASTE_BYTES: &[u8] = &[0x16];
-/// Remote agent 输出 WebSocket 心跳间隔。
+/// Remote agent WebSocket 心跳间隔。
 const REMOTE_AGENT_OUTPUT_PING_INTERVAL: Duration = Duration::from_secs(30);
 /// Remote agent 输出 WebSocket 合帧间隔，上限约 60 FPS。
 const REMOTE_AGENT_OUTPUT_FRAME_INTERVAL: Duration = Duration::from_millis(16);
-/// Remote agent 输出 WebSocket 允许连续丢失的 pong 次数。
+/// Remote agent WebSocket 允许连续丢失的 pong 次数。
 const REMOTE_AGENT_OUTPUT_MAX_MISSED_PONGS: u8 = 2;
 /// Remote 请求等待后台 agent terminal 创建的重试次数。
 const REMOTE_AGENT_START_RETRY_ATTEMPTS: usize = 80;
@@ -572,8 +572,12 @@ impl GsdvGuiApp {
             }
             return RemoteApiResult::Err(remote_not_found());
         };
-        host.paste_text(&input.text);
-        host.submit_current_input();
+        if !host.ready_for_remote_input() {
+            return RemoteApiResult::Err(remote_agent_starting());
+        }
+        if let Err(error) = host.submit_remote_text(&input.text) {
+            return RemoteApiResult::Err(remote_internal_error(&error));
+        }
         RemoteApiResult::Ok(RemoteApiPayload::AgentOk)
     }
 
@@ -1425,6 +1429,9 @@ async fn run_remote_agent_session_socket(
     state: RemoteApiState,
     target: RemoteAgentTarget,
 ) {
+    let mut ping_interval = tokio::time::interval(REMOTE_AGENT_OUTPUT_PING_INTERVAL);
+    ping_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut missed_pongs = 0_u8;
     loop {
         tokio::select! {
             server_message = client.messages.recv() => {
@@ -1478,10 +1485,24 @@ async fn run_remote_agent_session_socket(
                     }
                 }
             }
+            _ = ping_interval.tick() => {
+                missed_pongs = missed_pongs.saturating_add(1);
+                if missed_pongs > REMOTE_AGENT_OUTPUT_MAX_MISSED_PONGS {
+                    let _ = socket.send(Message::Close(None)).await;
+                    return;
+                }
+                if !send_remote_agent_output_ping(&mut socket).await {
+                    return;
+                }
+            }
             browser_message = socket.recv() => {
                 let Some(Ok(browser_message)) = browser_message else {
                     return;
                 };
+                if remote_agent_output_message_is_pong(&browser_message) {
+                    missed_pongs = 0;
+                    continue;
+                }
                 if let Some((session_id, before_seek)) =
                     remote_agent_session_history_message(&browser_message)
                 {
