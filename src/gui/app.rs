@@ -275,13 +275,16 @@ pub fn run() -> eframe::Result<()> {
             apply_runtime_fonts(&cc.egui_ctx, &font_settings);
             let mut app =
                 GsdvGuiApp::new_with_font_settings(data, agent_launch, font_settings, system_fonts);
-            app.set_fs_watch_repaint_context(cc.egui_ctx.clone());
-            app.restart_remote_server(&cc.egui_ctx, false);
-            app.start_remote_workspace_loads(&cc.egui_ctx);
+            app.attach_frontend_runtime(&cc.egui_ctx);
             Ok(Box::new(app))
         }),
     )
 }
+
+#[path = "tui.rs"]
+mod tui_runtime;
+
+pub use tui_runtime::run_tui;
 
 #[cfg(target_os = "macos")]
 fn configure_platform_about_metadata() {
@@ -873,6 +876,16 @@ impl From<InitialGuiData> for GsdvGuiApp {
 }
 
 impl GsdvGuiApp {
+    /// 把 GUI 或 TUI 前端接入同一套后台服务生命周期。
+    ///
+    /// 适用场景：前端 Context 创建后。示例：TUI 启动 -> Web listener 和 remote workspace 同时可用。
+    fn attach_frontend_runtime(&mut self, ctx: &egui::Context) {
+        self.app_repaint_ctx = Some(ctx.clone());
+        self.set_fs_watch_repaint_context(ctx.clone());
+        self.restart_remote_server(ctx, false);
+        self.start_remote_workspace_loads(ctx);
+    }
+
     fn new(value: InitialGuiData, agent_launch: AgentLaunchConfig) -> Self {
         Self::new_with_font_settings(
             value,
@@ -2013,6 +2026,8 @@ enum AppEvent {
         agent_slot: AgentSlotId,
         bytes: Vec<u8>,
     },
+    /// TUI 输入解析后的业务动作。
+    TuiAction(tui_runtime::TuiAppAction),
     /// input runtime 检测到番茄钟相关输入。
     PomodoroInputDetected,
     /// 派发 settings 保存副作用。

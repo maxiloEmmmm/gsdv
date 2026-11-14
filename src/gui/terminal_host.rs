@@ -690,7 +690,12 @@ impl TerminalRemoteOutputSource {
         let mode_changed = snapshot.terminal_scroll != state.terminal_scroll;
         let grid_changed = snapshot.cols != state.cols || snapshot.screen_rows != state.screen_rows;
         if next_signatures == state.row_signatures && !mode_changed && !grid_changed {
-            return TerminalRemoteUpdate::Unchanged;
+            // 空格只移动光标，terminal 行签名不会变化；仍需通知前端刷新光标，
+            // 否则空格要等到下一个可见字符改变网格后才会表现出来。
+            return TerminalRemoteUpdate::Patch(TerminalRemotePatch {
+                rows: Vec::new(),
+                cursor: snapshot.cursor,
+            });
         }
 
         let can_patch = snapshot.terminal_scroll
@@ -960,6 +965,19 @@ impl TerminalBackend {
         // 防止回归：输入进了 Codex，但可见区域还停在历史输出。
         self.term.lock().scroll_display(Scroll::Bottom);
         self.notifier.notify(bytes);
+    }
+
+    /// 向子进程写入一批不可拆分的远程输入，并保留 channel 错误。
+    ///
+    /// Example: `hello + Enter` -> one PTY input message or an error.
+    fn try_write_bytes(&self, bytes: Vec<u8>) -> Result<(), String> {
+        // 远程 API 必须能区分“已经交给 PTY”和“PTY 已退出”；Notifier
+        // 会吞掉 send 错误，导致浏览器收到假 200，因此这里直接使用 sender。
+        self.term.lock().scroll_display(Scroll::Bottom);
+        self.notifier
+            .0
+            .send(Msg::Input(bytes.into()))
+            .map_err(|_| "agent terminal input channel is closed".to_string())
     }
 
     /// host drop 时通知 PTY reader 退出。
@@ -1530,6 +1548,15 @@ impl GuiTerminalHost {
         self.backend.scroll_remote(delta, pointer_cell);
     }
 
+    /// 在同进程 TUI 中滚动 terminal，不要求 WebSocket session 所有权。
+    ///
+    /// 适用场景：`gsdv tui` 鼠标滚轮。例：delta=3 -> 向上滚三行。
+    pub fn scroll_direct(&mut self, delta: i32, pointer_cell: Option<(u16, u16)>) {
+        self.backend.scroll_remote(delta, pointer_cell);
+        self.remote_output_tx
+            .send_modify(|sequence| *sequence = sequence.wrapping_add(1));
+    }
+
     /// Sends one whitelisted key from the currently owning Web session.
     ///
     /// Example: current session + `Up` -> terminal receives CSI A.
@@ -1879,6 +1906,48 @@ impl GuiTerminalHost {
         } else {
             self.write_bytes(b"\r");
         }
+    }
+
+    /// 返回 Agent 是否已进入可接收远程输入的界面。
+    ///
+    /// Example: Codex resume loading -> false; visible composer -> true.
+    pub fn ready_for_remote_input(&self) -> bool {
+        if self.kind != TerminalSurfaceKind::Agent {
+            return false;
+        }
+        let agent_kind = self
+            .session_metadata
+            .lock()
+            .map(|metadata| metadata.agent_kind)
+            .unwrap_or_else(|error| error.into_inner().agent_kind);
+        agent_kind != AgentKind::Codex || terminal_agent_composer_ready(&self.backend)
+    }
+
+    /// 原子写入远程文本及提交键，避免冷启动时文本和 Enter 被拆开处理。
+    ///
+    /// Example: `"hello"` -> bracketed paste bytes followed by Codex Enter bytes.
+    pub fn submit_remote_text(&mut self, text: &str) -> Result<(), String> {
+        if self.kind != TerminalSurfaceKind::Agent {
+            return Err("terminal is not an agent".to_string());
+        }
+        if text.is_empty() {
+            return Ok(());
+        }
+        let mode = self.terminal_mode();
+        let mut bytes = Vec::with_capacity(text.len() + 20);
+        if mode.contains(TermMode::BRACKETED_PASTE) {
+            bytes.extend_from_slice(b"\x1b[200~");
+            bytes.extend_from_slice(text.as_bytes());
+            bytes.extend_from_slice(b"\x1b[201~");
+        } else {
+            bytes.extend_from_slice(text.as_bytes());
+        }
+        if mode.intersects(TermMode::KITTY_KEYBOARD_PROTOCOL) {
+            bytes.extend_from_slice(b"\x1b[13u");
+        } else {
+            bytes.push(b'\r');
+        }
+        self.backend.try_write_bytes(bytes)
     }
 
     pub fn write_bytes(&mut self, bytes: &[u8]) {
@@ -3558,6 +3627,20 @@ fn terminal_agent_input_text_snapshot(backend: &TerminalBackend) -> Option<Strin
     } else {
         Some(text)
     }
+}
+
+/// 检查 Codex 光标是否位于真实 composer，而不是启动页或临时弹窗。
+///
+/// Example: update dialog with `›` -> false; empty composer with `›` -> true.
+fn terminal_agent_composer_ready(backend: &TerminalBackend) -> bool {
+    let (lines, cursor_line) = terminal_visible_text_snapshot(backend);
+    let Some(cursor_line) = cursor_line else {
+        return false;
+    };
+    let Some(prompt_line) = terminal_find_agent_prompt_line(&lines, cursor_line) else {
+        return false;
+    };
+    !terminal_prompt_belongs_to_transient_view(&lines, prompt_line)
 }
 
 /// 导出 remote WebSocket 使用的完整 terminal buffer 快照。

@@ -1166,6 +1166,9 @@ impl GsdvGuiApp {
             } => {
                 self.apply_input_terminal_bytes(ctx, workspace_index, target, agent_slot, bytes);
             }
+            AppEvent::TuiAction(action) => {
+                self.apply_tui_action(ctx, action);
+            }
             AppEvent::PomodoroInputDetected => {
                 self.process_pomodoro_input_detected(ctx);
             }
