@@ -258,10 +258,16 @@ pub(super) fn write_frame_diff(
         if let Some(previous_line) = previous_line
             && render_line_overlays_can_overwrite(previous_line, line)
         {
-            for ((_, previous_overlay), (x, overlay)) in
-                previous_line.overlays.iter().zip(&line.overlays)
+            if let Some(first_changed) = previous_line
+                .overlays
+                .iter()
+                .zip(&line.overlays)
+                .position(|((_, previous_overlay), (_, overlay))| previous_overlay != overlay)
             {
-                if previous_overlay != overlay {
+                // 触发条件：底层 terminal overlay 变化，上层 Modal 保持不变。
+                // 不能只重画变化项：整行 terminal 会覆盖后画的 Modal。
+                // 从首个变化层恢复后续层，防止 Modal 视觉消失但仍截获输入。
+                for (x, overlay) in line.overlays.iter().skip(first_changed) {
                     queue!(stdout, MoveTo(*x, index as u16), Print(overlay))?;
                 }
             }
