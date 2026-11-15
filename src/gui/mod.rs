@@ -10,7 +10,6 @@ mod local_image;
 mod markdown_preview;
 mod outline;
 mod perf_log;
-pub(crate) mod remote_workspace;
 mod repaint_gate;
 mod reviewer_adapter;
 mod session_stream;

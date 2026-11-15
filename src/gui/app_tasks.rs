@@ -787,42 +787,11 @@ impl GsdvGuiApp {
         key: TerminalSpawnKey,
         result: Result<GuiTerminalHost, String>,
     ) {
-        if self
-            .workspaces
-            .get(key.index)
-            .is_some_and(|workspace| workspace.remote.is_some())
-            && !self.remote_workspace_is_enabled(key.index)
-        {
-            return;
-        }
         let current_path_matches = self
             .workspaces
             .get(key.index)
             .is_some_and(|workspace| workspace.path == key.workspace_path);
         if key.kind == TerminalSurfaceKind::Agent && !current_path_matches {
-            let project = self
-                .remote_workspaces
-                .get_mut(key.index)
-                .and_then(Option::as_mut)
-                .and_then(|runtime| {
-                    runtime
-                        .projects
-                        .iter_mut()
-                        .find(|project| project.snapshot.path == key.workspace_path)
-                });
-            if let Some(project) = project {
-                let slot = project.agents.entry(key.agent_slot).or_default();
-                if slot.manually_stopped {
-                    return;
-                }
-                match result {
-                    Ok(host) => {
-                        slot.host = Some(host);
-                        slot.error = None;
-                    }
-                    Err(error) => slot.error = Some(error),
-                }
-            }
             return;
         }
         let Some(hosts) = self.terminal_hosts.get_mut(key.index) else {

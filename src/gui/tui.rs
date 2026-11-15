@@ -4,7 +4,9 @@
 //! 番茄钟和持久化继续由 `GsdvGuiApp` 与唯一 `AppEvent` 队列持有。
 
 use super::*;
-use crate::gui::terminal_host::TerminalRemoteRow;
+use crate::gui::terminal_host::{
+    TerminalTuiFrame, TerminalTuiOutputSource, TerminalTuiOutputState, TerminalTuiUpdate,
+};
 use anyhow::{Context, Result};
 use base64::Engine as _;
 use crossterm::cursor::{Hide, MoveTo, Show};
@@ -106,10 +108,6 @@ pub(super) enum TuiAppAction {
     ToggleWorkspaceFocus(usize),
     /// 切换左侧 workspace 聚焦过滤。
     ToggleWorkspaceFilter,
-    /// 切换 Remote Workspace 启用状态。
-    ToggleRemoteWorkspace(usize),
-    /// 重启 Remote Workspace 的所有 Agent。
-    RestartRemoteAgents(usize),
     /// 从输入路径新增本地 workspace。
     AddWorkspace(PathBuf),
     /// 展开 outline 目录并触发后台刷新。
@@ -405,10 +403,6 @@ impl GsdvGuiApp {
             }
             TuiAppAction::ToggleWorkspaceFocus(index) => self.toggle_workspace_focus(index),
             TuiAppAction::ToggleWorkspaceFilter => self.toggle_workspace_focus_filter(),
-            TuiAppAction::ToggleRemoteWorkspace(index) => self.toggle_remote_workspace(ctx, index),
-            TuiAppAction::RestartRemoteAgents(index) => {
-                self.restart_remote_workspace_agents(ctx, index)
-            }
             TuiAppAction::AddWorkspace(path) => {
                 let existing = self
                     .workspaces
@@ -1094,11 +1088,11 @@ struct PaneCache {
     /// 用于识别 stop/restart 后替换的 PTY host。
     host_id: u64,
     /// PTY 只读输出源。
-    source: TerminalRemoteOutputSource,
-    /// update_since 对比状态。
-    output_state: TerminalRemoteOutputState,
-    /// 当前完整可绘制快照。
-    snapshot: TerminalRemoteSnapshot,
+    source: TerminalTuiOutputSource,
+    /// emulator damage 消费状态。
+    output_state: TerminalTuiOutputState,
+    /// 当前可绘制 viewport。
+    frame: TerminalTuiFrame,
     /// 最近同步给 PTY 的 cols/lines。
     grid_size: (u16, u16),
     /// 普通 terminal 模式下距底部的本地 scrollback 行数。
@@ -1130,11 +1124,11 @@ struct WorkspaceTerminalCache {
     /// 用于识别重启后的 PTY。
     host_id: u64,
     /// PTY 只读输出源。
-    source: TerminalRemoteOutputSource,
-    /// update_since 对比状态。
-    output_state: TerminalRemoteOutputState,
-    /// 当前完整可绘制快照。
-    snapshot: TerminalRemoteSnapshot,
+    source: TerminalTuiOutputSource,
+    /// emulator damage 消费状态。
+    output_state: TerminalTuiOutputState,
+    /// 当前可绘制 viewport。
+    frame: TerminalTuiFrame,
     /// 最近同步给 PTY 的 cols/lines。
     grid_size: (u16, u16),
     /// 普通 terminal 模式下距底部的本地 scrollback 行数。
@@ -1496,10 +1490,8 @@ struct TuiState {
     spotlight_rank_leader_agent_id: Option<String>,
     /// workspace rail 是否折叠为最小宽度。
     sidebar_collapsed: bool,
-    /// Busy 状态动画当前帧。
+    /// 随可见 PTY damage 推进的 Busy 状态帧。
     busy_frame: usize,
-    /// 上次推进 Busy 动画的时间。
-    last_busy_frame_at: Instant,
     /// 上次绘制的番茄剩余分钟数，用于避免常驻 TUI 每秒输出。
     last_pomodoro_minute: Option<u64>,
     /// 当前键盘输入目标。
@@ -1559,7 +1551,6 @@ impl TuiState {
             spotlight_rank_leader_agent_id: None,
             sidebar_collapsed: false,
             busy_frame: 0,
-            last_busy_frame_at: Instant::now(),
             last_pomodoro_minute: None,
             focused_target: None,
             panes: BTreeMap::new(),
@@ -1606,7 +1597,6 @@ impl TuiState {
             self.finish_pending_markdown_navigation(app);
             self.request_markdown_images(app);
             self.refresh_state_fingerprint(app);
-            self.refresh_busy_animation(app);
             self.refresh_pomodoro_countdown(app);
             self.refresh_terminal_updates();
 
@@ -1811,15 +1801,15 @@ impl TuiState {
                 host.resize_remote_grid(terminal_cols, terminal_lines);
             }
             if !self.panes.contains_key(&pane.target) {
-                let source = host.remote_output_source();
-                let (snapshot, output_state) = source.snapshot();
+                let source = host.tui_output_source();
+                let (frame, output_state) = source.frame(0);
                 self.panes.insert(
                     pane.target.clone(),
                     PaneCache {
                         host_id,
                         source,
                         output_state,
-                        snapshot,
+                        frame,
                         grid_size,
                         scroll_offset: 0,
                     },
@@ -1837,15 +1827,11 @@ impl TuiState {
     fn sync_markdown_workbenches(&mut self, app: &GsdvGuiApp) {
         match self.main_view {
             TuiMainView::Workflow => {
-                let editable = app
-                    .workspaces
-                    .get(app.active_workspace)
-                    .is_some_and(|workspace| workspace.remote.is_none());
                 column_browser::sync_workflow_workbenches(
                     &self.workflow_browser,
                     app.workflow_states.get(app.active_workspace),
                     &mut self.markdown_workbenches,
-                    editable,
+                    true,
                     app.workspaces
                         .get(app.active_workspace)
                         .map(|workspace| workspace.path.as_path())
@@ -1898,14 +1884,14 @@ impl TuiState {
             .as_ref()
             .is_none_or(|cache| cache.workspace_index != index || cache.host_id != host_id);
         if replace {
-            let source = host.remote_output_source();
-            let (snapshot, output_state) = source.snapshot();
+            let source = host.tui_output_source();
+            let (frame, output_state) = source.frame(0);
             self.workspace_terminal = Some(WorkspaceTerminalCache {
                 workspace_index: index,
                 host_id,
                 source,
                 output_state,
-                snapshot,
+                frame,
                 grid_size,
                 scroll_offset: 0,
             });
@@ -2051,41 +2037,41 @@ impl TuiState {
 
     /// 消费所有可见 terminal source 的最小更新。
     ///
-    /// 适用场景：PTY 输出变化。示例：Patch 只替换 cache 对应行。
+    /// 适用场景：PTY 输出变化。示例：Rows 只替换 cache 对应行。
     fn refresh_terminal_updates(&mut self) {
         if self.main_view == TuiMainView::Terminal {
             if let Some(cache) = self.workspace_terminal.as_mut() {
-                let previous_rows = cache.snapshot.rows.len();
-                if apply_terminal_update(
-                    &mut cache.snapshot,
-                    cache.source.update_since(&mut cache.output_state),
+                if apply_terminal_tui_update(
+                    &mut cache.frame,
+                    cache
+                        .source
+                        .update_since(&mut cache.output_state, cache.scroll_offset),
                 ) {
-                    if cache.scroll_offset > 0 {
-                        cache.scroll_offset = cache.scroll_offset.saturating_add(
-                            cache.snapshot.rows.len().saturating_sub(previous_rows),
-                        );
-                    }
                     self.dirty = true;
                 }
             }
             return;
         }
+        let mut changed = false;
         for pane in &self.visible_panes {
             let Some(cache) = self.panes.get_mut(&pane.target) else {
                 continue;
             };
-            let previous_rows = cache.snapshot.rows.len();
-            if apply_terminal_update(
-                &mut cache.snapshot,
-                cache.source.update_since(&mut cache.output_state),
+            if apply_terminal_tui_update(
+                &mut cache.frame,
+                cache
+                    .source
+                    .update_since(&mut cache.output_state, cache.scroll_offset),
             ) {
-                if cache.scroll_offset > 0 {
-                    cache.scroll_offset = cache
-                        .scroll_offset
-                        .saturating_add(cache.snapshot.rows.len().saturating_sub(previous_rows));
-                }
-                self.dirty = true;
+                changed = true;
             }
+        }
+        if changed {
+            // 触发条件：可见 Agent terminal 确有 damage。
+            // 不能再按 FPS 独立推进：Busy 会让静止画面持续整屏重绘。
+            // 防止回归：`--fps 60` 不再等价于常驻 60 FPS CPU 占用。
+            self.busy_frame = self.busy_frame.wrapping_add(1);
+            self.dirty = true;
         }
     }
 
@@ -2185,23 +2171,6 @@ impl TuiState {
             self.dirty = true;
         } else if !app.image_gallery.open && matches!(self.layer, Some(TuiLayer::Gallery)) {
             self.layer = None;
-            self.dirty = true;
-        }
-    }
-
-    /// Busy 期间按配置 FPS 推进同一套状态动画，Idle 时完全停止。
-    ///
-    /// 适用场景：workspace、专注列表和 tab。示例：Busy -> spinner 每帧变化。
-    fn refresh_busy_animation(&mut self, app: &GsdvGuiApp) {
-        if self.main_view != TuiMainView::Agents {
-            return;
-        }
-        let busy = app.workspaces.iter().any(|workspace| {
-            super::app_chrome::workspace_effective_activity(workspace) == WorkspaceActivity::Busy
-        });
-        if busy && self.last_busy_frame_at.elapsed() >= self.frame_interval {
-            self.busy_frame = self.busy_frame.wrapping_add(1);
-            self.last_busy_frame_at = Instant::now();
             self.dirty = true;
         }
     }
@@ -2536,6 +2505,7 @@ impl TuiState {
         };
         if let Some(cache) = self.panes.get_mut(&target) {
             cache.scroll_offset = 0;
+            cache.frame = cache.source.view(0);
         }
         app.queue_app_event(AppEvent::InputTerminalBytes {
             workspace_index: target.workspace_index,
@@ -2551,6 +2521,7 @@ impl TuiState {
     fn queue_workspace_terminal_bytes(&mut self, app: &GsdvGuiApp, bytes: Vec<u8>) {
         if let Some(cache) = self.workspace_terminal.as_mut() {
             cache.scroll_offset = 0;
+            cache.frame = cache.source.view(0);
         }
         app.queue_app_event(AppEvent::InputTerminalBytes {
             workspace_index: app.active_workspace,
@@ -2569,6 +2540,7 @@ impl TuiState {
         };
         if let Some(cache) = self.panes.get_mut(&target) {
             cache.scroll_offset = 0;
+            cache.frame = cache.source.view(0);
         }
         app.queue_app_event(AppEvent::TuiAction(TuiAppAction::TerminalKey {
             index: target.workspace_index,
@@ -2742,7 +2714,7 @@ impl TuiState {
                     let terminal_owns_scroll = self
                         .panes
                         .get(&pane.target)
-                        .is_some_and(|cache| cache.snapshot.terminal_scroll);
+                        .is_some_and(|cache| cache.frame.terminal_scroll);
                     if terminal_owns_scroll {
                         app.queue_app_event(AppEvent::TuiAction(TuiAppAction::ScrollAgent {
                             index: pane.target.workspace_index,
@@ -2760,7 +2732,9 @@ impl TuiState {
                             cache
                                 .scroll_offset
                                 .saturating_sub(delta.unsigned_abs() as usize)
-                        };
+                        }
+                        .min(cache.frame.max_scroll_offset);
+                        cache.frame = cache.source.view(cache.scroll_offset);
                         self.dirty = true;
                     }
                 }
@@ -2807,7 +2781,7 @@ impl TuiState {
             let terminal_owns_scroll = self
                 .panes
                 .get(&pane.target)
-                .is_some_and(|cache| cache.snapshot.terminal_scroll);
+                .is_some_and(|cache| cache.frame.terminal_scroll);
             if terminal_owns_scroll {
                 app.queue_app_event(AppEvent::TuiAction(TuiAppAction::ScrollAgent {
                     index: pane.target.workspace_index,
@@ -2825,7 +2799,9 @@ impl TuiState {
                     cache
                         .scroll_offset
                         .saturating_sub(delta.unsigned_abs() as usize)
-                };
+                }
+                .min(cache.frame.max_scroll_offset);
+                cache.frame = cache.source.view(cache.scroll_offset);
                 self.dirty = true;
             }
             return;
@@ -2890,7 +2866,7 @@ impl TuiState {
         let terminal_owns_scroll = self
             .workspace_terminal
             .as_ref()
-            .is_some_and(|cache| cache.snapshot.terminal_scroll);
+            .is_some_and(|cache| cache.frame.terminal_scroll);
         if terminal_owns_scroll {
             app.queue_app_event(AppEvent::TuiAction(TuiAppAction::ScrollWorkspace {
                 index: app.active_workspace,
@@ -2904,7 +2880,9 @@ impl TuiState {
                 cache
                     .scroll_offset
                     .saturating_sub(delta.unsigned_abs() as usize)
-            };
+            }
+            .min(cache.frame.max_scroll_offset);
+            cache.frame = cache.source.view(cache.scroll_offset);
             self.dirty = true;
         }
     }
@@ -3481,25 +3459,10 @@ impl TuiState {
                 TuiAppAction::ExpandAllAgents { index },
             ),
         ];
-        if workspace.remote.is_some() {
-            items.push(menu_queue(
-                if app.remote_enabled.get(index).copied().unwrap_or(true) {
-                    "Disable remote"
-                } else {
-                    "Enable remote"
-                },
-                TuiAppAction::ToggleRemoteWorkspace(index),
-            ));
-            items.push(menu_queue(
-                "Restart remote agents",
-                TuiAppAction::RestartRemoteAgents(index),
-            ));
-        } else {
-            items.push(MenuItem {
-                label: "Change directory...".to_string(),
-                action: Some(MenuAction::Form(workspace_path_form(true, Some(index)))),
-            });
-        }
+        items.push(MenuItem {
+            label: "Change directory...".to_string(),
+            action: Some(MenuAction::Form(workspace_path_form(true, Some(index)))),
+        });
         items.push(MenuItem {
             label: "Close workspace".to_string(),
             action: Some(MenuAction::Confirm {
@@ -4591,16 +4554,13 @@ impl TuiState {
             set_base_text(frame, 0, 0, "Starting workspace terminal...", rect.width);
             return;
         };
-        cache.scroll_offset = cache.scroll_offset.min(
-            cache
-                .snapshot
-                .rows
-                .len()
-                .saturating_sub(usize::from(rect.height)),
-        );
-        draw_terminal_snapshot_with_offset(frame, rect, &cache.snapshot, cache.scroll_offset);
-        self.cursor_position =
-            terminal_cursor_position_with_offset(rect, &cache.snapshot, cache.scroll_offset);
+        let scroll_offset = cache.scroll_offset.min(cache.frame.max_scroll_offset);
+        if scroll_offset != cache.scroll_offset {
+            cache.scroll_offset = scroll_offset;
+            cache.frame = cache.source.view(scroll_offset);
+        }
+        draw_terminal_tui_frame(frame, rect, &cache.frame);
+        self.cursor_position = terminal_tui_cursor_position(rect, &cache.frame);
     }
 
     /// 绘制所有可见 row/col pane、tab header 和 terminal 内容。
@@ -4767,20 +4727,14 @@ impl TuiState {
                 set_base_text(frame, body.y, body.x, "Starting Agent...", body.width);
                 continue;
             };
-            cache.scroll_offset = cache.scroll_offset.min(
-                cache
-                    .snapshot
-                    .rows
-                    .len()
-                    .saturating_sub(usize::from(body.height)),
-            );
-            draw_terminal_snapshot_with_offset(frame, body, &cache.snapshot, cache.scroll_offset);
+            let scroll_offset = cache.scroll_offset.min(cache.frame.max_scroll_offset);
+            if scroll_offset != cache.scroll_offset {
+                cache.scroll_offset = scroll_offset;
+                cache.frame = cache.source.view(scroll_offset);
+            }
+            draw_terminal_tui_frame(frame, body, &cache.frame);
             if focused {
-                self.cursor_position = terminal_cursor_position_with_offset(
-                    body,
-                    &cache.snapshot,
-                    cache.scroll_offset,
-                );
+                self.cursor_position = terminal_tui_cursor_position(body, &cache.frame);
             }
         }
         self.draw_splitters(frame, app.active_workspace);
@@ -5119,34 +5073,46 @@ struct PendingMarkdownNavigation {
     y: u16,
 }
 
-/// 把 terminal 最小更新合并进 TUI 本地快照。
+/// 把 emulator damage 合并进本机字符界面 viewport。
 ///
-/// 适用场景：Agent pane 与 workspace terminal 共用。示例：Patch -> 仅替换变化行。
-fn apply_terminal_update(
-    snapshot: &mut TerminalRemoteSnapshot,
-    update: TerminalRemoteUpdate,
-) -> bool {
+/// 适用场景：Agent pane 与 workspace terminal 共用。示例：Rows -> 仅替换变化行。
+fn apply_terminal_tui_update(frame: &mut TerminalTuiFrame, update: TerminalTuiUpdate) -> bool {
     match update {
-        TerminalRemoteUpdate::Unchanged => false,
-        TerminalRemoteUpdate::Append(append) => {
-            snapshot.rows.extend(append.rows);
-            let overflow = snapshot.rows.len().saturating_sub(500);
-            if overflow > 0 {
-                snapshot.rows.drain(..overflow);
-            }
-            true
-        }
-        TerminalRemoteUpdate::Patch(patch) => {
-            for row in patch.rows {
-                if let Some(target) = snapshot.rows.get_mut(row.index) {
-                    *target = row.row;
+        TerminalTuiUpdate::Unchanged => false,
+        TerminalTuiUpdate::Rows {
+            rows,
+            cursor,
+            terminal_scroll,
+            max_scroll_offset,
+        } => {
+            let mut changed = false;
+            for (index, row) in rows {
+                if let Some(target) = frame.rows.get_mut(index)
+                    && *target != row
+                {
+                    *target = row;
+                    changed = true;
                 }
             }
-            snapshot.cursor = patch.cursor;
-            true
+            if frame.cursor != cursor {
+                frame.cursor = cursor;
+                changed = true;
+            }
+            if frame.terminal_scroll != terminal_scroll {
+                frame.terminal_scroll = terminal_scroll;
+                changed = true;
+            }
+            if frame.max_scroll_offset != max_scroll_offset {
+                frame.max_scroll_offset = max_scroll_offset;
+                changed = true;
+            }
+            changed
         }
-        TerminalRemoteUpdate::Snapshot(next) => {
-            *snapshot = next;
+        TerminalTuiUpdate::Frame(next) => {
+            if *frame == next {
+                return false;
+            }
+            *frame = next;
             true
         }
     }

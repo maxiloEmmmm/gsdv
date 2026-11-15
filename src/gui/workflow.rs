@@ -2,7 +2,7 @@
 //!
 //! 本模块只处理文件内容和结构化数据，不直接修改 egui 渲染状态。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -736,38 +736,6 @@ fn load_local_workflow_agents(
     Ok(agents)
 }
 
-/// 从 Remote inventory 中加载当前 repo 的 Workflow Agent sidecar。
-///
-/// 适用场景：SSH inventory 已把 JSON 当作长度帧文档带回。例：`.a1b2.gsdv-wf-agents -> agents`。
-fn load_document_workflow_agents(
-    documents: &BTreeMap<PathBuf, String>,
-    agent_scope: &Path,
-    tree: &WorkflowTree,
-) -> Result<Vec<SubagentViewData>, String> {
-    let mut agents = Vec::new();
-    let mut seen_targets = BTreeSet::new();
-    for (path, content) in documents.iter().filter(|(path, _)| {
-        path.starts_with(&tree.spec_path)
-            && path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| {
-                    name == WORKFLOW_AGENT_FILE
-                        || (name.starts_with('.') && name.ends_with(WORKFLOW_TASK_AGENT_SUFFIX))
-                })
-    }) {
-        append_workflow_agent_file(
-            content,
-            path,
-            agent_scope,
-            tree,
-            &mut seen_targets,
-            &mut agents,
-        )?;
-    }
-    Ok(agents)
-}
-
 /// 返回一棵 repo tree 管理的全部 Workflow Agent sidecar 路径。
 ///
 /// 适用场景：本地加载只读规范路径，不扫描无关隐藏文件。例：Repo + Project + Task 路径集合。
@@ -886,7 +854,7 @@ fn append_workflow_agent_file(
 
 /// 返回一个目标稳定且不会进入普通 Agent 命名空间的运行时 ID。
 ///
-/// 适用场景：新建或加载记录时隔离 workspace/repo 命名空间。例：同路径不同 SSH 主机 -> 不同 ID。
+/// 适用场景：新建或加载记录时隔离 workspace/repo 命名空间。例：不同路径 -> 不同 ID。
 pub(super) fn workflow_agent_runtime_id(
     workspace_scope: &Path,
     target: &WorkflowAgentTarget,
@@ -911,17 +879,11 @@ pub(super) fn workflow_agent_runtime_id(
     )
 }
 
-/// 生成跨本地与 Remote Workspace 唯一的 Workflow Agent 作用域。
+/// 生成本地 Workspace 的 Workflow Agent 作用域。
 ///
-/// 适用场景：不同 SSH 主机可能拥有相同绝对路径。例：remote key + `/repo` -> 独立稳定哈希输入。
-pub(super) fn workflow_agent_workspace_scope(
-    workspace_path: &Path,
-    remote_workspace_key: Option<&str>,
-) -> PathBuf {
-    remote_workspace_key.map_or_else(
-        || workspace_path.to_path_buf(),
-        |key| PathBuf::from(format!("remote:{key}:{}", workspace_path.display())),
-    )
+/// 适用场景：同一路径稳定生成同一个 Agent ID。例：`/repo -> /repo`。
+pub(super) fn workflow_agent_workspace_scope(workspace_path: &Path) -> PathBuf {
+    workspace_path.to_path_buf()
 }
 
 /// 原子保存一个本地 Workflow Agent sidecar；空记录直接删除文件。
@@ -1315,160 +1277,6 @@ fn discover_nested_git_repo_paths_in(
         discover_nested_git_repo_paths_in(workspace_root, &child_relative, repo_paths)?;
     }
     Ok(())
-}
-
-/// 从已读取的 workflow 文档集合构建 tree。
-///
-/// 适用场景：Remote Workspace 通过 SSH 读取文件后复用本地解析规则。
-/// 例：`gsdv-spec/root.md + task-a.md -> WorkflowTree`。
-pub(super) fn load_workflow_tree_from_documents(
-    workspace_root: &Path,
-    agent_scope: &Path,
-    documents: &BTreeMap<PathBuf, String>,
-) -> Result<WorkflowTree, String> {
-    let mut tree = load_workflow_tree_from_documents_at_repo(
-        workspace_root,
-        agent_scope,
-        documents,
-        Path::new(""),
-    )?;
-    let mut repo_paths = documents
-        .keys()
-        .filter_map(|path| workflow_document_repo_path(path))
-        .filter(|path| !path.as_os_str().is_empty())
-        .collect::<Vec<_>>();
-    repo_paths.sort();
-    repo_paths.dedup();
-    for repo_path in repo_paths {
-        tree.sub_workflows
-            .push(load_workflow_tree_from_documents_at_repo(
-                workspace_root,
-                agent_scope,
-                documents,
-                &repo_path,
-            )?);
-    }
-    Ok(tree)
-}
-
-/// 从远端文档集合加载指定 repo 的 workflow tree。
-///
-/// 适用场景：一份 SSH inventory 同时携带主 repo 和多个子 repo 文档。
-/// 例：`services/api + documents -> 子 WorkflowTree`。
-fn load_workflow_tree_from_documents_at_repo(
-    workspace_root: &Path,
-    agent_scope: &Path,
-    documents: &BTreeMap<PathBuf, String>,
-    repo_path: &Path,
-) -> Result<WorkflowTree, String> {
-    let spec_path = repo_path.join(GSDV_SPEC_DIR);
-    let root_path = documents
-        .keys()
-        .find(|path| path.parent() == Some(spec_path.as_path()) && is_repo_root_path(path))
-        .cloned()
-        .ok_or_else(|| format!("{} not found", workspace_root.join(&spec_path).display()))?;
-
-    let projects_root = spec_path.join(PROJECTS_DIR);
-    let mut project_keys = documents
-        .keys()
-        .filter_map(|path| {
-            let project_dir = path.parent()?;
-            if path.file_name()? != LEGACY_ROOT_MD || project_dir.parent()? != projects_root {
-                return None;
-            }
-            let key = project_dir.file_name()?.to_string_lossy().to_string();
-            split_stable_name(&key, NODE_ID_LEN)?;
-            Some(key)
-        })
-        .collect::<Vec<_>>();
-    project_keys.sort();
-    project_keys.dedup();
-
-    let projects = project_keys
-        .into_iter()
-        .map(|project_key| {
-            let project_dir = projects_root.join(&project_key);
-            let mut task_paths = documents
-                .keys()
-                .filter(|path| path.parent() == Some(project_dir.as_path()))
-                .filter(|path| {
-                    path.file_name()
-                        .and_then(|name| name.to_str())
-                        .and_then(|name| name.split_once('.'))
-                        .is_some_and(|(id, name)| {
-                            is_stable_id(id, NODE_ID_LEN) && name.starts_with(TASK_PREFIX)
-                        })
-                        && path
-                            .extension()
-                            .is_some_and(|extension| extension == MARKDOWN_EXT)
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            task_paths.sort_by(|left, right| file_name_string(left).cmp(&file_name_string(right)));
-            let tasks = task_paths
-                .into_iter()
-                .filter_map(|path| {
-                    let content = documents.get(&path)?;
-                    let (task_id, task_label) = task_identity_for_path(&path).ok()?;
-                    Some(WorkflowTaskNode {
-                        id: task_id,
-                        label: task_label,
-                        path,
-                        desc: parse_task_desc(content),
-                        steps: parse_task_steps(content),
-                    })
-                })
-                .collect();
-            WorkflowProjectNode {
-                id: split_stable_name(&project_key, NODE_ID_LEN)
-                    .map(|(id, _)| id.to_string())
-                    .unwrap_or_default(),
-                key: project_key.clone(),
-                label: split_stable_name(&project_key, NODE_ID_LEN)
-                    .map(|(_, label)| label.to_string())
-                    .unwrap_or_else(|| project_key.clone()),
-                root_path: project_dir.join(LEGACY_ROOT_MD),
-                content: documents
-                    .get(&project_dir.join(LEGACY_ROOT_MD))
-                    .cloned()
-                    .unwrap_or_default(),
-                tasks,
-            }
-        })
-        .collect();
-
-    let mut tree = WorkflowTree {
-        id: repo_id_from_root_path(&root_path).unwrap_or_default(),
-        repo_path: repo_path.to_path_buf(),
-        spec_path,
-        content: documents.get(&root_path).cloned().unwrap_or_default(),
-        root_path,
-        projects,
-        agents: Vec::new(),
-        sub_workflows: Vec::new(),
-    };
-    tree.agents = load_document_workflow_agents(documents, agent_scope, &tree)?;
-    Ok(tree)
-}
-
-/// 从一条远端 inventory 文档路径识别其 repo 相对路径。
-///
-/// 适用场景：`services/api/gsdv-spec/root.md -> services/api`。
-/// 例：主 `gsdv-spec/root.md -> 空路径`。
-fn workflow_document_repo_path(path: &Path) -> Option<PathBuf> {
-    if !is_repo_root_path(path) {
-        return None;
-    }
-    let spec_path = path.parent()?;
-    if spec_path.file_name()? != GSDV_SPEC_DIR {
-        return None;
-    }
-    Some(
-        spec_path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_default(),
-    )
 }
 
 /// 从一个项目目录加载 task 文档列表。
@@ -2109,31 +1917,6 @@ fn merge_workflow_steps_content(
         .unwrap_or(lines.len());
     lines.splice(records[first_index].line_index..first_end, replacement);
     Ok(join_markdown_lines(&lines))
-}
-
-/// 对需要改写 task 内容的 workflow mutation 执行纯内存转换。
-///
-/// 适用场景：Remote 先 SSH 读取 task，再复用本地 mutation 语义。
-/// 例：`RenameStep + task text -> 新 task text`。
-pub(super) fn apply_workflow_task_content_mutation(
-    content: &str,
-    request: &WorkflowMutationRequest,
-) -> Result<String, String> {
-    match request {
-        WorkflowMutationRequest::AddStep { key, desc, .. } => {
-            add_workflow_step_content(content, key, desc)
-        }
-        WorkflowMutationRequest::RenameStep {
-            step_path, new_key, ..
-        } => rename_workflow_step_content(content, step_path, new_key),
-        WorkflowMutationRequest::DeleteStep { step_path, .. } => {
-            delete_workflow_step_content(content, step_path)
-        }
-        WorkflowMutationRequest::MergeSteps {
-            step_paths, title, ..
-        } => merge_workflow_steps_content(content, step_paths, title),
-        _ => Err("workflow mutation does not rewrite a task document".to_string()),
-    }
 }
 
 /// 读取、转换并覆盖一个本地 workflow task。

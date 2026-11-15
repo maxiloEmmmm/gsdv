@@ -39,7 +39,7 @@ const REMOTE_AGENT_RESIZE_MAX_ROWS: u16 = 200;
 /// 单次滚轮请求最多移动的行数，限制 PTY 输入量。
 const REMOTE_AGENT_SCROLL_MAX_LINES: i32 = 50;
 /// Workspace metadata refresh cadence while a Web spotlight client is connected.
-const REMOTE_WORKSPACE_STREAM_INTERVAL: Duration = Duration::from_millis(250);
+const WEB_WORKSPACE_STREAM_INTERVAL: Duration = Duration::from_millis(250);
 
 /// 内嵌 remote 前端静态资源。
 struct RemoteWebAsset {
@@ -110,7 +110,7 @@ enum RemoteApiResult {
 /// remote API 成功响应数据。
 enum RemoteApiPayload {
     /// workspace 元数据响应。
-    Workspace(RemoteWorkspaceResponse),
+    Workspace(WebWorkspaceResponse),
     /// agent 操作成功响应。
     AgentOk,
     /// agent 输出订阅响应。
@@ -336,16 +336,16 @@ struct RemoteAgentImageHttpRequest {
 
 /// workspace 列表响应。
 #[derive(Debug, Clone, Serialize)]
-struct RemoteWorkspaceResponse {
+struct WebWorkspaceResponse {
     /// Whether spotlight follows the first Agent whenever ordering changes.
     spotlight_rank_mode: bool,
     /// 所有已打开 workspace。
-    workspaces: Vec<RemoteWorkspace>,
+    workspaces: Vec<WebWorkspace>,
 }
 
 /// 单个 workspace 元数据。
 #[derive(Debug, Clone, Serialize)]
-struct RemoteWorkspace {
+struct WebWorkspace {
     /// 对外稳定 workspace id。
     workspace_id: String,
     /// UI 显示名称。
@@ -500,9 +500,9 @@ impl GsdvGuiApp {
         request: RemoteApiRequest,
     ) -> RemoteApiResult {
         match request {
-            RemoteApiRequest::Workspace => RemoteApiResult::Ok(RemoteApiPayload::Workspace(
-                self.remote_workspace_response(),
-            )),
+            RemoteApiRequest::Workspace => {
+                RemoteApiResult::Ok(RemoteApiPayload::Workspace(self.web_workspace_response()))
+            }
             RemoteApiRequest::SpotlightRankMode(input) => {
                 self.set_spotlight_rank_mode(input.enabled);
                 RemoteApiResult::Ok(RemoteApiPayload::AgentOk)
@@ -524,16 +524,16 @@ impl GsdvGuiApp {
         }
     }
 
-    /// 构造 remote workspace 元数据响应。
-    fn remote_workspace_response(&self) -> RemoteWorkspaceResponse {
-        RemoteWorkspaceResponse {
+    /// 构造 Remote Web 的 workspace 元数据响应。
+    fn web_workspace_response(&self) -> WebWorkspaceResponse {
+        WebWorkspaceResponse {
             spotlight_rank_mode: self.spotlight_rank_mode,
             workspaces: self
                 .workspaces
                 .iter()
                 .enumerate()
                 .map(|(workspace_index, workspace)| {
-                    remote_workspace_from_view_data(
+                    web_workspace_from_view_data(
                         workspace,
                         self.terminal_hosts.get(workspace_index),
                         &self.spotlight_agents,
@@ -885,8 +885,8 @@ async fn run_remote_server_listener(
 /// Builds the remote HTTP API router.
 fn remote_router(state: RemoteApiState) -> Router {
     Router::new()
-        .route("/api/workspace", get(remote_workspace_handler))
-        .route("/api/workspace/ws", get(remote_workspace_ws_handler))
+        .route("/api/workspace", get(web_workspace_handler))
+        .route("/api/workspace/ws", get(web_workspace_ws_handler))
         .route(
             "/api/spotlight/rank-mode",
             post(remote_spotlight_rank_mode_handler),
@@ -926,7 +926,7 @@ fn remote_web_asset(path: &str) -> Option<&'static RemoteWebAsset> {
 }
 
 /// Handles workspace metadata requests.
-async fn remote_workspace_handler(State(state): State<RemoteApiState>) -> impl IntoResponse {
+async fn web_workspace_handler(State(state): State<RemoteApiState>) -> impl IntoResponse {
     dispatch_remote_api_request(state, RemoteApiRequest::Workspace).await
 }
 
@@ -947,18 +947,18 @@ async fn remote_spotlight_rank_mode_handler(
 /// Upgrades a browser connection for live workspace/spotlight metadata snapshots.
 ///
 /// Example: Agent `busy -> idle` -> the next changed snapshot reorders the sidebar.
-async fn remote_workspace_ws_handler(
+async fn web_workspace_ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<RemoteApiState>,
 ) -> axum::response::Response {
-    ws.on_upgrade(|socket| run_remote_workspace_socket(socket, state))
+    ws.on_upgrade(|socket| run_web_workspace_socket(socket, state))
 }
 
 /// Streams changed workspace metadata and observes browser disconnects.
 ///
 /// Example: unchanged snapshots are suppressed; a close frame ends the task.
-async fn run_remote_workspace_socket(mut socket: WebSocket, state: RemoteApiState) {
-    let mut interval = tokio::time::interval(REMOTE_WORKSPACE_STREAM_INTERVAL);
+async fn run_web_workspace_socket(mut socket: WebSocket, state: RemoteApiState) {
+    let mut interval = tokio::time::interval(WEB_WORKSPACE_STREAM_INTERVAL);
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut last_payload = String::new();
     loop {
@@ -1825,13 +1825,13 @@ fn decode_remote_agent_image(
 }
 
 /// Converts workspace view data into remote API metadata.
-fn remote_workspace_from_view_data(
+fn web_workspace_from_view_data(
     workspace: &WorkspaceViewData,
     hosts: Option<&WorkspaceTerminalHosts>,
     spotlight_agents: &BTreeMap<String, u8>,
     spotlight_stopped_order: &BTreeMap<String, u64>,
-) -> RemoteWorkspace {
-    RemoteWorkspace {
+) -> WebWorkspace {
+    WebWorkspace {
         workspace_id: data::workspace_store_key(&workspace.path),
         name: workspace.name.clone(),
         path: workspace.path.display().to_string(),

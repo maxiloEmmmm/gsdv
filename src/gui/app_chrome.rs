@@ -13,7 +13,7 @@ pub(super) fn panel_frame() -> Frame {
         .inner_margin(Margin::symmetric(10, 8))
 }
 
-/// 返回 Remote Outline 折叠恢复条使用的紧凑 frame。
+/// 返回 Outline 折叠恢复条使用的紧凑 frame。
 ///
 /// 适用场景：28px 宽度内只容纳一个 22px 展开按钮。
 /// 例：`collapsed=true -> 2px horizontal margin`。
@@ -676,21 +676,6 @@ pub(super) fn rail_header_collapse_button(ui: &mut Ui, expanded: bool) -> egui::
         "Collapse workspace rail"
     } else {
         "Expand workspace rail"
-    };
-    rail_header_icon_button(ui, hover_text, |ui, center, color| {
-        paint_sidebar_toggle_icon(ui, center, color, expanded);
-    })
-}
-
-/// 绘制 Remote Outline 的折叠或展开按钮。
-///
-/// 适用场景：展开标题栏和 28px 恢复条共用同一图标。
-/// 例：`expanded=false -> Expand remote outline`。
-pub(super) fn remote_outline_collapse_button(ui: &mut Ui, expanded: bool) -> egui::Response {
-    let hover_text = if expanded {
-        "Collapse remote outline"
-    } else {
-        "Expand remote outline"
     };
     rail_header_icon_button(ui, hover_text, |ui, center, color| {
         paint_sidebar_toggle_icon(ui, center, color, expanded);

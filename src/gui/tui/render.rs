@@ -194,152 +194,52 @@ pub(super) fn agent_title(app: &GsdvGuiApp, target: &AgentTarget) -> String {
     }
 }
 
-/// 按本地 scrollback offset 绘制 terminal snapshot。
+/// 把本机 terminal viewport 的 ANSI 行写入完整 TUI frame。
 ///
-/// 适用场景：普通 shell 未启用鼠标协议时由 TUI 自己滚动。示例：offset=3 -> 上移三行。
-pub(super) fn draw_terminal_snapshot_with_offset(
+/// 适用场景：Agent pane 与 workspace terminal。示例：viewport 第 0 行 -> rect 第 0 行。
+pub(super) fn draw_terminal_tui_frame(
     frame: &mut [RenderLine],
     rect: TuiRect,
-    snapshot: &TerminalRemoteSnapshot,
-    scroll_offset: usize,
+    terminal: &TerminalTuiFrame,
 ) {
-    let take = usize::from(rect.height);
-    let max_offset = snapshot.rows.len().saturating_sub(take);
-    let end = snapshot
+    for (offset, ansi) in terminal
         .rows
-        .len()
-        .saturating_sub(scroll_offset.min(max_offset));
-    let start = end.saturating_sub(take);
-    let visible_len = end.saturating_sub(start);
-    let pad = take.saturating_sub(visible_len);
-    for offset in 0..take {
+        .iter()
+        .take(usize::from(rect.height))
+        .enumerate()
+    {
         let y = rect.y.saturating_add(offset as u16);
-        if offset < pad {
-            continue;
-        }
-        if let Some(row) = snapshot.rows.get(start + offset - pad)
-            && start + offset - pad < end
-        {
-            let ansi = render_terminal_row(row, rect.width);
-            if let Some(line) = frame.get_mut(usize::from(y)) {
-                line.overlays.push((rect.x, ansi));
-            }
+        if let Some(line) = frame.get_mut(usize::from(y)) {
+            line.overlays.push((rect.x, ansi.clone()));
         }
     }
 }
 
-/// 把 terminal 光标映射到带本地 scrollback offset 的视口。
+/// 把本机 terminal viewport 光标映射到完整 TUI 坐标。
 ///
-/// 适用场景：只在光标仍处于当前视口时显示。示例：滚到历史 -> None。
-pub(super) fn terminal_cursor_position_with_offset(
+/// 适用场景：当前 pane 获得输入焦点。示例：cell=(2,3) -> rect 偏移后坐标。
+pub(super) fn terminal_tui_cursor_position(
     rect: TuiRect,
-    snapshot: &TerminalRemoteSnapshot,
-    scroll_offset: usize,
+    terminal: &TerminalTuiFrame,
 ) -> Option<(u16, u16)> {
-    let take = usize::from(rect.height);
-    let max_offset = snapshot.rows.len().saturating_sub(take);
-    let end = snapshot
-        .rows
-        .len()
-        .saturating_sub(scroll_offset.min(max_offset));
-    let start = end.saturating_sub(take);
-    let visible = &snapshot.rows[start..end];
-    let pad = take.saturating_sub(visible.len());
-    let row = visible
-        .iter()
-        .position(|row| row.line_index == snapshot.cursor.line_index)?;
+    let (col, row) = terminal.cursor?;
     Some((
         rect.x.saturating_add(
-            u16::try_from(snapshot.cursor.col_index)
+            u16::try_from(col)
                 .unwrap_or(u16::MAX)
                 .min(rect.width.saturating_sub(1)),
         ),
-        rect.y
-            .saturating_add(u16::try_from(pad + row).unwrap_or(u16::MAX)),
-    ))
-}
-
-/// 把结构化 terminal row 编码成限定宽度的 true-color ANSI 文本。
-///
-/// 适用场景：SSH 输出。示例：bold RGB run -> SGR + clipped text。
-pub(super) fn render_terminal_row(row: &TerminalRemoteRow, width: u16) -> String {
-    let mut output = String::new();
-    let mut used = 0_usize;
-    let limit = usize::from(width);
-    for run in &row.runs {
-        if used >= limit {
-            break;
-        }
-        let text = clip_text_from_width(&run.text, limit - used);
-        let text_width = display_width(&text);
-        if text_width == 0 && text.is_empty() {
-            continue;
-        }
-        let (fg, bg) = if run.inverse {
-            (&run.bg, &run.fg)
-        } else {
-            (&run.fg, &run.bg)
-        };
-        output.push_str("\x1b[0m");
-        if let Some((r, g, b)) = parse_hex_color(fg) {
-            output.push_str(&format!("\x1b[38;2;{r};{g};{b}m"));
-        }
-        if let Some((r, g, b)) = parse_hex_color(bg) {
-            output.push_str(&format!("\x1b[48;2;{r};{g};{b}m"));
-        }
-        if run.bold {
-            output.push_str("\x1b[1m");
-        }
-        if run.dim {
-            output.push_str("\x1b[2m");
-        }
-        if run.italic {
-            output.push_str("\x1b[3m");
-        }
-        if run.underline != "none" {
-            output.push_str("\x1b[4m");
-        }
-        if run.strikeout {
-            output.push_str("\x1b[9m");
-        }
-        if run.hidden {
-            output.push_str(&" ".repeat(text_width));
-        } else {
-            output.push_str(&sanitize_terminal_text(&text));
-        }
-        used += text_width;
-    }
-    output.push_str("\x1b[0m");
-    if used < limit {
-        output.push_str(&" ".repeat(limit - used));
-    }
-    output
-}
-
-/// 移除 emulator cell 中不应再次解释的控制字符。
-///
-/// 适用场景：terminal row 输出到宿主终端。示例：ESC -> 空格。
-pub(super) fn sanitize_terminal_text(text: &str) -> String {
-    text.chars()
-        .map(|ch| if ch.is_control() { ' ' } else { ch })
-        .collect()
-}
-
-/// 解析 `#RRGGBB`。
-///
-/// 适用场景：TerminalRemoteRun 颜色。示例：`#ff0000 -> (255,0,0)`。
-pub(super) fn parse_hex_color(value: &str) -> Option<(u8, u8, u8)> {
-    let value = value.strip_prefix('#')?;
-    (value.len() == 6).then_some((
-        u8::from_str_radix(&value[0..2], 16).ok()?,
-        u8::from_str_radix(&value[2..4], 16).ok()?,
-        u8::from_str_radix(&value[4..6], 16).ok()?,
+        rect.y.saturating_add(
+            u16::try_from(row)
+                .unwrap_or(u16::MAX)
+                .min(rect.height.saturating_sub(1)),
+        ),
     ))
 }
 
 /// 写出与上一帧不同的行，避免 SSH 反复传完整屏幕。
 ///
-/// 适用场景：最多 fps 次每秒。示例：一行变化 -> 一次 MoveTo + Clear + Print。
+/// 适用场景：最多 fps 次每秒。示例：等宽 ANSI 动画 -> 原位覆盖 overlay。
 pub(super) fn write_frame_diff(
     stdout: &mut Stdout,
     previous: &[RenderLine],
@@ -351,7 +251,20 @@ pub(super) fn write_frame_diff(
         queue!(stdout, Hide, Clear(ClearType::All))?;
     }
     for (index, line) in next.iter().enumerate() {
-        if previous.get(index) == Some(line) {
+        let previous_line = previous.get(index);
+        if previous_line == Some(line) {
+            continue;
+        }
+        if let Some(previous_line) = previous_line
+            && render_line_overlays_can_overwrite(previous_line, line)
+        {
+            for ((_, previous_overlay), (x, overlay)) in
+                previous_line.overlays.iter().zip(&line.overlays)
+            {
+                if previous_overlay != overlay {
+                    queue!(stdout, MoveTo(*x, index as u16), Print(overlay))?;
+                }
+            }
             continue;
         }
         queue!(
@@ -374,6 +287,53 @@ pub(super) fn write_frame_diff(
     }
     stdout.flush()?;
     Ok(())
+}
+
+/// 判断新 overlay 能否不清行地完整覆盖旧 overlay。
+///
+/// 适用场景：Codex `Working` 仅更新 ANSI 颜色。示例：同坐标同宽文本 -> true。
+fn render_line_overlays_can_overwrite(previous: &RenderLine, next: &RenderLine) -> bool {
+    previous.base == next.base
+        && previous.overlays.len() == next.overlays.len()
+        && previous.overlays.iter().zip(&next.overlays).all(
+            |((previous_x, previous), (next_x, next))| {
+                previous_x == next_x && ansi_display_width(previous) == ansi_display_width(next)
+            },
+        )
+}
+
+/// 计算忽略 CSI ANSI 控制序列后的显示宽度。
+///
+/// 适用场景：判断新 overlay 是否会留下旧字符。示例：红色 `abc` -> 3。
+fn ansi_display_width(text: &str) -> usize {
+    /// ANSI 宽度扫描器的当前解析状态。
+    #[derive(Clone, Copy)]
+    enum EscapeState {
+        /// 普通可见文本。
+        Text,
+        /// 已读取 ESC，等待控制序列类型。
+        Escape,
+        /// 正在读取 CSI 参数和终止字符。
+        Csi,
+    }
+
+    let mut state = EscapeState::Text;
+    let mut width = 0;
+    for ch in text.chars() {
+        match state {
+            EscapeState::Text if ch == '\x1b' => state = EscapeState::Escape,
+            EscapeState::Text => {
+                if !ch.is_control() {
+                    width += UnicodeWidthChar::width(ch).unwrap_or(0);
+                }
+            }
+            EscapeState::Escape if ch == '[' => state = EscapeState::Csi,
+            EscapeState::Escape => state = EscapeState::Text,
+            EscapeState::Csi if ('@'..='~').contains(&ch) => state = EscapeState::Text,
+            EscapeState::Csi => {}
+        }
+    }
+    width
 }
 
 /// 在基础行写入限定宽度文本。

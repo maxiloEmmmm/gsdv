@@ -3,12 +3,11 @@ use crate::gui::data::{
     self, NetworkSettings, SubagentViewData, WorkspaceActivity, WorkspaceViewData,
 };
 use crate::gui::hook;
-use crate::gui::remote_workspace::{self, RemoteShell, RemoteWorkspaceConfig};
 use crate::gui::repaint_gate::RepaintController;
 use crate::gui::theme as gui_theme;
 use alacritty_terminal::event::{Event as PtyEvent, EventListener, Notify, OnResize, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier};
-use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::grid::{Dimensions, Row, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::sync::FairMutex;
@@ -27,6 +26,7 @@ use eframe::egui::{
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::watch;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 static TERMINAL_ID: AtomicU64 = AtomicU64::new(1);
 static TERMINAL_REMOTE_SESSION_ID: AtomicU64 = AtomicU64::new(1);
@@ -66,8 +66,6 @@ pub enum TerminalSurfaceKind {
 /// Example: workspace with large outline -> terminal receives only launch fields.
 #[derive(Debug, Clone)]
 pub struct TerminalWorkspaceMetadata {
-    /// SSH 启动元数据；None 表示本地 terminal。
-    pub remote: Option<RemoteTerminalMetadata>,
     /// Workspace display name used by terminal chrome.
     pub name: String,
     /// Workspace root used for cwd, env, and history lookup.
@@ -94,26 +92,12 @@ pub struct TerminalWorkspaceMetadata {
     pub activity: WorkspaceActivity,
 }
 
-/// Terminal host 启动远端 SSH channel 所需的连接数据。
-///
-/// 适用场景：Agent 与 Workspace Terminal 各自建立 SSH 连接。
-#[derive(Debug, Clone)]
-pub struct RemoteTerminalMetadata {
-    /// 持久化 SSH 配置。
-    pub config: RemoteWorkspaceConfig,
-    /// 远端默认 shell 类型。
-    pub shell: RemoteShell,
-    /// 远端 gsdv store 中的代理配置，仅注入 SSH 内部的 Agent 命令。
-    pub network_settings: NetworkSettings,
-}
-
 impl TerminalWorkspaceMetadata {
     /// Builds terminal metadata from a full workspace without cloning UI trees.
     ///
     /// Example: workspace outline with 10k nodes -> metadata has no outline field.
     pub fn from_workspace(workspace: &WorkspaceViewData) -> Self {
         Self {
-            remote: None,
             name: workspace.name.clone(),
             path: workspace.path.clone(),
             agent_kind: workspace.agent_kind,
@@ -343,6 +327,70 @@ pub struct TerminalRemoteOutputSource {
     output_rx: watch::Receiver<u64>,
 }
 
+/// 本机字符界面直接消费的 terminal 输出源。
+///
+/// 适用场景：`gsdv tui` 读取 emulator damage，不创建 Web 输出数据。
+/// 示例：Codex 改写一行 -> `TerminalTuiUpdate::Rows`。
+#[derive(Clone)]
+pub struct TerminalTuiOutputSource {
+    /// alacritty terminal grid 共享状态。
+    term: Arc<FairMutex<Term<TerminalEventProxy>>>,
+    /// 最新 UI 主题，用于生成 ANSI 样式。
+    theme_mode: Arc<Mutex<gui_theme::ThemeMode>>,
+    /// 本机字符界面专用输出变化序号。
+    output_rx: watch::Receiver<u64>,
+}
+
+/// 本机字符界面当前可绘制的 terminal viewport。
+///
+/// 适用场景：首次显示、滚屏或 emulator 全屏变化。示例：当前 viewport -> ANSI 行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalTuiFrame {
+    /// 当前 viewport 的 ANSI 行。
+    pub rows: Vec<String>,
+    /// 当前 viewport 内的光标列、行；滚到历史时为空。
+    pub cursor: Option<(usize, usize)>,
+    /// 全屏程序是否接管滚轮。
+    pub terminal_scroll: bool,
+    /// emulator 当前允许向上滚动的最大行数。
+    pub max_scroll_offset: usize,
+}
+
+/// 本机字符界面一次 terminal 增量更新。
+///
+/// 适用场景：主循环消费 PTY damage。示例：无变化、局部行或完整 viewport。
+#[derive(Debug, Clone)]
+pub enum TerminalTuiUpdate {
+    /// terminal 内容没有变化。
+    Unchanged,
+    /// 只有指定 viewport 行发生变化。
+    Rows {
+        /// 变化行的 viewport 下标和完整 ANSI 内容。
+        rows: Vec<(usize, String)>,
+        /// 最新光标位置。
+        cursor: Option<(usize, usize)>,
+        /// 全屏程序是否接管滚轮。
+        terminal_scroll: bool,
+        /// 最新最大滚动偏移。
+        max_scroll_offset: usize,
+    },
+    /// viewport 对应关系变化，需要整体替换。
+    Frame(TerminalTuiFrame),
+}
+
+/// 本机字符界面消费 terminal damage 的游标。
+///
+/// 适用场景：每个 pane 独立判断是否有新 PTY 输出。示例：sequence 相同 -> unchanged。
+#[derive(Debug, Clone)]
+pub struct TerminalTuiOutputState {
+    /// 上次已消费的输出变化序号。
+    output_sequence: u64,
+    /// 上次 viewport 的列数。
+    cols: usize,
+    /// 上次 viewport 的行数。
+    screen_rows: usize,
+}
+
 /// Cheap Agent metadata read by the remote session-file stream.
 #[derive(Debug, Clone)]
 pub struct TerminalSessionMetadata {
@@ -537,6 +585,32 @@ struct TerminalRemoteRowSignature {
     runs: Vec<TerminalRemoteRun>,
 }
 
+/// Remote terminal 合并相邻 cell 时使用的无分配样式键。
+///
+/// 适用场景：构建快照时先比较样式，避免为每个 cell 创建 RGB 字符串。
+/// 示例：两个默认色普通字符 -> 同一个 run。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TerminalRemoteRunStyle {
+    /// 已解析的前景色。
+    fg: Color32,
+    /// 已解析的背景色。
+    bg: Color32,
+    /// 是否粗体。
+    bold: bool,
+    /// 是否斜体。
+    italic: bool,
+    /// 是否弱化。
+    dim: bool,
+    /// 是否隐藏。
+    hidden: bool,
+    /// 是否反显。
+    inverse: bool,
+    /// 下划线样式。
+    underline: &'static str,
+    /// 是否删除线。
+    strikeout: bool,
+}
+
 pub trait TerminalHost {
     fn kind(&self) -> TerminalSurfaceKind;
     fn workspace_root(&self) -> &Path;
@@ -559,7 +633,9 @@ pub struct GuiTerminalHost {
     runtime_state: Arc<Mutex<TerminalRuntimeState>>,
     /// 当前主题，供 terminal runtime 回复 OSC dynamic color query。
     runtime_theme_mode: Arc<Mutex<gui_theme::ThemeMode>>,
-    /// Agent remote 输出订阅的轻量变化信号。
+    /// 本机字符界面输出订阅的轻量变化信号。
+    tui_output_tx: watch::Sender<u64>,
+    /// Web 客户端订阅当前 Agent 时使用的轻量变化信号。
     remote_output_tx: watch::Sender<u64>,
     /// Provider/session metadata shared with the lightweight Web session stream.
     session_metadata: Arc<Mutex<TerminalSessionMetadata>>,
@@ -744,6 +820,101 @@ impl TerminalRemoteOutputSource {
     }
 }
 
+impl TerminalTuiOutputSource {
+    /// 读取本机字符界面首次显示的 viewport，并建立 damage 消费游标。
+    ///
+    /// 适用场景：pane 绑定新的 PTY。示例：scroll=0 -> 当前屏幕与状态。
+    pub fn frame(&self, scroll_offset: usize) -> (TerminalTuiFrame, TerminalTuiOutputState) {
+        let mut term = self.term.lock();
+        let mode = terminal_tui_theme_mode(&self.theme_mode);
+        let frame = terminal_tui_frame_from_term(&term, mode, scroll_offset);
+        term.reset_damage();
+        let state = TerminalTuiOutputState {
+            output_sequence: *self.output_rx.borrow(),
+            cols: term.grid().columns(),
+            screen_rows: term.grid().screen_lines(),
+        };
+        (frame, state)
+    }
+
+    /// 按指定滚动偏移重新读取 viewport，不触发 Web 输出路径。
+    ///
+    /// 适用场景：用户滚动本地 shell 历史。示例：scroll=3 -> 上移三行。
+    pub fn view(&self, scroll_offset: usize) -> TerminalTuiFrame {
+        let term = self.term.lock();
+        terminal_tui_frame_from_term(
+            &term,
+            terminal_tui_theme_mode(&self.theme_mode),
+            scroll_offset,
+        )
+    }
+
+    /// 消费 emulator damage，只转换真正变化的 viewport 行。
+    ///
+    /// 适用场景：Codex 动画、光标移动和普通输出。示例：一行 damage -> 一行 ANSI。
+    pub fn update_since(
+        &self,
+        state: &mut TerminalTuiOutputState,
+        scroll_offset: usize,
+    ) -> TerminalTuiUpdate {
+        if *self.output_rx.borrow() == state.output_sequence {
+            return TerminalTuiUpdate::Unchanged;
+        }
+
+        let mut term = self.term.lock();
+        let output_sequence = *self.output_rx.borrow();
+        let cols = term.grid().columns();
+        let screen_rows = term.grid().screen_lines();
+        let dimensions_changed = cols != state.cols || screen_rows != state.screen_rows;
+        let damaged_lines = match term.damage() {
+            term::TermDamage::Full => None,
+            term::TermDamage::Partial(lines) => Some(lines.collect::<Vec<_>>()),
+        };
+        let mode = terminal_tui_theme_mode(&self.theme_mode);
+
+        if dimensions_changed || damaged_lines.is_none() || scroll_offset > 0 {
+            // 触发条件：resize、滚屏、历史查看或 emulator 报告全屏 damage。
+            // 不能复用局部行下标：viewport 与 grid 的对应关系可能整体移动。
+            // 防止回归：输出滚动后把新内容写入错误的旧行。
+            let frame = terminal_tui_frame_from_term(&term, mode, scroll_offset);
+            term.reset_damage();
+            state.output_sequence = output_sequence;
+            state.cols = cols;
+            state.screen_rows = screen_rows;
+            return TerminalTuiUpdate::Frame(frame);
+        }
+
+        let content = term.renderable_content();
+        let grid = term.grid();
+        let rows = damaged_lines
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|damage| damage.line < screen_rows)
+            .map(|damage| {
+                let line = Line(i32::try_from(damage.line).unwrap_or(i32::MAX));
+                (
+                    damage.line,
+                    terminal_tui_render_row(&grid[line], content.colors, mode, cols),
+                )
+            })
+            .collect::<Vec<_>>();
+        let cursor = terminal_tui_cursor(&content, 0);
+        let terminal_scroll = terminal_owns_scroll(&term);
+        let max_scroll_offset = grid.history_size();
+        drop(content);
+        term.reset_damage();
+        state.output_sequence = output_sequence;
+        state.cols = cols;
+        state.screen_rows = screen_rows;
+        TerminalTuiUpdate::Rows {
+            rows,
+            cursor,
+            terminal_scroll,
+            max_scroll_offset,
+        }
+    }
+}
+
 impl TerminalSessionSource {
     /// Waits for an Agent output or metadata change.
     ///
@@ -798,6 +969,8 @@ struct TerminalEventProxy {
     repaint_enabled: Arc<AtomicBool>,
     /// 独立于桌面 UI 节流的 Web terminal 输出变化信号。
     remote_output_tx: watch::Sender<u64>,
+    /// 本机字符界面直接消费的 terminal 输出变化信号。
+    tui_output_tx: watch::Sender<u64>,
     /// 高频 PTY 通知节流的毫秒起点。
     throttle_origin: Instant,
     /// 下一次允许转发 Wakeup 的毫秒刻度。
@@ -812,9 +985,13 @@ impl EventListener for TerminalEventProxy {
     fn send_event(&self, event: PtyEvent) {
         if matches!(event, PtyEvent::Wakeup) {
             crate::gui::perf_log::count("terminal.proxy.wakeup");
+            if self.tui_output_tx.receiver_count() > 0 {
+                self.tui_output_tx
+                    .send_modify(|sequence| *sequence = sequence.wrapping_add(1));
+            }
             if self.remote_output_tx.receiver_count() > 0 {
-                // Web terminal 自己在 WebSocket 层按 60 FPS 合帧。这里若跟随
-                // 桌面 UI 的 100ms 节流，TUI 滚动最多只有 10 FPS。
+                // Web terminal 自己在 WebSocket 层合帧；没有具体 Agent 订阅时
+                // receiver_count 为零，不能为未使用的 Web 功能制造任何工作。
                 self.remote_output_tx
                     .send_modify(|sequence| *sequence = sequence.wrapping_add(1));
             }
@@ -923,6 +1100,7 @@ impl TerminalBackend {
             repaint_controller: settings.repaint_controller,
             repaint_enabled: repaint_enabled.clone(),
             remote_output_tx: settings.remote_output_tx,
+            tui_output_tx: settings.tui_output_tx,
             throttle_origin,
             next_wakeup_forward_ms: Arc::new(AtomicU64::new(0)),
             next_repaint_forward_ms: Arc::new(AtomicU64::new(0)),
@@ -1156,6 +1334,8 @@ struct BackendSettings {
     repaint_controller: RepaintController,
     /// Web terminal 订阅的 PTY 输出变化信号。
     remote_output_tx: watch::Sender<u64>,
+    /// 本机字符界面订阅的 PTY 输出变化信号。
+    tui_output_tx: watch::Sender<u64>,
     /// 子进程输出前先写入模拟器的历史文本快照。
     initial_history: Option<String>,
 }
@@ -1262,6 +1442,7 @@ impl GuiTerminalHost {
         let runtime_state = Arc::new(Mutex::new(TerminalRuntimeState::default()));
         let runtime_theme_mode = Arc::new(Mutex::new(theme_mode));
         let (remote_output_tx, _) = watch::channel(0_u64);
+        let (tui_output_tx, _) = watch::channel(0_u64);
         let session_metadata = Arc::new(Mutex::new(TerminalSessionMetadata {
             agent_kind: workspace.agent_kind,
             session_id: workspace.session_id.clone(),
@@ -1269,11 +1450,10 @@ impl GuiTerminalHost {
         let shell = terminal_command(workspace, kind);
         let args = terminal_args(workspace, kind, id, agent_launch, agent_session_id);
         let env = terminal_env(workspace, kind, network_settings);
-        let working_directory = terminal_backend_working_directory(workspace, kind);
+        let working_directory = terminal_working_directory(workspace, kind);
         let launch_command = command_display(&shell, &args);
-        let initial_history = (kind == TerminalSurfaceKind::Workspace
-            && workspace.remote.is_none())
-        .then(|| data::load_workspace_terminal_history(&workspace.path));
+        let initial_history = (kind == TerminalSurfaceKind::Workspace)
+            .then(|| data::load_workspace_terminal_history(&workspace.path));
         let launched_with_resume = kind == TerminalSurfaceKind::Agent
             && args.iter().any(|arg| arg == "resume" || arg == "--resume");
         let launched_session_id = launched_with_resume
@@ -1289,6 +1469,7 @@ impl GuiTerminalHost {
                 working_directory: Some(working_directory),
                 repaint_controller,
                 remote_output_tx: remote_output_tx.clone(),
+                tui_output_tx: tui_output_tx.clone(),
                 initial_history,
             },
             &env,
@@ -1323,6 +1504,7 @@ impl GuiTerminalHost {
             backend,
             runtime_state,
             runtime_theme_mode,
+            tui_output_tx,
             remote_output_tx,
             session_metadata,
             remote_session: None,
@@ -1346,6 +1528,7 @@ impl GuiTerminalHost {
         let runtime_state = Arc::new(Mutex::new(TerminalRuntimeState::default()));
         let runtime_theme_mode = Arc::new(Mutex::new(theme_mode));
         let (remote_output_tx, _) = watch::channel(0_u64);
+        let (tui_output_tx, _) = watch::channel(0_u64);
         let session_metadata = Arc::new(Mutex::new(TerminalSessionMetadata {
             agent_kind: workspace.agent_kind,
             session_id: None,
@@ -1362,6 +1545,7 @@ impl GuiTerminalHost {
                 working_directory: Some(spec.workdir.clone()),
                 repaint_controller,
                 remote_output_tx: remote_output_tx.clone(),
+                tui_output_tx: tui_output_tx.clone(),
                 initial_history: None,
             },
             &terminal_env(workspace, TerminalSurfaceKind::Helix, network_settings),
@@ -1396,6 +1580,7 @@ impl GuiTerminalHost {
             backend,
             runtime_state,
             runtime_theme_mode,
+            tui_output_tx,
             remote_output_tx,
             session_metadata,
             remote_session: None,
@@ -1433,8 +1618,10 @@ impl GuiTerminalHost {
             metadata.session_id = workspace.session_id.clone();
             drop(metadata);
             // Session rollover may arrive from a Hook before the PTY emits more bytes.
-            self.remote_output_tx
-                .send_modify(|sequence| *sequence = sequence.wrapping_add(1));
+            if self.remote_output_tx.receiver_count() > 0 {
+                self.remote_output_tx
+                    .send_modify(|sequence| *sequence = sequence.wrapping_add(1));
+            }
         }
         if self.kind == TerminalSurfaceKind::Agent {
             self.terminal_output_roots = terminal_output_search_roots(workspace);
@@ -1462,6 +1649,17 @@ impl GuiTerminalHost {
             term: self.backend.term.clone(),
             theme_mode: self.runtime_theme_mode.clone(),
             output_rx: self.remote_output_tx.subscribe(),
+        }
+    }
+
+    /// 返回本机字符界面使用的 terminal 输出源。
+    ///
+    /// 适用场景：`gsdv tui` 绑定 pane。示例：host -> 独立 damage source。
+    pub fn tui_output_source(&self) -> TerminalTuiOutputSource {
+        TerminalTuiOutputSource {
+            term: self.backend.term.clone(),
+            theme_mode: self.runtime_theme_mode.clone(),
+            output_rx: self.tui_output_tx.subscribe(),
         }
     }
 
@@ -1529,8 +1727,14 @@ impl GuiTerminalHost {
         // 触发条件：remote 页面 resize 改变 terminal grid。
         // 不能等 PTY 输出：纯 resize 可能只改变 reflow 后的可见内容。
         // 防止回归：浏览器已发送尺寸但 WS 订阅迟迟不刷新 snapshot。
-        self.remote_output_tx
-            .send_modify(|sequence| *sequence = sequence.wrapping_add(1));
+        if self.remote_output_tx.receiver_count() > 0 {
+            self.remote_output_tx
+                .send_modify(|sequence| *sequence = sequence.wrapping_add(1));
+        }
+        if self.tui_output_tx.receiver_count() > 0 {
+            self.tui_output_tx
+                .send_modify(|sequence| *sequence = sequence.wrapping_add(1));
+        }
     }
 
     /// 将当前 Web 会话的全屏滚轮交给现有终端输入路径。
@@ -1553,8 +1757,10 @@ impl GuiTerminalHost {
     /// 适用场景：`gsdv tui` 鼠标滚轮。例：delta=3 -> 向上滚三行。
     pub fn scroll_direct(&mut self, delta: i32, pointer_cell: Option<(u16, u16)>) {
         self.backend.scroll_remote(delta, pointer_cell);
-        self.remote_output_tx
-            .send_modify(|sequence| *sequence = sequence.wrapping_add(1));
+        if self.tui_output_tx.receiver_count() > 0 {
+            self.tui_output_tx
+                .send_modify(|sequence| *sequence = sequence.wrapping_add(1));
+        }
     }
 
     /// Sends one whitelisted key from the currently owning Web session.
@@ -3657,10 +3863,11 @@ fn terminal_remote_snapshot(source: &TerminalRemoteOutputSource) -> TerminalRemo
     let mut rows = Vec::with_capacity(grid.total_lines());
     let mut current_line = None;
     let mut current_runs = Vec::new();
+    let mut current_style = None;
     let mut current_wrapped = false;
-    // 触发条件：remote Web 端订阅 agent terminal 输出。
+    // 触发条件：Remote Web 端订阅具体 Agent terminal 输出。
     // 不能导出完整 scrollback：每行每 cell 都要序列化并进入浏览器。
-    // 防止回归：一连接 remote 页面就因大 JSON 和海量 DOM 占满 CPU。
+    // 防止回归：Web 连接因大 JSON 和海量 DOM 占满 CPU。
     let top_line = grid.topmost_line();
     let bottom_line = grid.bottommost_line();
     let export_top = Line(
@@ -3681,6 +3888,7 @@ fn terminal_remote_snapshot(source: &TerminalRemoteOutputSource) -> TerminalRemo
                 runs: std::mem::take(&mut current_runs),
             });
             current_wrapped = false;
+            current_style = None;
         }
         current_line = Some(line);
         let cell = indexed.cell;
@@ -3688,9 +3896,12 @@ fn terminal_remote_snapshot(source: &TerminalRemoteOutputSource) -> TerminalRemo
         if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
             continue;
         }
-        terminal_remote_push_run(
+        terminal_remote_push_cell(
             &mut current_runs,
-            terminal_remote_run(cell, content.colors, mode),
+            &mut current_style,
+            cell,
+            content.colors,
+            mode,
         );
     }
 
@@ -3712,57 +3923,213 @@ fn terminal_remote_snapshot(source: &TerminalRemoteOutputSource) -> TerminalRemo
             shape: terminal_remote_cursor_shape(content.cursor.shape),
         },
         palette: terminal_remote_palette(mode),
-        terminal_scroll: term.mode().intersects(TermMode::MOUSE_MODE)
-            || term
-                .mode()
-                .contains(TermMode::ALTERNATE_SCROLL | TermMode::ALT_SCREEN),
+        terminal_scroll: terminal_owns_scroll(&term),
     }
 }
 
-/// 向当前行追加 run，并合并相邻同样式文本。
-fn terminal_remote_push_run(runs: &mut Vec<TerminalRemoteRun>, run: TerminalRemoteRun) {
-    if let Some(last) = runs.last_mut()
-        && terminal_remote_run_same_style(last, &run)
-    {
-        last.text.push_str(&run.text);
-        return;
+/// 返回本机字符界面生成 ANSI 时使用的主题。
+///
+/// 适用场景：theme mutex 被 poisoned 时回退。示例：lock error -> dark。
+fn terminal_tui_theme_mode(theme_mode: &Arc<Mutex<gui_theme::ThemeMode>>) -> gui_theme::ThemeMode {
+    theme_mode
+        .lock()
+        .map(|mode| *mode)
+        .unwrap_or(gui_theme::ThemeMode::Dark)
+}
+
+/// 从 emulator grid 直接生成当前 TUI viewport。
+///
+/// 适用场景：首次绘制、用户滚动或全屏 damage。示例：scroll=3 -> 历史 viewport。
+fn terminal_tui_frame_from_term(
+    term: &Term<TerminalEventProxy>,
+    mode: gui_theme::ThemeMode,
+    scroll_offset: usize,
+) -> TerminalTuiFrame {
+    let content = term.renderable_content();
+    let grid = term.grid();
+    let cols = grid.columns();
+    let screen_rows = grid.screen_lines();
+    let max_scroll_offset = grid.history_size();
+    let scroll_offset = scroll_offset.min(max_scroll_offset);
+    let bottom = Line(
+        grid.bottommost_line()
+            .0
+            .saturating_sub(i32::try_from(scroll_offset).unwrap_or(i32::MAX)),
+    );
+    let top = Line(
+        bottom
+            .0
+            .saturating_sub(i32::try_from(screen_rows.saturating_sub(1)).unwrap_or(i32::MAX))
+            .max(grid.topmost_line().0),
+    );
+    let mut rows = Vec::with_capacity(screen_rows);
+    for line in top.0..=bottom.0 {
+        rows.push(terminal_tui_render_row(
+            &grid[Line(line)],
+            content.colors,
+            mode,
+            cols,
+        ));
     }
-    runs.push(run);
+    if rows.len() < screen_rows {
+        let mut padded = vec![" ".repeat(cols); screen_rows - rows.len()];
+        padded.extend(rows);
+        rows = padded;
+    }
+    TerminalTuiFrame {
+        rows,
+        cursor: terminal_tui_cursor(&content, scroll_offset),
+        terminal_scroll: terminal_owns_scroll(term),
+        max_scroll_offset,
+    }
 }
 
-/// 判断两个 remote run 是否可安全合并。
-fn terminal_remote_run_same_style(left: &TerminalRemoteRun, right: &TerminalRemoteRun) -> bool {
-    left.fg == right.fg
-        && left.bg == right.bg
-        && left.bold == right.bold
-        && left.italic == right.italic
-        && left.dim == right.dim
-        && left.hidden == right.hidden
-        && left.inverse == right.inverse
-        && left.underline == right.underline
-        && left.strikeout == right.strikeout
+/// 返回当前 viewport 内的 terminal 光标位置。
+///
+/// 适用场景：本机字符界面绘制光标。示例：查看历史 -> None。
+fn terminal_tui_cursor(
+    content: &term::RenderableContent<'_>,
+    scroll_offset: usize,
+) -> Option<(usize, usize)> {
+    if scroll_offset > 0 || content.cursor.shape == CursorShape::Hidden {
+        return None;
+    }
+    Some((
+        content.cursor.point.column.0,
+        usize::try_from(content.cursor.point.line.0).ok()?,
+    ))
 }
 
-/// 构造 remote run，适用于 Web 端复刻 terminal 样式。
-fn terminal_remote_run(
+/// 判断当前全屏程序是否接管鼠标滚轮。
+///
+/// 适用场景：TUI 决定本地滚历史还是向 PTY 发滚轮。示例：ALT_SCREEN -> true。
+fn terminal_owns_scroll(term: &Term<TerminalEventProxy>) -> bool {
+    term.mode().intersects(TermMode::MOUSE_MODE)
+        || term
+            .mode()
+            .contains(TermMode::ALTERNATE_SCROLL | TermMode::ALT_SCREEN)
+}
+
+/// 把一行 emulator cell 直接编码为 TUI ANSI 文本。
+///
+/// 适用场景：本机字符界面绘制 terminal。示例：一行 RGB cell -> 一行 ANSI。
+fn terminal_tui_render_row(
+    row: &Row<Cell>,
+    colors: &alacritty_terminal::term::color::Colors,
+    mode: gui_theme::ThemeMode,
+    cols: usize,
+) -> String {
+    let mut output = String::new();
+    let mut current_style = None;
+    let mut used = 0;
+    for cell in row {
+        if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+            continue;
+        }
+        let style = terminal_remote_run_style(cell, colors, mode);
+        if current_style.as_ref() != Some(&style) {
+            terminal_tui_push_style(&mut output, style);
+            current_style = Some(style);
+        }
+        if cell.flags.contains(Flags::HIDDEN) || cell.c.is_control() {
+            output.push(' ');
+        } else {
+            output.push(cell.c);
+        }
+        for mark in cell.zerowidth().unwrap_or_default() {
+            output.push(*mark);
+        }
+        used += UnicodeWidthChar::width(cell.c).unwrap_or(1).max(1);
+    }
+    output.push_str("\x1b[0m");
+    if used < cols {
+        output.push_str(&" ".repeat(cols - used));
+    }
+    output
+}
+
+/// 写入一组 terminal cell 样式对应的 SGR 序列。
+///
+/// 适用场景：相邻 cell 样式变化。示例：默认色 -> 红色粗体。
+fn terminal_tui_push_style(output: &mut String, style: TerminalRemoteRunStyle) {
+    let (fg, bg) = if style.inverse {
+        (style.bg, style.fg)
+    } else {
+        (style.fg, style.bg)
+    };
+    let _ = write!(
+        output,
+        "\x1b[0m\x1b[38;2;{};{};{}m\x1b[48;2;{};{};{}m",
+        fg.r(),
+        fg.g(),
+        fg.b(),
+        bg.r(),
+        bg.g(),
+        bg.b()
+    );
+    if style.bold {
+        output.push_str("\x1b[1m");
+    }
+    if style.dim {
+        output.push_str("\x1b[2m");
+    }
+    if style.italic {
+        output.push_str("\x1b[3m");
+    }
+    if style.underline != "none" {
+        output.push_str("\x1b[4m");
+    }
+    if style.strikeout {
+        output.push_str("\x1b[9m");
+    }
+}
+
+/// 把 cell 追加到当前行，相邻同样式内容只复用已有 run。
+///
+/// 适用场景：terminal 快照热路径。示例：连续默认色文本 -> 单个 run、两次 RGB 格式化。
+fn terminal_remote_push_cell(
+    runs: &mut Vec<TerminalRemoteRun>,
+    current_style: &mut Option<TerminalRemoteRunStyle>,
     cell: &Cell,
     colors: &alacritty_terminal::term::color::Colors,
     mode: gui_theme::ThemeMode,
-) -> TerminalRemoteRun {
-    let (fg, bg) = terminal_cell_colors(cell, false, colors, mode);
+) {
+    let style = terminal_remote_run_style(cell, colors, mode);
+    if current_style.as_ref() == Some(&style)
+        && let Some(last) = runs.last_mut()
+    {
+        terminal_remote_append_cell_text(&mut last.text, cell);
+        return;
+    }
     let mut text = String::new();
-    if cell.flags.contains(Flags::HIDDEN) {
-        text.push(' ');
-    } else {
-        text.push(cell.c);
-    }
-    for mark in cell.zerowidth().unwrap_or_default() {
-        text.push(*mark);
-    }
-    TerminalRemoteRun {
+    terminal_remote_append_cell_text(&mut text, cell);
+    runs.push(TerminalRemoteRun {
         text,
-        fg: terminal_remote_color(fg),
-        bg: terminal_remote_color(bg),
+        fg: terminal_remote_color(style.fg),
+        bg: terminal_remote_color(style.bg),
+        bold: style.bold,
+        italic: style.italic,
+        dim: style.dim,
+        hidden: style.hidden,
+        inverse: style.inverse,
+        underline: style.underline,
+        strikeout: style.strikeout,
+    });
+    *current_style = Some(style);
+}
+
+/// 构造不分配字符串的 remote run 样式键。
+///
+/// 适用场景：高频快照中的相邻 cell 比较。示例：ANSI red -> 已解析红色键。
+fn terminal_remote_run_style(
+    cell: &Cell,
+    colors: &alacritty_terminal::term::color::Colors,
+    mode: gui_theme::ThemeMode,
+) -> TerminalRemoteRunStyle {
+    let (fg, bg) = terminal_cell_colors(cell, false, colors, mode);
+    TerminalRemoteRunStyle {
+        fg,
+        bg,
         bold: cell.flags.intersects(Flags::BOLD | Flags::DIM_BOLD),
         italic: cell.flags.contains(Flags::ITALIC),
         dim: cell.flags.intersects(Flags::DIM | Flags::DIM_BOLD),
@@ -3770,6 +4137,20 @@ fn terminal_remote_run(
         inverse: cell.flags.contains(Flags::INVERSE),
         underline: terminal_remote_underline(cell.flags),
         strikeout: cell.flags.contains(Flags::STRIKEOUT),
+    }
+}
+
+/// 把一个 cell 的可见字符和组合字符追加到 run 文本。
+///
+/// 适用场景：新建或复用 remote run。示例：隐藏字符 -> 空格。
+fn terminal_remote_append_cell_text(text: &mut String, cell: &Cell) {
+    if cell.flags.contains(Flags::HIDDEN) {
+        text.push(' ');
+    } else {
+        text.push(cell.c);
+    }
+    for mark in cell.zerowidth().unwrap_or_default() {
+        text.push(*mark);
     }
 }
 
@@ -4932,9 +5313,6 @@ impl TerminalHost for GuiTerminalHost {
 }
 
 fn terminal_command(workspace: &TerminalWorkspaceMetadata, kind: TerminalSurfaceKind) -> String {
-    if workspace.remote.is_some() && kind != TerminalSurfaceKind::Helix {
-        return "ssh".to_string();
-    }
     match kind {
         TerminalSurfaceKind::Agent => workspace.agent_kind.command().to_string(),
         TerminalSurfaceKind::Workspace => workspace_terminal_command(),
@@ -4970,50 +5348,6 @@ fn terminal_args(
     agent_launch: &AgentLaunchConfig,
     agent_session_id: Option<&str>,
 ) -> Vec<String> {
-    if let Some(remote) = workspace.remote.as_ref()
-        && kind != TerminalSurfaceKind::Helix
-    {
-        let mut ssh_args = remote_workspace::ssh_connection_args(&remote.config);
-        ssh_args.push("-tt".to_string());
-        ssh_args.push(remote_workspace::ssh_target(&remote.config));
-        if kind == TerminalSurfaceKind::Agent {
-            let resume_cwd = terminal_working_directory(workspace, kind);
-            let agent_args = agent_launch.args_for(
-                workspace.agent_kind,
-                agent_session_id,
-                workspace.agent_model.as_deref(),
-                workspace.agent_model_provider.as_deref(),
-                workspace.agent_effort.as_deref(),
-                workspace.agent_fast_mode,
-                Some(resume_cwd.as_path()),
-            );
-            let remote_env = vec![
-                ("GSDV_AGENT_ID".to_string(), workspace.agent_id.clone()),
-                (
-                    "GSDV_AGENT_KIND".to_string(),
-                    workspace.agent_kind.env_name().to_string(),
-                ),
-                (
-                    "GSDV_WORKSPACE_DIR".to_string(),
-                    workspace.path.display().to_string(),
-                ),
-            ];
-            let remote_env = remote
-                .network_settings
-                .env_vars()
-                .into_iter()
-                .chain(remote_env)
-                .collect::<Vec<_>>();
-            ssh_args.push(remote_workspace::remote_agent_command(
-                remote.shell,
-                &resume_cwd,
-                workspace.agent_kind.command(),
-                &agent_args,
-                &remote_env,
-            ));
-        }
-        return ssh_args;
-    }
     match kind {
         TerminalSurfaceKind::Agent => {
             let mut args = Vec::new();
@@ -5042,28 +5376,11 @@ fn terminal_working_directory(
         && let Some(work_dir) = workspace
             .agent_work_dir
             .as_ref()
-            .filter(|path| workspace.remote.is_some() || path.is_dir())
+            .filter(|path| path.is_dir())
     {
         return work_dir.clone();
     }
-    if workspace.remote.is_some() && kind == TerminalSurfaceKind::Workspace {
-        return std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    }
     workspace.path.clone()
-}
-
-/// 返回本机 terminal backend 启动子进程时使用的 cwd。
-///
-/// 适用场景：Remote Agent 的业务 cwd 在远端，不能传给本机 ssh 进程。例：Remote -> 当前目录。
-fn terminal_backend_working_directory(
-    workspace: &TerminalWorkspaceMetadata,
-    kind: TerminalSurfaceKind,
-) -> PathBuf {
-    if workspace.remote.is_some() {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-    } else {
-        terminal_working_directory(workspace, kind)
-    }
 }
 
 fn terminal_env(
@@ -5071,31 +5388,14 @@ fn terminal_env(
     kind: TerminalSurfaceKind,
     network_settings: &NetworkSettings,
 ) -> HashMap<String, String> {
-    // Remote 的代理属于 SSH 内部 Agent 命令；注入本机 ssh 会错误地使用本机配置。
-    let mut env = if workspace.remote.is_none() {
-        network_settings
-            .env_vars()
-            .into_iter()
-            .collect::<HashMap<_, _>>()
-    } else {
-        HashMap::new()
-    };
-    if let Some(remote) = workspace.remote.as_ref()
-        && let remote_workspace::RemoteAuth::Password(auth) = &remote.config.auth
-        && let Ok(executable) = std::env::current_exe()
-    {
-        env.insert("SSH_ASKPASS".to_string(), executable.display().to_string());
-        env.insert("SSH_ASKPASS_REQUIRE".to_string(), "force".to_string());
-        env.insert("DISPLAY".to_string(), "gsdv-ssh-askpass".to_string());
-        env.insert("GSDV_SSH_ASKPASS".to_string(), "1".to_string());
-        env.insert("GSDV_SSH_PASSWORD".to_string(), auth.password.clone());
+    let mut env = network_settings
+        .env_vars()
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+    if let Some(gws) = data::ensure_workspace_store_dir(&workspace.path) {
+        env.insert("GWS".to_string(), gws.display().to_string());
     }
-    if workspace.remote.is_none() {
-        if let Some(gws) = data::ensure_workspace_store_dir(&workspace.path) {
-            env.insert("GWS".to_string(), gws.display().to_string());
-        }
-        env.insert("GSDV_HOOK_ENDPOINT".to_string(), hook::app_hook_endpoint());
-    }
+    env.insert("GSDV_HOOK_ENDPOINT".to_string(), hook::app_hook_endpoint());
     env.insert(
         "GSDV_WORKSPACE_DIR".to_string(),
         workspace.path.display().to_string(),

@@ -15,10 +15,6 @@ impl GsdvGuiApp {
         let Some(workspace) = self.current_workspace() else {
             return blocks;
         };
-        // Remote Workflow 的相对路径属于远端，不能误读本机同名文件。
-        if workspace.remote.is_some() {
-            return blocks;
-        }
         let markdown_file = workspace.path.join(task_path);
         let paths = markdown_preview::image_sources(&blocks)
             .into_iter()

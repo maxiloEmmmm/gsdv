@@ -16,21 +16,17 @@ use crate::gui::outline::{
     outline_path_is_global, recent_markdown_outline_dialog_content, recent_markdown_outline_nodes,
     render_favorite_outline_node, render_outline_node, toggle_path_in_set,
 };
-use crate::gui::remote_workspace::{
-    self, RemoteLayoutPayload, RemoteProjectSnapshot, RemoteShell, RemoteWorkspaceConfig,
-    RemoteWorkspaceSnapshot,
-};
 use crate::gui::repaint_gate;
 use crate::gui::reviewer_adapter::{ReviewerAdapter, ReviewerBranchTarget};
 use crate::gui::session_stream::{SessionStreamDescriptor, SessionStreamHub, SessionStreamMessage};
 use crate::gui::terminal_host::{
-    AgentProcessExit, GuiTerminalHost, HelixLaunchSpec, RemoteTerminalMetadata,
-    TerminalFileLineClick, TerminalHost, TerminalInputShortcutScope, TerminalOutputClick,
-    TerminalRemoteKey, TerminalRemoteOutputSource, TerminalRemoteOutputState,
-    TerminalRemoteSnapshot, TerminalRemoteUpdate, TerminalRuntimeEvent, TerminalRuntimeEventKind,
-    TerminalRuntimeEventSink, TerminalSessionMetadata, TerminalSessionSource, TerminalSurfaceKind,
-    TerminalWorkspaceMetadata, agent_input_bytes_from_events_with_kitty_protocol,
-    classify_terminal_output_path_click, terminal_agent_input_submit_bytes,
+    AgentProcessExit, GuiTerminalHost, HelixLaunchSpec, TerminalFileLineClick, TerminalHost,
+    TerminalInputShortcutScope, TerminalOutputClick, TerminalRemoteKey, TerminalRemoteOutputSource,
+    TerminalRemoteOutputState, TerminalRemoteSnapshot, TerminalRemoteUpdate, TerminalRuntimeEvent,
+    TerminalRuntimeEventKind, TerminalRuntimeEventSink, TerminalSessionMetadata,
+    TerminalSessionSource, TerminalSurfaceKind, TerminalWorkspaceMetadata,
+    agent_input_bytes_from_events_with_kitty_protocol, classify_terminal_output_path_click,
+    terminal_agent_input_submit_bytes,
 };
 use crate::gui::theme;
 use crate::gui::workflow::{
@@ -119,9 +115,6 @@ use app_reviewer_ui::{ReviewerDiffCopyKind, apply_reviewer_diff_selection_overri
 
 #[path = "app_reviewer_state.rs"]
 mod app_reviewer_state;
-
-#[path = "app_remote_workspace.rs"]
-mod app_remote_workspace;
 
 #[path = "app_remote_server.rs"]
 mod app_remote_server;
@@ -434,8 +427,6 @@ struct WorkflowAgentSidecarSaveState {
     workspace_path: PathBuf,
     /// 最新一次请求对应的 Agent 内存快照。
     agents: Vec<data::SubagentViewData>,
-    /// 最新一次请求对应的本地或 Remote 连接快照。
-    remote: Result<Option<(RemoteWorkspaceConfig, RemoteShell)>, String>,
     /// 最新快照代次。
     revision: u64,
     /// 该 sidecar 是否已有后台 writer 正在运行。
@@ -453,10 +444,6 @@ struct GsdvGuiApp {
     /// Reviewer diff 行的本地视觉选中覆盖。
     reviewer_diff_selected_rows: Vec<Option<usize>>,
     terminal_hosts: Vec<WorkspaceTerminalHosts>,
-    /// 与 workspaces 对齐的 SSH Remote Workspace 运行时状态。
-    remote_workspaces: Vec<Option<RemoteWorkspaceRuntime>>,
-    /// 当前进程内 Remote Workspace 是否启用；不持久化，重启后默认开启。
-    remote_enabled: Vec<bool>,
     /// 每个 workspace 最近通过 Agent 文件行打开过的 Helix 目标。
     recent_agent_helix_targets: Vec<Vec<RecentHelixTarget>>,
     /// Active agent terminal slot for each workspace.
@@ -911,13 +898,12 @@ impl From<InitialGuiData> for GsdvGuiApp {
 impl GsdvGuiApp {
     /// 把 GUI 或 TUI 前端接入同一套后台服务生命周期。
     ///
-    /// 适用场景：前端 Context 创建后。示例：TUI 启动 -> Web listener 和 remote workspace 同时可用。
+    /// 适用场景：前端 Context 创建后。示例：TUI 启动 -> Web listener 可用。
     fn attach_frontend_runtime(&mut self, ctx: &egui::Context) {
         self.app_repaint_ctx = Some(ctx.clone());
         self.set_fs_watch_repaint_context(ctx.clone());
         self.spawn_external_hook_server(ctx.clone());
         self.restart_remote_server(ctx, false);
-        self.start_remote_workspace_loads(ctx);
     }
 
     fn new(value: InitialGuiData, agent_launch: AgentLaunchConfig) -> Self {
@@ -952,21 +938,6 @@ impl GsdvGuiApp {
         let terminal_hosts = (0..value.workspaces.len())
             .map(|_| WorkspaceTerminalHosts::default())
             .collect();
-        let remote_workspaces = value
-            .workspaces
-            .iter()
-            .map(|workspace| {
-                workspace
-                    .remote
-                    .as_ref()
-                    .map(RemoteWorkspaceRuntime::disconnected)
-            })
-            .collect();
-        let remote_enabled = value
-            .workspaces
-            .iter()
-            .map(|workspace| workspace.remote.is_some())
-            .collect();
         let recent_agent_helix_targets = (0..value.workspaces.len()).map(|_| Vec::new()).collect();
         let active_agent_slots = (0..value.workspaces.len())
             .map(|_| AgentSlotId::Main)
@@ -996,10 +967,6 @@ impl GsdvGuiApp {
             .map(|_| WorkflowUiState::default())
             .collect();
         let memo_save_errors = (0..value.workspaces.len()).map(|_| None).collect();
-        let has_remote_workspaces = value
-            .workspaces
-            .iter()
-            .any(|workspace| workspace.remote.is_some());
         let (app_event_tx, app_event_rx) = mpsc::channel();
         let background_runtime = Arc::new(build_background_runtime());
         let repaint_controller = repaint_gate::RepaintController::new();
@@ -1014,8 +981,6 @@ impl GsdvGuiApp {
             reviewer_diff_scroll_targets,
             reviewer_diff_selected_rows,
             terminal_hosts,
-            remote_workspaces,
-            remote_enabled,
             recent_agent_helix_targets,
             active_agent_slots,
             agent_busy_watchdogs,
@@ -1075,7 +1040,7 @@ impl GsdvGuiApp {
             pending_remote_server_restart: false,
             pending_default_agent_kind_save: false,
             screenshot_request_poll_enabled: screenshot_request_poll_enabled(),
-            workspace_store_dirty_at: has_remote_workspaces.then(Instant::now),
+            workspace_store_dirty_at: None,
             workspace_store_save_in_flight: Arc::new(AtomicBool::new(false)),
             last_screenshot_request_poll: Instant::now(),
             screenshot_request_read_in_flight: false,
@@ -1201,53 +1166,6 @@ struct WorkspaceTerminalHosts {
     workspace_error: Option<String>,
     /// Last Reviewer Helix spawn error.
     helix_error: Option<String>,
-}
-
-/// 单个远端项目在切出 Outline 后保留的 Agent terminal 集合。
-///
-/// 适用场景：Remote Outline 从项目 A 切到 B。例：A -> 后台保留其所有 Agent PTY。
-struct RemoteProjectRuntime {
-    /// 最近一次从远端加载或由本机布局修改同步出的项目快照。
-    snapshot: RemoteProjectSnapshot,
-    /// 当前项目拥有的 Agent terminal；选中项目时会临时移入主 terminal_hosts。
-    agents: BTreeMap<AgentSlotId, AgentHostSlot>,
-}
-
-/// 一个 Workspace Rail Remote 项的 shell 与项目缓存。
-///
-/// 适用场景：多个远端项目各自启动独立 SSH Agent。
-struct RemoteWorkspaceRuntime {
-    /// 用于丢弃删除或编辑配置后到达的旧后台事件。
-    id: u64,
-    /// 自动探测出的远端默认 shell。
-    shell: Option<RemoteShell>,
-    /// 最近一次直接 SSH 操作是否成功。
-    connected: bool,
-    /// 最近一次连接或解析错误。
-    error: Option<String>,
-    /// 从远端 store 加载且仅用于远端 Agent 命令的代理配置。
-    network_settings: NetworkSettings,
-    /// 已过滤且按远端 store 顺序排列的项目。
-    projects: Vec<RemoteProjectRuntime>,
-    /// 当前选择项目在 projects 中的下标。
-    selected_project: Option<usize>,
-}
-
-impl RemoteWorkspaceRuntime {
-    /// 从持久化配置构造未连接的运行时。
-    ///
-    /// 适用场景：应用启动恢复 Remote Rail 项。例：配置存在 -> connected=false。
-    fn disconnected(_config: &RemoteWorkspaceConfig) -> Self {
-        Self {
-            id: rand::random(),
-            shell: None,
-            connected: false,
-            error: None,
-            network_settings: NetworkSettings::default(),
-            projects: Vec::new(),
-            selected_project: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1865,8 +1783,6 @@ enum AppEvent {
     WorkflowTreeLoaded {
         index: usize,
         workspace_path: PathBuf,
-        /// Remote runtime ID；本地 workspace 为 None。
-        remote_runtime_id: Option<u64>,
         /// 本次加载是否执行了子 repo 发现扫描。
         scanned_sub_workflows: bool,
         result: Result<WorkflowTree, String>,
@@ -1879,27 +1795,6 @@ enum AppEvent {
     WorkspaceDirectoryChangePrepared {
         result: Result<WorkspaceDirectoryChangeTaskResult, String>,
     },
-    /// 新 Remote Workspace 连接验证完成。
-    RemoteWorkspaceAddPrepared {
-        mode: RemoteWorkspaceDialogMode,
-        config: RemoteWorkspaceConfig,
-        result: Result<(RemoteShell, RemoteWorkspaceSnapshot), String>,
-    },
-    /// 已持久化 Remote Workspace 建立或恢复连接。
-    RemoteWorkspaceConnected {
-        id: u64,
-        shell: RemoteShell,
-        snapshot: RemoteWorkspaceSnapshot,
-    },
-    /// Remote Workspace 主连接断开或重连失败。
-    RemoteWorkspaceConnectionLost { id: u64, error: String },
-    /// Remote Workspace 的主动刷新完成。
-    RemoteWorkspaceRefreshed {
-        id: u64,
-        result: Result<RemoteWorkspaceSnapshot, String>,
-    },
-    /// 远端 store.active 或布局保存完成。
-    RemoteWorkspaceSaved { id: u64, result: Result<(), String> },
     /// Reviewer script 目录扫描完成。
     ReviewerScriptsLoaded {
         result: Result<Vec<ReviewerScript>, String>,
@@ -1943,20 +1838,16 @@ enum AppEvent {
     /// workflow step 左右片段保存完成。
     WorkflowStepSaved {
         index: usize,
-        /// 保存请求发出时的项目路径，用于丢弃 Remote 项目切换后的旧结果。
+        /// 保存请求发出时的 workspace 路径，用于丢弃过期结果。
         workspace_path: PathBuf,
-        /// 保存请求发出时的 Remote runtime ID；本地 workspace 为 None。
-        remote_runtime_id: Option<u64>,
         target: WorkflowSelectionTarget,
         result: Result<WorkflowSaveSuccess, String>,
     },
     /// workflow tree 右键菜单文件修改完成。
     WorkflowMutationFinished {
         index: usize,
-        /// mutation 发出时的项目路径，用于隔离 Remote 项目异步结果。
+        /// mutation 发出时的 workspace 路径，用于隔离过期异步结果。
         workspace_path: PathBuf,
-        /// mutation 发出时的 Remote runtime ID；本地 workspace 为 None。
-        remote_runtime_id: Option<u64>,
         request: WorkflowMutationRequest,
         result: Result<(), String>,
     },
@@ -1968,7 +1859,7 @@ enum AppEvent {
         sidecar_path: PathBuf,
         /// 本次后台写入使用的快照代次。
         revision: u64,
-        /// 本地或 Remote writer 的结果。
+        /// 本地 writer 的结果。
         result: Result<(), String>,
     },
     /// Recent Markdown diff context prepared for the active Agent input.
@@ -2149,8 +2040,6 @@ struct InputRuntimeRequest {
     active_agent_busy: bool,
     /// 当前 workspace route。
     route: Route,
-    /// 当前 workspace 是否为 SSH Remote Workspace。
-    remote_workspace: bool,
     /// 当前 workspace center mode。
     center_mode: CenterMode,
     /// app 是否处于 F11 全屏模式。
@@ -2216,7 +2105,7 @@ struct LoadedDocument {
 struct TerminalSpawnKey {
     /// Workspace slot that will receive the host.
     index: usize,
-    /// Workspace path captured at spawn time，用于 Remote 项目切换后正确归位。
+    /// Workspace path captured at spawn time，用于切换目录后正确归位。
     workspace_path: PathBuf,
     /// Terminal surface to create for that workspace.
     kind: TerminalSurfaceKind,
@@ -2520,13 +2409,6 @@ impl DocumentState {
 
 #[derive(Clone)]
 enum AppDialog {
-    AddWorkspaceKind,
-    RemoteWorkspace {
-        mode: RemoteWorkspaceDialogMode,
-        form: RemoteWorkspaceForm,
-        error: Option<String>,
-        in_flight: bool,
-    },
     RecentMarkdownOutline {
         nodes: Vec<OutlineNode>,
     },
@@ -2670,149 +2552,6 @@ enum AppDialog {
     },
 }
 
-/// Remote Workspace 配置弹窗的业务模式。
-///
-/// 适用场景：同一表单复用创建与编辑。例：Edit(2) -> 成功后替换第 2 项。
-#[derive(Clone, Copy)]
-enum RemoteWorkspaceDialogMode {
-    /// 创建新的 Remote Rail 项。
-    Create,
-    /// 编辑已有 Remote Rail 项。
-    Edit(usize),
-}
-
-/// Remote Workspace 表单选择的认证类型。
-///
-/// 适用场景：保证密码和私钥严格二选一。例：Password -> 隐藏私钥输入。
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum RemoteAuthKind {
-    /// SSH 密码认证。
-    Password,
-    /// SSH 私钥认证。
-    PrivateKey,
-}
-
-/// Remote Workspace 创建/编辑表单状态。
-///
-/// 适用场景：连接验证失败时保留用户输入。例：错误 -> 修改 host 后重试。
-#[derive(Clone)]
-struct RemoteWorkspaceForm {
-    /// Remote Workspace 永久存储 key，不在表单中展示。
-    workspace_key: String,
-    /// Rail 自定义名称。
-    name: String,
-    /// SSH 主机名或 IP。
-    host: String,
-    /// SSH 端口文本。
-    port: String,
-    /// SSH 用户名。
-    username: String,
-    /// 当前认证类型。
-    auth_kind: RemoteAuthKind,
-    /// 明文 SSH 密码。
-    password: String,
-    /// 本机私钥路径文本。
-    private_key: String,
-}
-
-impl RemoteWorkspaceForm {
-    /// 返回空白创建表单。
-    ///
-    /// 适用场景：用户选择 Remote 类型。例：port -> `22`。
-    fn empty() -> Self {
-        Self {
-            workspace_key: remote_workspace::new_workspace_key(),
-            name: String::new(),
-            host: String::new(),
-            port: remote_workspace::default_ssh_port().to_string(),
-            username: String::new(),
-            auth_kind: RemoteAuthKind::Password,
-            password: String::new(),
-            private_key: String::new(),
-        }
-    }
-
-    /// 从已保存配置恢复编辑表单。
-    ///
-    /// 适用场景：Rail 菜单点击编辑。例：私钥配置 -> 选中 PrivateKey。
-    fn from_config(config: RemoteWorkspaceConfig) -> Self {
-        let (auth_kind, password, private_key) = match config.auth {
-            remote_workspace::RemoteAuth::Password(auth) => {
-                (RemoteAuthKind::Password, auth.password, String::new())
-            }
-            remote_workspace::RemoteAuth::PrivateKey(auth) => (
-                RemoteAuthKind::PrivateKey,
-                String::new(),
-                auth.private_key.to_string_lossy().to_string(),
-            ),
-        };
-        Self {
-            workspace_key: if config.workspace_key.trim().is_empty() {
-                remote_workspace::new_workspace_key()
-            } else {
-                config.workspace_key
-            },
-            name: config.name,
-            host: config.host,
-            port: config.port.to_string(),
-            username: config.username,
-            auth_kind,
-            password,
-            private_key,
-        }
-    }
-
-    /// 校验表单并生成持久化配置。
-    ///
-    /// 适用场景：连接按钮提交。例：端口非数字 -> 返回可见错误。
-    fn config(&self) -> Result<RemoteWorkspaceConfig, String> {
-        let name = required_remote_field(&self.name, "name")?;
-        let host = required_remote_field(&self.host, "host")?;
-        let username = required_remote_field(&self.username, "username")?;
-        let port = self
-            .port
-            .trim()
-            .parse::<u16>()
-            .map_err(|_| "SSH port must be between 1 and 65535".to_string())?;
-        let auth = match self.auth_kind {
-            RemoteAuthKind::Password => {
-                remote_workspace::RemoteAuth::Password(remote_workspace::PasswordAuth {
-                    password: required_remote_field(&self.password, "password")?,
-                })
-            }
-            RemoteAuthKind::PrivateKey => {
-                let path = PathBuf::from(required_remote_field(&self.private_key, "private key")?);
-                if !path.is_file() {
-                    return Err(format!("Private key does not exist: {}", path.display()));
-                }
-                remote_workspace::RemoteAuth::PrivateKey(remote_workspace::PrivateKeyAuth {
-                    private_key: path,
-                })
-            }
-        };
-        Ok(RemoteWorkspaceConfig {
-            workspace_key: self.workspace_key.clone(),
-            name,
-            host,
-            port,
-            username,
-            auth,
-        })
-    }
-}
-
-/// 清理 Remote 表单必填字符串。
-///
-/// 适用场景：统一拒绝空名称、主机和凭据。例：`  ` -> Err。
-fn required_remote_field(value: &str, label: &str) -> Result<String, String> {
-    let value = value.trim();
-    if value.is_empty() {
-        Err(format!("Remote workspace {label} is required"))
-    } else {
-        Ok(value.to_string())
-    }
-}
-
 /// workflow 删除确认弹窗中的删除目标。
 #[derive(Clone)]
 enum WorkflowDeleteTarget {
@@ -2850,12 +2589,9 @@ enum OutlineFavoriteScope {
 enum WorkspaceRailAction {
     Switch(usize),
     ToggleFocus(usize),
-    ToggleRemote(usize),
     Close(usize),
     ToggleFocusFilter,
     ChangeDirectory(usize),
-    RestartRemoteAgents(usize),
-    EditRemote(usize),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3165,13 +2901,9 @@ impl GsdvGuiApp {
                     .show(ctx, |ui| self.workspace_rail(ui));
 
                 if should_show_outline_panel(self.current_workspace()) {
-                    let outline_collapsed = self.current_workspace().is_some_and(|workspace| {
-                        if workspace.remote.is_some() {
-                            workspace.remote_outline_collapsed
-                        } else {
-                            workspace.outline_panel_collapsed
-                        }
-                    });
+                    let outline_collapsed = self
+                        .current_workspace()
+                        .is_some_and(|workspace| workspace.outline_panel_collapsed);
                     let outline_width = if outline_collapsed {
                         COLLAPSED_OUTLINE_WIDTH
                     } else {

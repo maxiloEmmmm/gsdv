@@ -10,9 +10,6 @@ impl GsdvGuiApp {
         let Some(workspace) = self.current_workspace_mut() else {
             return;
         };
-        if workspace.remote.is_some() {
-            return;
-        }
         workspace.previous_center_mode = workspace.center_mode;
         workspace.route = Route::Reviewer;
         self.persist_workspaces();
@@ -78,31 +75,10 @@ impl GsdvGuiApp {
         match action {
             WorkspaceRailAction::Switch(index) => self.switch_workspace(index),
             WorkspaceRailAction::ToggleFocus(index) => self.toggle_workspace_focus(index),
-            WorkspaceRailAction::ToggleRemote(index) => self.toggle_remote_workspace(ctx, index),
             WorkspaceRailAction::ToggleFocusFilter => self.toggle_workspace_focus_filter(),
             WorkspaceRailAction::Close(index) => self.request_close_workspace(index),
             WorkspaceRailAction::ChangeDirectory(index) => {
                 self.change_workspace_directory_from_dialog(ctx, index)
-            }
-            WorkspaceRailAction::RestartRemoteAgents(index) => {
-                self.restart_remote_workspace_agents(ctx, index)
-            }
-            WorkspaceRailAction::EditRemote(index) => {
-                let Some(config) = self
-                    .workspaces
-                    .get(index)
-                    .and_then(|workspace| workspace.remote.clone())
-                else {
-                    return;
-                };
-                self.set_active_app_dialog(Some(AppDialog::RemoteWorkspace {
-                    mode: RemoteWorkspaceDialogMode::Edit(index),
-                    form: RemoteWorkspaceForm::from_config(config),
-                    error: None,
-                    in_flight: false,
-                }));
-                self.request_app_repaint();
-                let _ = ctx;
             }
         }
     }
@@ -154,14 +130,12 @@ impl GsdvGuiApp {
     }
 
     pub(super) fn add_workspace_from_dialog(&mut self, ctx: &egui::Context) {
-        self.set_active_app_dialog(Some(AppDialog::AddWorkspaceKind));
-        self.request_app_repaint();
-        let _ = ctx;
+        self.add_local_workspace_from_dialog(ctx);
     }
 
     /// 打开本地目录选择器并派发普通 workspace 添加任务。
     ///
-    /// 适用场景：统一入口选择 Local。例：选中目录 -> 沿用现有后台准备流程。
+    /// 适用场景：workspace rail 添加按钮。例：选中目录 -> 后台准备 workspace。
     pub(super) fn add_local_workspace_from_dialog(&mut self, ctx: &egui::Context) {
         let start_dir = self
             .current_workspace()
@@ -194,9 +168,6 @@ impl GsdvGuiApp {
         let Some(workspace) = self.workspaces.get(index) else {
             return;
         };
-        if workspace.remote.is_some() {
-            return;
-        }
         let old_path = workspace.path.clone();
         let agent_kind = workspace.agent_kind;
         let dialog = rfd::FileDialog::new()
@@ -273,12 +244,6 @@ impl GsdvGuiApp {
         self.reviewer_diff_scroll_targets.push(None);
         self.reviewer_diff_selected_rows.push(None);
         self.terminal_hosts.push(WorkspaceTerminalHosts::default());
-        self.remote_workspaces.push(None);
-        self.remote_enabled.push(
-            self.workspaces
-                .last()
-                .is_some_and(|workspace| workspace.remote.is_some()),
-        );
         self.recent_agent_helix_targets.push(Vec::new());
         self.active_agent_slots.push(AgentSlotId::Main);
         self.agent_busy_watchdogs.push(BTreeMap::from([(
@@ -358,12 +323,12 @@ impl GsdvGuiApp {
                 let Some(index) = self
                     .workspaces
                     .get(index)
-                    .is_some_and(|current| current.path == old_path && current.remote.is_none())
+                    .is_some_and(|current| current.path == old_path)
                     .then_some(index)
                     .or_else(|| {
-                        self.workspaces.iter().position(|current| {
-                            current.path == old_path && current.remote.is_none()
-                        })
+                        self.workspaces
+                            .iter()
+                            .position(|current| current.path == old_path)
                     })
                 else {
                     return;
@@ -444,9 +409,6 @@ impl GsdvGuiApp {
         }
         if let Some(hosts) = self.terminal_hosts.get_mut(index) {
             *hosts = WorkspaceTerminalHosts::default();
-        }
-        if let Some(remote) = self.remote_workspaces.get_mut(index) {
-            *remote = None;
         }
         if let Some(targets) = self.recent_agent_helix_targets.get_mut(index) {
             targets.clear();
@@ -533,14 +495,6 @@ impl GsdvGuiApp {
             title: i18n::text(self.app_language, "Close Workspace").to_string(),
             message: i18n::text(self.app_language, "Closing workspace...").to_string(),
         }));
-        if self
-            .workspaces
-            .get(index)
-            .is_some_and(|workspace| workspace.remote.is_some())
-        {
-            self.spawn_remote_workspace_close(ctx, index);
-            return;
-        }
         self.spawn_workspace_close_sidecar_delete_task(ctx, index, workspace_path);
     }
 
@@ -583,8 +537,6 @@ impl GsdvGuiApp {
         self.reviewer_diff_scroll_targets.remove(index);
         self.reviewer_diff_selected_rows.remove(index);
         self.terminal_hosts.remove(index);
-        self.remote_workspaces.remove(index);
-        self.remote_enabled.remove(index);
         self.recent_agent_helix_targets.remove(index);
         self.active_agent_slots.remove(index);
         self.agent_busy_watchdogs.remove(index);
@@ -621,15 +573,6 @@ impl GsdvGuiApp {
             self.mark_extra_tools_scan_due();
             self.queue_app_event(AppEvent::SyncTerminalEventRepaintFlags);
             self.persist_workspaces();
-            if self
-                .workspaces
-                .get(index)
-                .is_some_and(|workspace| workspace.remote.is_some())
-                && self.remote_workspace_is_enabled(index)
-                && let Some(ctx) = self.app_repaint_ctx.clone()
-            {
-                self.spawn_remote_workspace_refresh(&ctx, index);
-            }
         }
     }
 
@@ -1541,13 +1484,6 @@ impl GsdvGuiApp {
     /// 标记 workspace metadata 和 subagent sidecar 需要异步保存。
     pub(super) fn persist_workspaces(&mut self) {
         self.mark_workspace_store_dirty();
-        if self
-            .current_workspace()
-            .is_some_and(|workspace| workspace.remote.is_some())
-            && let Some(ctx) = self.app_repaint_ctx.clone()
-        {
-            self.spawn_active_remote_layout_save(&ctx);
-        }
     }
 }
 

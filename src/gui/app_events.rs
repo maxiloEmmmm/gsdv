@@ -171,7 +171,6 @@ impl GsdvGuiApp {
             active_agent_slot,
             active_agent_busy,
             route,
-            remote_workspace: workspace.remote.is_some(),
             center_mode,
             app_fullscreen: self.app_fullscreen,
             active_app_dialog_open,
@@ -614,7 +613,6 @@ impl GsdvGuiApp {
             AppEvent::WorkflowTreeLoaded {
                 index,
                 workspace_path,
-                remote_runtime_id,
                 scanned_sub_workflows,
                 result,
             } => {
@@ -622,7 +620,6 @@ impl GsdvGuiApp {
                     ctx,
                     index,
                     workspace_path,
-                    remote_runtime_id,
                     scanned_sub_workflows,
                     result,
                 );
@@ -632,27 +629,6 @@ impl GsdvGuiApp {
             }
             AppEvent::WorkspaceDirectoryChangePrepared { result } => {
                 self.apply_workspace_directory_change_result(ctx, result);
-            }
-            AppEvent::RemoteWorkspaceAddPrepared {
-                mode,
-                config,
-                result,
-            } => {
-                self.apply_remote_workspace_add_result(ctx, mode, config, result);
-            }
-            AppEvent::RemoteWorkspaceConnected {
-                id,
-                shell,
-                snapshot,
-            } => self.apply_remote_workspace_connected(ctx, id, shell, snapshot),
-            AppEvent::RemoteWorkspaceConnectionLost { id, error } => {
-                self.apply_remote_workspace_connection_lost(id, error);
-            }
-            AppEvent::RemoteWorkspaceRefreshed { id, result } => {
-                self.apply_remote_workspace_refresh(ctx, id, result);
-            }
-            AppEvent::RemoteWorkspaceSaved { id, result } => {
-                self.apply_remote_workspace_saved(id, result);
             }
             AppEvent::ReviewerScriptsLoaded { result } => match result {
                 Ok(scripts) => {
@@ -774,34 +750,18 @@ impl GsdvGuiApp {
             AppEvent::WorkflowStepSaved {
                 index,
                 workspace_path,
-                remote_runtime_id,
                 target,
                 result,
             } => {
-                self.apply_workflow_step_saved(
-                    ctx,
-                    index,
-                    workspace_path,
-                    remote_runtime_id,
-                    target,
-                    result,
-                );
+                self.apply_workflow_step_saved(ctx, index, workspace_path, target, result);
             }
             AppEvent::WorkflowMutationFinished {
                 index,
                 workspace_path,
-                remote_runtime_id,
                 request,
                 result,
             } => {
-                self.apply_workflow_mutation_finished(
-                    ctx,
-                    index,
-                    workspace_path,
-                    remote_runtime_id,
-                    request,
-                    result,
-                );
+                self.apply_workflow_mutation_finished(ctx, index, workspace_path, request, result);
             }
             AppEvent::WorkflowAgentSidecarSaved {
                 index,

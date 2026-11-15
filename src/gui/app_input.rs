@@ -233,12 +233,6 @@ fn input_runtime_keyboard_action(request: &InputRuntimeRequest) -> InputRuntimeK
     {
         return InputRuntimeKeyboardAction::SuppressTerminalInput;
     }
-    if request.remote_workspace
-        && command_or_alt_shortcut_modifier(input.modifiers)
-        && shortcut_key_pressed(input, egui::Key::Z)
-    {
-        return InputRuntimeKeyboardAction::Command(UiCommand::ToggleWorkflowQuickModal);
-    }
     if let Some(command) = read_base_route_command_for_input(
         input,
         request.route == Route::Reviewer,
@@ -257,14 +251,6 @@ fn input_runtime_workspace_route_action(
     request: &InputRuntimeRequest,
 ) -> InputRuntimeKeyboardAction {
     let input = &request.input;
-    if request.remote_workspace
-        && let Some(direction) = read_agent_focus_move(input)
-    {
-        // 触发条件：Remote 项目的 Agent surface 可能不走普通 Agent center 分支。
-        // 不能只放在 Agent/Terminal 分支：Remote 抢占后 Ctrl+方向会进 terminal。
-        // 防止副作用：仅限 Remote，避免本地 Editor 的 Ctrl+方向跳词被抢。
-        return InputRuntimeKeyboardAction::Command(UiCommand::MoveAgentFocus(direction));
-    }
     match request.center_mode {
         CenterMode::Agent | CenterMode::Terminal => {
             if let Some(direction) = read_agent_focus_move(input) {

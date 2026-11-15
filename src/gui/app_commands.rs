@@ -57,25 +57,6 @@ impl GsdvGuiApp {
 
     pub(super) fn dispatch_ui_command(&mut self, ctx: &egui::Context, command: UiCommand) {
         self.suppress_default_agent_input = true;
-        let remote = self
-            .current_workspace()
-            .is_some_and(|workspace| workspace.remote.is_some());
-        if remote
-            && matches!(
-                command,
-                UiCommand::ToggleRecentMarkdownOutline
-                    | UiCommand::ToggleOutlineWorkflowTab
-                    | UiCommand::PasteRecentMarkdownDiffsToAgent
-                    | UiCommand::ToggleRecentAgentHelixTargets
-                    | UiCommand::AgentMarkdownShortcut
-                    | UiCommand::ToggleMarkdownEditorPreview
-                    | UiCommand::ToggleReviewerHelix
-                    | UiCommand::OpenReviewerRoute
-                    | UiCommand::Reviewer(_)
-            )
-        {
-            return;
-        }
         match command {
             UiCommand::CloseTopLayer => self.close_top_keyboard_layer(),
             UiCommand::ToggleAppFullscreen => self.toggle_app_fullscreen(ctx),
@@ -149,7 +130,7 @@ impl GsdvGuiApp {
         let Some(workspace) = self.current_workspace_mut() else {
             return;
         };
-        if workspace.remote.is_some() || workspace.outline_panel_collapsed == collapsed {
+        if workspace.outline_panel_collapsed == collapsed {
             return;
         }
         workspace.outline_panel_collapsed = collapsed;
@@ -513,9 +494,6 @@ impl GsdvGuiApp {
         if workspace.route != Route::Workspace {
             return;
         }
-        if workspace.remote.is_some() && !matches!(mode, CenterMode::Agent | CenterMode::Terminal) {
-            return;
-        }
         workspace.center_mode = match mode {
             CenterMode::Terminal => CenterMode::Agent,
             mode => mode,
@@ -528,10 +506,6 @@ impl GsdvGuiApp {
             return;
         };
         if workspace.route != Route::Workspace {
-            return;
-        }
-        if workspace.remote.is_some() {
-            workspace.center_mode = CenterMode::Agent;
             return;
         }
         let (center_mode, previous_center_mode) =

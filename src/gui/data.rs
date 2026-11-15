@@ -1,5 +1,4 @@
 use crate::gui::agent::AgentKind;
-use crate::gui::remote_workspace::RemoteWorkspaceConfig;
 use crate::gui::theme::ThemeMode;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -73,10 +72,6 @@ pub enum ReviewerMode {
 
 #[derive(Debug, Clone)]
 pub struct WorkspaceViewData {
-    /// Remote 连接配置；None 表示普通本地 workspace。
-    pub remote: Option<RemoteWorkspaceConfig>,
-    /// Remote 项目 Outline 是否折叠成 28px 恢复条。
-    pub remote_outline_collapsed: bool,
     /// 本地项目 Outline 面板是否折叠成 28px 恢复条。
     pub outline_panel_collapsed: bool,
     /// Whether this workspace is included when focus filtering is enabled.
@@ -734,11 +729,9 @@ struct StoreFile {
 #[derive(Debug, Deserialize, Serialize)]
 struct StoredWorkspace {
     path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    remote: Option<RemoteWorkspaceConfig>,
-    /// Remote Outline 的 workspace 级持久折叠状态。
-    #[serde(default)]
-    remote_outline_collapsed: bool,
+    /// 旧版 SSH Remote Workspace 标记，仅用于一次性删除整条记录。
+    #[serde(default, rename = "remote", skip_serializing)]
+    legacy_remote: Option<serde_json::Value>,
     /// 本地 Outline 面板的 workspace 级持久折叠状态。
     #[serde(default)]
     outline_panel_collapsed: bool,
@@ -832,19 +825,12 @@ struct OutlineFavoritesFile {
 }
 
 pub fn load_initial_gui_data(default_agent_kind: AgentKind) -> InitialGuiData {
-    let stored = load_store();
+    let mut stored = load_store();
+    remove_legacy_remote_workspaces(&mut stored);
     let workspaces = stored
         .workspaces
         .into_iter()
         .filter_map(|workspace| {
-            if let Some(config) = workspace.remote.clone() {
-                return Some(new_remote_workspace_with_outline_state(
-                    config,
-                    default_agent_kind,
-                    workspace.remote_outline_collapsed,
-                    workspace.focused,
-                ));
-            }
             let path = PathBuf::from(&workspace.path);
             if path.is_dir() {
                 Some(build_workspace(path, workspace, default_agent_kind))
@@ -1297,8 +1283,7 @@ pub fn new_workspace(path: PathBuf, agent_kind: AgentKind) -> WorkspaceViewData 
         path.clone(),
         StoredWorkspace {
             path: path.to_string_lossy().to_string(),
-            remote: None,
-            remote_outline_collapsed: false,
+            legacy_remote: None,
             outline_panel_collapsed: false,
             focused: false,
             agent_kind: Some(agent_kind),
@@ -1318,64 +1303,6 @@ pub fn new_workspace(path: PathBuf, agent_kind: AgentKind) -> WorkspaceViewData 
         },
         agent_kind,
     )
-}
-
-/// 构造尚未连接的 Remote Workspace 占位渲染状态。
-///
-/// 适用场景：新增 Remote Workspace。例：连接成功 -> 后台快照替换 Agent 数据。
-pub fn new_remote_workspace(
-    config: RemoteWorkspaceConfig,
-    agent_kind: AgentKind,
-) -> WorkspaceViewData {
-    new_remote_workspace_with_outline_state(config, agent_kind, false, false)
-}
-
-/// 按持久状态构造尚未连接的 Remote Workspace 占位渲染状态。
-///
-/// 适用场景：从 store 恢复 Remote Outline 折叠状态。
-/// 例：`collapsed=true -> 28px Remote Outline`。
-fn new_remote_workspace_with_outline_state(
-    mut config: RemoteWorkspaceConfig,
-    agent_kind: AgentKind,
-    remote_outline_collapsed: bool,
-    focused: bool,
-) -> WorkspaceViewData {
-    if config.workspace_key.trim().is_empty() {
-        config.workspace_key = crate::gui::remote_workspace::new_workspace_key();
-    }
-    let identity = PathBuf::from(format!("remote-{}", config.workspace_key));
-    WorkspaceViewData {
-        remote: Some(config.clone()),
-        remote_outline_collapsed,
-        outline_panel_collapsed: false,
-        focused,
-        name: config.name,
-        path: identity.clone(),
-        agent_kind,
-        agent_model: None,
-        agent_model_provider: None,
-        agent_effort: None,
-        agent_fast_mode: None,
-        agent_work_dir: None,
-        helix_work_dir: None,
-        agent_id: new_agent_id(&identity),
-        session_id: None,
-        activity: WorkspaceActivity::Unknown,
-        subagents: Vec::new(),
-        agent_rows: default_agent_rows(&[]),
-        agent_focus: Some(default_agent_focus()),
-        center_mode: CenterMode::Agent,
-        previous_center_mode: CenterMode::Agent,
-        route: Route::Workspace,
-        reviewer_mode: ReviewerMode::Git,
-        selected_file: None,
-        outline: Vec::new(),
-        outline_favorites: BTreeSet::new(),
-        attached_outline_dirs: Vec::new(),
-        recent_markdowns: Vec::new(),
-        markdown_outline_collapsed: true,
-        memo: String::new(),
-    }
 }
 
 pub fn save_workspace_store(
@@ -1412,8 +1339,7 @@ pub fn save_workspace_store(
             .iter()
             .map(|workspace| StoredWorkspace {
                 path: workspace.path.to_string_lossy().to_string(),
-                remote: workspace.remote.clone(),
-                remote_outline_collapsed: workspace.remote_outline_collapsed,
+                legacy_remote: None,
                 outline_panel_collapsed: workspace.outline_panel_collapsed,
                 focused: workspace.focused,
                 agent_kind: Some(workspace.agent_kind),
@@ -1445,10 +1371,7 @@ pub fn save_workspace_store(
     if let Ok(content) = serde_json::to_string_pretty(&store) {
         let _ = fs::write(path, content);
     }
-    for workspace in workspaces
-        .iter()
-        .filter(|workspace| workspace.remote.is_none())
-    {
+    for workspace in workspaces {
         save_workspace_subagents(workspace);
         save_workspace_outline_favorites(&workspace.path, &workspace.outline_favorites);
         let _ = save_workspace_recent_markdowns(&workspace.path, &workspace.recent_markdowns);
@@ -1925,8 +1848,6 @@ fn build_workspace(
     (agent_rows, agent_focus) = normalize_agent_rows(agent_rows, agent_focus, &subagents);
 
     WorkspaceViewData {
-        remote: None,
-        remote_outline_collapsed: false,
         outline_panel_collapsed: stored.outline_panel_collapsed,
         focused: stored.focused,
         name: workspace_name(&path),
@@ -2472,6 +2393,49 @@ fn load_store() -> StoreFile {
         return StoreFile::default();
     };
     serde_json::from_str(&content).unwrap_or_default()
+}
+
+/// 删除旧版 SSH Remote Workspace，并把清理结果立即写回主 store。
+///
+/// 适用场景：升级到仅支持本地 Workspace 的版本。
+/// 示例：`[local, remote, local] -> [local, local]`。
+fn remove_legacy_remote_workspaces(store: &mut StoreFile) {
+    if !store
+        .workspaces
+        .iter()
+        .any(|workspace| workspace.legacy_remote.is_some())
+    {
+        return;
+    }
+
+    let old_active = store.active.unwrap_or_default();
+    let mut new_active = 0;
+    let mut retained = Vec::with_capacity(store.workspaces.len());
+    for (index, workspace) in std::mem::take(&mut store.workspaces)
+        .into_iter()
+        .enumerate()
+    {
+        if workspace.legacy_remote.is_some() {
+            continue;
+        }
+        if index <= old_active {
+            new_active = retained.len();
+        }
+        retained.push(workspace);
+    }
+    store.workspaces = retained;
+    store.active = (!store.workspaces.is_empty()).then_some(new_active);
+
+    // 触发条件：store 中存在旧 SSH 配置。
+    // 不能只在内存过滤：否则下次启动仍会反复解析密码等废弃数据。
+    // 防止回归：Remote Workspace 凭据继续残留在磁盘。
+    let _guard = store_write_guard();
+    let Some(path) = gsdv_store_path() else {
+        return;
+    };
+    if let Ok(content) = serde_json::to_string_pretty(store) {
+        let _ = fs::write(path, content);
+    }
 }
 
 /// Serializes whole-store read-modify-write updates inside the app process.

@@ -211,49 +211,15 @@ impl GsdvGuiApp {
                             rail_action = Some(WorkspaceRailAction::ToggleFocus(index));
                             ui.close_menu();
                         }
-                        if workspace.remote.is_some()
-                            && ui.button("Edit remote workspace").clicked()
-                        {
-                            rail_action = Some(WorkspaceRailAction::EditRemote(index));
-                            ui.close_menu();
-                        }
-                        if workspace.remote.is_some()
-                            && ui
-                                .button(
-                                    if self.remote_enabled.get(index).copied().unwrap_or(true) {
-                                        "Disable remote"
-                                    } else {
-                                        "Enable remote"
-                                    },
-                                )
-                                .clicked()
-                        {
-                            rail_action = Some(WorkspaceRailAction::ToggleRemote(index));
-                            ui.close_menu();
-                        }
-                        if workspace.remote.is_some()
-                            && self.remote_enabled.get(index).copied().unwrap_or(true)
-                            && ui
-                                .button(i18n::text(self.app_language, "Restart agents"))
-                                .clicked()
-                        {
-                            rail_action = Some(WorkspaceRailAction::RestartRemoteAgents(index));
-                            ui.close_menu();
-                        }
-                        if workspace.remote.is_none()
-                            && ui
-                                .button(i18n::text(self.app_language, "Change workspace directory"))
-                                .clicked()
+                        if ui
+                            .button(i18n::text(self.app_language, "Change workspace directory"))
+                            .clicked()
                         {
                             rail_action = Some(WorkspaceRailAction::ChangeDirectory(index));
                             ui.close_menu();
                         }
                         if ui
-                            .button(if workspace.remote.is_some() {
-                                "Delete remote workspace"
-                            } else {
-                                i18n::text(self.app_language, "Close workspace")
-                            })
+                            .button(i18n::text(self.app_language, "Close workspace"))
                             .clicked()
                         {
                             rail_action = Some(WorkspaceRailAction::Close(index));
@@ -353,49 +319,15 @@ impl GsdvGuiApp {
                             rail_action = Some(WorkspaceRailAction::ToggleFocus(index));
                             ui.close_menu();
                         }
-                        if workspace.remote.is_some()
-                            && ui.button("Edit remote workspace").clicked()
-                        {
-                            rail_action = Some(WorkspaceRailAction::EditRemote(index));
-                            ui.close_menu();
-                        }
-                        if workspace.remote.is_some()
-                            && ui
-                                .button(
-                                    if self.remote_enabled.get(index).copied().unwrap_or(true) {
-                                        "Disable remote"
-                                    } else {
-                                        "Enable remote"
-                                    },
-                                )
-                                .clicked()
-                        {
-                            rail_action = Some(WorkspaceRailAction::ToggleRemote(index));
-                            ui.close_menu();
-                        }
-                        if workspace.remote.is_some()
-                            && self.remote_enabled.get(index).copied().unwrap_or(true)
-                            && ui
-                                .button(i18n::text(self.app_language, "Restart agents"))
-                                .clicked()
-                        {
-                            rail_action = Some(WorkspaceRailAction::RestartRemoteAgents(index));
-                            ui.close_menu();
-                        }
-                        if workspace.remote.is_none()
-                            && ui
-                                .button(i18n::text(self.app_language, "Change workspace directory"))
-                                .clicked()
+                        if ui
+                            .button(i18n::text(self.app_language, "Change workspace directory"))
+                            .clicked()
                         {
                             rail_action = Some(WorkspaceRailAction::ChangeDirectory(index));
                             ui.close_menu();
                         }
                         if ui
-                            .button(if workspace.remote.is_some() {
-                                "Delete remote workspace"
-                            } else {
-                                i18n::text(self.app_language, "Close workspace")
-                            })
+                            .button(i18n::text(self.app_language, "Close workspace"))
                             .clicked()
                         {
                             rail_action = Some(WorkspaceRailAction::Close(index));
@@ -464,13 +396,6 @@ impl GsdvGuiApp {
     }
 
     pub(super) fn outline_panel(&mut self, ui: &mut Ui) {
-        if self
-            .current_workspace()
-            .is_some_and(|workspace| workspace.remote.is_some())
-        {
-            self.remote_outline_panel(ui);
-            return;
-        }
         let index = self.active_workspace;
         if self
             .workspaces
@@ -587,103 +512,6 @@ impl GsdvGuiApp {
                 OutlinePanelTab::Workflow => self.workflow_tree_panel(ui),
             }
         });
-    }
-
-    /// 绘制 Remote Workspace 的远端项目列表。
-    ///
-    /// 适用场景：Remote 模式替代 Markdown/Workflow outline。例：点击项目 -> 切换 Agent 网格。
-    fn remote_outline_panel(&mut self, ui: &mut Ui) {
-        let index = self.active_workspace;
-        if !self.remote_workspace_is_enabled(index) {
-            ui.vertical_centered(|ui| {
-                if ui.button("Enable remote").clicked() {
-                    self.toggle_remote_workspace(ui.ctx(), index);
-                }
-            });
-            return;
-        }
-        if self
-            .workspaces
-            .get(index)
-            .is_some_and(|workspace| workspace.remote_outline_collapsed)
-        {
-            if remote_outline_collapse_button(ui, false).clicked() {
-                if let Some(workspace) = self.workspaces.get_mut(index) {
-                    workspace.remote_outline_collapsed = false;
-                }
-                self.mark_workspace_store_dirty();
-                self.request_app_repaint();
-            }
-            return;
-        }
-        let (connected, error, selected, projects) = self
-            .remote_workspaces
-            .get(index)
-            .and_then(Option::as_ref)
-            .map(|runtime| {
-                (
-                    runtime.connected,
-                    runtime.error.clone(),
-                    runtime.selected_project,
-                    runtime
-                        .projects
-                        .iter()
-                        .map(|project| {
-                            (
-                                data::workspace_name(&project.snapshot.path),
-                                project.snapshot.path.clone(),
-                            )
-                        })
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .unwrap_or_else(|| (false, None, None, Vec::new()));
-        let mut next_project = None;
-        let mut collapse_outline = false;
-        ui.vertical(|ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("REMOTE WORKSPACES").strong().size(12.0));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if remote_outline_collapse_button(ui, true).clicked() {
-                        collapse_outline = true;
-                    }
-                    ui.add_space(4.0);
-                    let status = if connected {
-                        "Connected"
-                    } else {
-                        "Reconnecting"
-                    };
-                    ui.label(muted(status));
-                });
-            });
-            if let Some(error) = error.as_deref() {
-                ui.add_space(6.0);
-                ui.label(RichText::new(error).color(theme::danger()).size(11.0));
-            }
-            ui.add_space(10.0);
-            ScrollArea::vertical().show(ui, |ui| {
-                for (project_index, (name, path)) in projects.iter().enumerate() {
-                    let response = ui.selectable_label(selected == Some(project_index), name);
-                    if response.clicked() {
-                        next_project = Some(project_index);
-                    }
-                    response.on_hover_text(path.display().to_string());
-                    ui.add_space(4.0);
-                }
-                if projects.is_empty() && connected {
-                    ui.label(muted("No available remote workspaces"));
-                }
-            });
-        });
-        if let Some(project_index) = next_project {
-            self.select_remote_project(ui.ctx(), index, project_index);
-        } else if collapse_outline {
-            if let Some(workspace) = self.workspaces.get_mut(index) {
-                workspace.remote_outline_collapsed = true;
-            }
-            self.mark_workspace_store_dirty();
-            self.request_app_repaint();
-        }
     }
 
     /// 绘制原始 Markdown outline tree。
@@ -1339,27 +1167,20 @@ impl GsdvGuiApp {
                                 .size(Size::exact(334.0))
                                 .horizontal(|mut strip| {
                                     strip.cell(|ui| {
-                                        if self
-                                            .current_workspace()
-                                            .is_some_and(|workspace| workspace.remote.is_some())
-                                        {
-                                            ui.label(RichText::new("Agent").strong());
-                                        } else {
-                                            agent_tab_action = workspace_mode_tabs(
-                                                ui,
-                                                current_mode,
-                                                markdown_outline_collapsed,
-                                                self.app_language,
-                                                |mode| {
-                                                    if let Some(workspace) =
-                                                        self.current_workspace_mut()
-                                                    {
-                                                        workspace.center_mode = mode;
-                                                        self.persist_workspaces();
-                                                    }
-                                                },
-                                            );
-                                        }
+                                        agent_tab_action = workspace_mode_tabs(
+                                            ui,
+                                            current_mode,
+                                            markdown_outline_collapsed,
+                                            self.app_language,
+                                            |mode| {
+                                                if let Some(workspace) =
+                                                    self.current_workspace_mut()
+                                                {
+                                                    workspace.center_mode = mode;
+                                                    self.persist_workspaces();
+                                                }
+                                            },
+                                        );
                                     });
                                     strip.cell(|ui| {
                                         self.workspace_header_actions(ui);
@@ -1481,17 +1302,6 @@ impl GsdvGuiApp {
 
     /// Renders all visible Agent rows and columns for the active workspace.
     pub(super) fn agent_columns_surface(&mut self, ui: &mut Ui) {
-        if self
-            .remote_workspaces
-            .get(self.active_workspace)
-            .and_then(Option::as_ref)
-            .is_some_and(|runtime| runtime.selected_project.is_none())
-        {
-            ui.centered_and_justified(|ui| {
-                ui.label(muted("Select a remote workspace from the outline"));
-            });
-            return;
-        }
         let Some(workspace) = self
             .current_workspace()
             .map(AgentSurfaceSnapshot::from_workspace)

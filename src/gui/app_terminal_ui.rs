@@ -958,25 +958,16 @@ impl GsdvGuiApp {
         Some(metadata)
     }
 
-    /// 构造本地或 Remote terminal 的统一启动元数据。
+    /// 构造本地 terminal 的统一启动元数据。
     ///
-    /// 适用场景：Agent 和 Workspace Terminal 共用。例：Remote -> 附加独立 SSH 参数与 shell。
+    /// 适用场景：Agent 和 Workspace Terminal 共用。例：workspace -> 启动元数据。
     pub(super) fn terminal_metadata_for_workspace(
         &self,
         workspace_index: usize,
     ) -> Option<TerminalWorkspaceMetadata> {
-        let workspace = self.workspaces.get(workspace_index)?;
-        let mut metadata = TerminalWorkspaceMetadata::from_workspace(workspace);
-        if workspace.remote.is_some() {
-            let runtime = self.remote_workspaces.get(workspace_index)?.as_ref()?;
-            let shell = runtime.shell?;
-            metadata.remote = Some(RemoteTerminalMetadata {
-                config: workspace.remote.clone()?,
-                shell,
-                network_settings: runtime.network_settings.clone(),
-            });
-        }
-        Some(metadata)
+        self.workspaces
+            .get(workspace_index)
+            .map(TerminalWorkspaceMetadata::from_workspace)
     }
 
     /// Returns the last known activity for an agent slot.
@@ -1119,14 +1110,6 @@ impl GsdvGuiApp {
     ) {
         let repaint_interval = self.max_repaint_interval();
         if workspace_index >= self.terminal_hosts.len() {
-            return;
-        }
-        if self
-            .workspaces
-            .get(workspace_index)
-            .is_some_and(|workspace| workspace.remote.is_some())
-            && !self.remote_workspace_is_enabled(workspace_index)
-        {
             return;
         }
         if kind == TerminalSurfaceKind::Helix {
@@ -1292,14 +1275,6 @@ impl GsdvGuiApp {
             return;
         }
         let workspace_index = self.active_workspace;
-        if self
-            .workspaces
-            .get(workspace_index)
-            .is_some_and(|workspace| workspace.remote.is_some())
-            && !self.remote_workspace_is_enabled(workspace_index)
-        {
-            return;
-        }
         let Some(workspace) = self
             .workspaces
             .get(workspace_index)
