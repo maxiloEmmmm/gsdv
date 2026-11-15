@@ -96,7 +96,7 @@ impl GsdvGuiApp {
     pub(super) fn terminal_host_surface(&mut self, ui: &mut Ui, kind: TerminalSurfaceKind) {
         if kind == TerminalSurfaceKind::Agent {
             let slot = self.active_agent_slot();
-            self.agent_terminal_host_surface(ui, slot, None);
+            self.agent_terminal_host_surface(ui, slot, None, false);
             return;
         }
         self.ensure_terminal_host(ui.ctx(), kind);
@@ -244,7 +244,7 @@ impl GsdvGuiApp {
             }
         }
         if let Some(reply) = quick_reply {
-            self.submit_active_agent_quick_reply(ui.ctx(), reply);
+            self.submit_agent_quick_reply(ui.ctx(), &agent_slot, reply);
         }
         if let Some(output) = host_output
             && let Some(click) = output.output_click
@@ -269,6 +269,7 @@ impl GsdvGuiApp {
         ui: &mut Ui,
         agent_slot: AgentSlotId,
         grid_menu: Option<AgentGridMenuContext<'_>>,
+        force_input: bool,
     ) {
         if self.agent_slot_manually_stopped(self.active_workspace, &agent_slot) {
             if self.focused_agent_slot(self.active_workspace).as_ref() == Some(&agent_slot) {
@@ -284,7 +285,7 @@ impl GsdvGuiApp {
         }
         self.ensure_agent_terminal_host(ui.ctx(), self.active_workspace, &agent_slot);
         let focused_slot = self.focused_agent_slot(self.active_workspace);
-        let slot_accepts_input = focused_slot.as_ref() == Some(&agent_slot);
+        let slot_accepts_input = force_input || focused_slot.as_ref() == Some(&agent_slot);
         let surface_route_active =
             !self.workspace_terminal_drawer_is_open() && !self.reviewer_helix_drawer_is_open();
         let accept_input = slot_accepts_input
@@ -1377,11 +1378,23 @@ impl GsdvGuiApp {
         let Some(slot_id) = self.focused_agent_slot(self.active_workspace) else {
             return false;
         };
-        self.ensure_agent_terminal_host(ctx, self.active_workspace, &slot_id);
+        self.submit_agent_quick_reply(ctx, &slot_id, text)
+    }
+
+    /// 向指定 Agent slot 直接提交一条快捷回复。
+    ///
+    /// 适用场景：Workflow Agent 不属于普通网格焦点。例：右键“继续” -> 当前 Workflow slot。
+    fn submit_agent_quick_reply(
+        &mut self,
+        ctx: &egui::Context,
+        slot_id: &AgentSlotId,
+        text: &str,
+    ) -> bool {
+        self.ensure_agent_terminal_host(ctx, self.active_workspace, slot_id);
         let Some(host) = self
             .terminal_hosts
             .get_mut(self.active_workspace)
-            .and_then(|hosts| hosts.agents.get_mut(&slot_id))
+            .and_then(|hosts| hosts.agents.get_mut(slot_id))
             .and_then(|slot| slot.host.as_mut())
         else {
             return false;

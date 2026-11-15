@@ -580,6 +580,13 @@ impl GsdvGuiApp {
                     document.markdown_preview_heading_offsets.clear();
                     document.markdown_preview_max_scroll_y = 0.0;
                 }
+                self.request_document_local_images(index);
+            }
+            AppEvent::RequestLocalImage { path, gallery } => {
+                self.request_local_image(path, gallery);
+            }
+            AppEvent::LocalImageLoaded { path, result } => {
+                self.apply_local_image_loaded(ctx, path, result);
             }
             AppEvent::MemoSaved { index, error } => {
                 if let Some(slot) = self.memo_save_errors.get_mut(index) {
@@ -696,6 +703,7 @@ impl GsdvGuiApp {
                     match result {
                         Ok(loaded) => {
                             document.path = Some(path.clone());
+                            document.absolute_path = Some(absolute.clone());
                             document.loading_path = None;
                             document.text = loaded.text.clone();
                             document.saved_text = loaded.text;
@@ -707,6 +715,7 @@ impl GsdvGuiApp {
                         }
                         Err(error) => {
                             document.path = Some(path.clone());
+                            document.absolute_path = Some(absolute.clone());
                             document.loading_path = None;
                             document.text.clear();
                             document.saved_text.clear();
@@ -722,6 +731,7 @@ impl GsdvGuiApp {
                     document.markdown_preview_max_scroll_y = 0.0;
                     document.markdown_editor_max_scroll_y = 0.0;
                 }
+                self.request_document_local_images(index);
             }
             AppEvent::DocumentSaved {
                 index,
@@ -792,6 +802,26 @@ impl GsdvGuiApp {
                     request,
                     result,
                 );
+            }
+            AppEvent::WorkflowAgentSidecarSaved {
+                index,
+                sidecar_path,
+                revision,
+                result,
+            } => {
+                let final_result =
+                    self.finish_workflow_agent_sidecar_save(index, sidecar_path.clone(), revision);
+                if final_result && let Err(error) = result {
+                    self.push_toast(
+                        format!(
+                            "Workflow Agent save failed: {}: {error}",
+                            sidecar_path.display()
+                        ),
+                        theme::danger(),
+                    );
+                } else if final_result && index < self.workspaces.len() {
+                    self.request_app_repaint();
+                }
             }
             AppEvent::MarkdownDiffPromptBuilt { result } => match result {
                 Ok(text) if text.trim().is_empty() => {
@@ -911,8 +941,10 @@ impl GsdvGuiApp {
             AppEvent::TerminalHostSpawned { key, result } => {
                 let spawned = result.is_ok();
                 self.pending_terminal_spawns.remove(&key);
+                let bootstrap_key = key.clone();
                 self.apply_terminal_spawn_result(key, result);
                 if spawned {
+                    self.submit_workflow_agent_bootstrap(&bootstrap_key);
                     self.queue_app_event(AppEvent::SyncTerminalEventRepaintFlags);
                 }
             }
@@ -931,7 +963,9 @@ impl GsdvGuiApp {
                 self.queue_app_event(AppEvent::SyncTerminalEventRepaintFlags);
             }
             AppEvent::TerminalRuntime(event) => {
+                let terminal_id = event.id;
                 self.apply_terminal_runtime_event(ctx, event);
+                self.submit_workflow_agent_bootstrap_for_terminal(terminal_id);
             }
             AppEvent::TerminalFileHelixSpecBuilt {
                 workspace_index,

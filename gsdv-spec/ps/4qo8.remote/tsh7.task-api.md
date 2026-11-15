@@ -1,6 +1,6 @@
 实现 gsdv 内置 remote HTTP API 与 agent WebSocket API。
 
-## [x] 增加 remote server 设置项
+## [x]9gxkmx 增加 remote server 设置项
 新增 Web/API 服务运行设置。
 
 已明确配置：
@@ -18,7 +18,7 @@
 - UI 入口在 Settings -> Runtime 的 Remote server 小节
 - 修改 remote server 设置后重启 listener
 
-## [x] 设计 HTTP API 路由
+## [x]i1k4i0 设计 HTTP API 路由
 定义 workspace 元数据与 agent 操作接口。
 
 已明确需要接口：
@@ -126,7 +126,7 @@ agent 操作成功响应：
 - `404`：agent 不存在，或对应 terminal host 未就绪
 - `500`：内部错误
 
-## [x] 设计 agent 输出 WebSocket 路由
+## [x]m15mx7 设计 agent 输出 WebSocket 路由
 定义绑定特定 agent 的 WebSocket 接口。
 
 已明确行为：
@@ -234,7 +234,7 @@ terminal 数据说明：
 - 客户端断线后重新连接同一个 URL
 - 重连成功后服务端重新发送完整 `snapshot`，再继续发送 `append`
 
-## [x] 接入唯一 AppEvent 队列
+## [x]lgagh5 接入唯一 AppEvent 队列
 保证 remote server 不直接修改 UI 状态。
 
 实现约束：
@@ -244,7 +244,7 @@ terminal 数据说明：
 - 慢操作必须异步完成后再投递结果事件
 - agent 输入、esc、图片发送必须复用现有 terminal/agent owner 路径
 
-## [ ] 接入 agent 输出广播源
+## [ ]1f1r3l 接入 agent 输出广播源
 让 WebSocket 能订阅 agent terminal 输出。
 
 实现约束：

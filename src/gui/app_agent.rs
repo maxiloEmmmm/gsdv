@@ -43,7 +43,7 @@ impl GsdvGuiApp {
             .get(self.active_workspace)
             .cloned()
             .unwrap_or(AgentSlotId::Main);
-        if self.agent_slot_exists(self.active_workspace, &slot) {
+        if self.ordinary_agent_slot_exists(self.active_workspace, &slot) {
             slot
         } else {
             AgentSlotId::Main
@@ -66,12 +66,13 @@ impl GsdvGuiApp {
             return None;
         }
         let slot = AgentSlotId::from_column_slot(&column.active_slot);
-        self.agent_slot_exists(index, &slot).then_some(slot)
+        self.ordinary_agent_slot_exists(index, &slot)
+            .then_some(slot)
     }
 
     /// 设置指定 workspace 的 Agent 槽位，适用于槽位右键菜单动作。
     pub(super) fn set_active_agent_slot(&mut self, index: usize, slot: AgentSlotId) {
-        if !self.agent_slot_exists(index, &slot) {
+        if !self.ordinary_agent_slot_exists(index, &slot) {
             return;
         }
         if let Some(active) = self.active_agent_slots.get_mut(index) {
@@ -90,6 +91,22 @@ impl GsdvGuiApp {
                 .subagents
                 .iter()
                 .any(|subagent| &subagent.id == id),
+        }
+    }
+
+    /// 判断槽位是否允许出现在一级 Agent 界面。
+    ///
+    /// 适用场景：恢复当前槽位或处理普通 Agent 菜单。例：Workflow Agent -> false。
+    fn ordinary_agent_slot_exists(&self, index: usize, slot: &AgentSlotId) -> bool {
+        let Some(workspace) = self.workspaces.get(index) else {
+            return false;
+        };
+        match slot {
+            AgentSlotId::Main => true,
+            AgentSlotId::Subagent(id) => workspace
+                .subagents
+                .iter()
+                .any(|subagent| &subagent.id == id && subagent.workflow_target.is_none()),
         }
     }
 
@@ -285,11 +302,11 @@ impl GsdvGuiApp {
                 subagent.agent_model = next_model.clone();
             }
         }
-        self.persist_workspaces();
+        self.persist_agent_slot_change(index, &slot);
         if let Some(hosts) = self.terminal_hosts.get_mut(index) {
             hosts.agents.remove(&slot);
         }
-        self.spawn_terminal_host_for_workspace(ctx, index, TerminalSurfaceKind::Agent);
+        self.ensure_agent_terminal_host(ctx, index, &slot);
         self.push_toast(
             if next_model.is_some() {
                 i18n::text(self.app_language, "Agent model set")
@@ -333,11 +350,11 @@ impl GsdvGuiApp {
                 subagent.agent_model_provider = next_provider.clone();
             }
         }
-        self.persist_workspaces();
+        self.persist_agent_slot_change(index, &slot);
         if let Some(hosts) = self.terminal_hosts.get_mut(index) {
             hosts.agents.remove(&slot);
         }
-        self.spawn_terminal_host_for_workspace(ctx, index, TerminalSurfaceKind::Agent);
+        self.ensure_agent_terminal_host(ctx, index, &slot);
         self.push_toast(
             if next_provider.is_some() {
                 i18n::text(self.app_language, "Agent model provider set")
@@ -386,11 +403,11 @@ impl GsdvGuiApp {
                 subagent.agent_work_dir = next_work_dir.clone();
             }
         }
-        self.persist_workspaces();
+        self.persist_agent_slot_change(index, &slot);
         if let Some(hosts) = self.terminal_hosts.get_mut(index) {
             hosts.agents.remove(&slot);
         }
-        self.spawn_terminal_host_for_workspace(ctx, index, TerminalSurfaceKind::Agent);
+        self.ensure_agent_terminal_host(ctx, index, &slot);
         self.push_toast(
             if next_work_dir.is_some() {
                 i18n::text(self.app_language, "Agent work-dir set")
@@ -436,7 +453,7 @@ impl GsdvGuiApp {
                 subagent.helix_work_dir = next_work_dir.clone();
             }
         }
-        self.persist_workspaces();
+        self.persist_agent_slot_change(index, &slot);
         self.push_toast(
             if next_work_dir.is_some() {
                 i18n::text(self.app_language, "Code work-dir set")
@@ -480,11 +497,11 @@ impl GsdvGuiApp {
                 subagent.agent_effort = next_effort.clone();
             }
         }
-        self.persist_workspaces();
+        self.persist_agent_slot_change(index, &slot);
         if let Some(hosts) = self.terminal_hosts.get_mut(index) {
             hosts.agents.remove(&slot);
         }
-        self.spawn_terminal_host_for_workspace(ctx, index, TerminalSurfaceKind::Agent);
+        self.ensure_agent_terminal_host(ctx, index, &slot);
         self.push_toast(
             if next_effort.is_some() {
                 i18n::text(self.app_language, "Agent effort set")
@@ -528,11 +545,11 @@ impl GsdvGuiApp {
                 subagent.agent_fast_mode = next_fast_mode;
             }
         }
-        self.persist_workspaces();
+        self.persist_agent_slot_change(index, &slot);
         if let Some(hosts) = self.terminal_hosts.get_mut(index) {
             hosts.agents.remove(&slot);
         }
-        self.spawn_terminal_host_for_workspace(ctx, index, TerminalSurfaceKind::Agent);
+        self.ensure_agent_terminal_host(ctx, index, &slot);
         self.push_toast(
             if next_fast_mode.is_some() {
                 i18n::text(self.app_language, "Agent fast mode set")
@@ -788,12 +805,12 @@ impl GsdvGuiApp {
         resume: bool,
     ) {
         self.clear_agent_slot_session(index, &slot, resume);
-        self.persist_workspaces();
+        self.persist_agent_slot_change(index, &slot);
 
         if let Some(hosts) = self.terminal_hosts.get_mut(index) {
             hosts.agents.remove(&slot);
         }
-        self.spawn_terminal_host_for_workspace(ctx, index, TerminalSurfaceKind::Agent);
+        self.ensure_agent_terminal_host(ctx, index, &slot);
         self.push_toast(
             if resume {
                 i18n::text(self.app_language, "Agent restarted with resume")
@@ -831,11 +848,11 @@ impl GsdvGuiApp {
             return;
         }
         self.set_agent_slot_kind(index, &slot, next_kind);
-        self.persist_workspaces();
+        self.persist_agent_slot_change(index, &slot);
         if let Some(hosts) = self.terminal_hosts.get_mut(index) {
             hosts.agents.remove(&slot);
         }
-        self.spawn_terminal_host_for_workspace(ctx, index, TerminalSurfaceKind::Agent);
+        self.ensure_agent_terminal_host(ctx, index, &slot);
         self.push_toast(
             i18n::text_with_arg(
                 self.app_language,

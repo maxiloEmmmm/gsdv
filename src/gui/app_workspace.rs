@@ -703,12 +703,15 @@ impl GsdvGuiApp {
             0 => AgentSlotId::Main,
             1 => workspace
                 .subagents
-                .first()
+                .iter()
+                .find(|subagent| subagent.workflow_target.is_none())
                 .map(|subagent| AgentSlotId::Subagent(subagent.id.clone()))
                 .unwrap_or(AgentSlotId::Main),
             2 => workspace
                 .subagents
-                .get(1)
+                .iter()
+                .filter(|subagent| subagent.workflow_target.is_none())
+                .nth(1)
                 .map(|subagent| AgentSlotId::Subagent(subagent.id.clone()))
                 .unwrap_or(AgentSlotId::Main),
             _ => return,
@@ -993,7 +996,8 @@ impl GsdvGuiApp {
             return;
         }
         subagent.name = name.to_string();
-        self.persist_workspaces();
+        let slot = AgentSlotId::Subagent(id.to_string());
+        self.persist_agent_slot_change(index, &slot);
         self.request_app_repaint();
     }
 

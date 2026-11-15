@@ -16,10 +16,12 @@ const AGENT_INPUT_TRANSLATION_MODEL: &str = "gpt-5.4-mini";
 
 impl GsdvGuiApp {
     /// 启动 app 级 hook server，接收 Helix 等外部 hook 数据。
-    pub(super) fn spawn_external_hook_server(&self) {
+    pub(super) fn spawn_external_hook_server(&self, repaint_ctx: egui::Context) {
         let tx = self.app_event_tx.clone();
+        let repaint_controller = self.repaint_controller.clone();
         self.background_runtime.spawn(async move {
-            if let Err(error) = run_external_hook_server(tx).await {
+            if let Err(error) = run_external_hook_server(tx, repaint_ctx, repaint_controller).await
+            {
                 eprintln!("gsdv hook server failed: {error}");
             }
         });
@@ -1551,7 +1553,11 @@ async fn prune_markdown_diff_history(dir: &Path) -> Result<(), String> {
 }
 
 /// 运行平台相关 hook server。
-async fn run_external_hook_server(tx: Sender<AppEvent>) -> anyhow::Result<()> {
+async fn run_external_hook_server(
+    tx: Sender<AppEvent>,
+    repaint_ctx: egui::Context,
+    repaint_controller: repaint_gate::RepaintController,
+) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         use tokio::io::AsyncReadExt;
@@ -1569,6 +1575,8 @@ async fn run_external_hook_server(tx: Sender<AppEvent>) -> anyhow::Result<()> {
                 "server accepted connection endpoint={endpoint}"
             ));
             let tx = tx.clone();
+            let repaint_ctx = repaint_ctx.clone();
+            let repaint_controller = repaint_controller.clone();
             tokio::spawn(async move {
                 let mut len = [0_u8; 4];
                 if let Err(error) = stream.read_exact(&mut len).await {
@@ -1593,8 +1601,13 @@ async fn run_external_hook_server(tx: Sender<AppEvent>) -> anyhow::Result<()> {
                             "server parsed key={} data={}",
                             event.key, event.data
                         ));
-                        if let Err(error) = tx.send(AppEvent::ExternalHook(event)) {
-                            hook::hook_info(format_args!("server enqueue failed error={error}"));
+                        match tx.send(AppEvent::ExternalHook(event)) {
+                            Ok(()) => repaint_controller.request_repaint(&repaint_ctx),
+                            Err(error) => {
+                                hook::hook_info(format_args!(
+                                    "server enqueue failed error={error}"
+                                ));
+                            }
                         }
                     }
                     Err(error) => {
@@ -1619,6 +1632,8 @@ async fn run_external_hook_server(tx: Sender<AppEvent>) -> anyhow::Result<()> {
                 "server accepted connection endpoint={endpoint}"
             ));
             let tx = tx.clone();
+            let repaint_ctx = repaint_ctx.clone();
+            let repaint_controller = repaint_controller.clone();
             tokio::spawn(async move {
                 let mut len = [0_u8; 4];
                 if let Err(error) = pipe.read_exact(&mut len).await {
@@ -1643,8 +1658,13 @@ async fn run_external_hook_server(tx: Sender<AppEvent>) -> anyhow::Result<()> {
                             "server parsed key={} data={}",
                             event.key, event.data
                         ));
-                        if let Err(error) = tx.send(AppEvent::ExternalHook(event)) {
-                            hook::hook_info(format_args!("server enqueue failed error={error}"));
+                        match tx.send(AppEvent::ExternalHook(event)) {
+                            Ok(()) => repaint_controller.request_repaint(&repaint_ctx),
+                            Err(error) => {
+                                hook::hook_info(format_args!(
+                                    "server enqueue failed error={error}"
+                                ));
+                            }
                         }
                     }
                     Err(error) => {

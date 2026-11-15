@@ -2,20 +2,410 @@
 //!
 //! 本模块只处理文件内容和结构化数据，不直接修改 egui 渲染状态。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+use rand::Rng;
+use serde::{Deserialize, Serialize};
+
+use crate::gui::data::{
+    SubagentViewData, WorkflowAgentTarget, WorkflowAgentTargetKind, WorkspaceActivity,
+};
+
 /// workspace 根目录下的 workflow 规范目录。
 const GSDV_SPEC_DIR: &str = "gsdv-spec";
-/// 根项目索引文件名。
-const ROOT_MD: &str = "root.md";
+/// 历史根项目索引文件名，仅用于惰性迁移。
+const LEGACY_ROOT_MD: &str = "root.md";
 /// 子项目目录名。
 const PROJECTS_DIR: &str = "ps";
 /// task 文件名前缀。
 const TASK_PREFIX: &str = "task-";
 /// Markdown 文件扩展名。
 const MARKDOWN_EXT: &str = "md";
+/// Repo、Project 和 Task 的稳定短 ID 长度。
+pub(super) const NODE_ID_LEN: usize = 4;
+/// Step 的 task 内稳定短 ID 长度。
+const STEP_ID_LEN: usize = 6;
+/// workflow agent sidecar 的通用文件名。
+pub(super) const WORKFLOW_AGENT_FILE: &str = ".gsdv-wf-agents";
+/// workflow agent sidecar 的 task 文件后缀。
+pub(super) const WORKFLOW_TASK_AGENT_SUFFIX: &str = ".gsdv-wf-agents";
+/// gsdv-spec 下必须忽略的 workflow agent sidecar 规则。
+const WORKFLOW_GITIGNORE_RULES: [&str; 2] = [".gsdv-wf-agents", ".*.gsdv-wf-agents"];
+
+/// 判断字符串是否是固定长度的小写 base36 ID。
+///
+/// 适用场景：文件名和 step heading 的稳定身份校验。例：`a1b2, 4 -> true`。
+pub(super) fn is_stable_id(value: &str, len: usize) -> bool {
+    value.len() == len
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+}
+
+/// 拆分 `<id>.<原名>`，只接受严格稳定 ID。
+///
+/// 适用场景：Project 目录和 Task 文件名。例：`a1b2.main -> (a1b2, main)`。
+pub(super) fn split_stable_name(value: &str, id_len: usize) -> Option<(&str, &str)> {
+    let (id, name) = value.split_once('.')?;
+    (is_stable_id(id, id_len) && !name.is_empty()).then_some((id, name))
+}
+
+/// 生成在给定局部范围内不重复的小写 base36 ID。
+///
+/// 适用场景：Repo/Project/Task/Step 创建与迁移。例：已有 `a1b2` -> 新四位 ID。
+pub(super) fn generate_short_id<'a>(len: usize, used: impl Iterator<Item = &'a str>) -> String {
+    let used = used.collect::<std::collections::BTreeSet<_>>();
+    const ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    loop {
+        let mut rng = rand::rng();
+        let id = (0..len)
+            .map(|_| ALPHABET[rng.random_range(0..ALPHABET.len())] as char)
+            .collect::<String>();
+        if !used.contains(id.as_str()) {
+            return id;
+        }
+    }
+}
+
+/// 解析 checkbox heading 的状态和紧随 `]` 的剩余文本。
+///
+/// 适用场景：严格新格式与旧格式迁移共享前缀识别。例：`## [ ]a1b2c3 x -> (false, a1b2c3 x)`。
+fn checkbox_step_rest(line: &str) -> Option<(bool, &str)> {
+    let rest = line.strip_prefix("## ")?;
+    if let Some(rest) = rest.strip_prefix("[ ]") {
+        Some((false, rest))
+    } else if let Some(rest) = rest.strip_prefix("[x]") {
+        Some((true, rest))
+    } else if let Some(rest) = rest.strip_prefix("[X]") {
+        Some((true, rest))
+    } else {
+        None
+    }
+}
+
+/// 判断路径是否是 `<4位ID>.root.md`。
+///
+/// 适用场景：Repo 根文件发现。例：`a1b2.root.md -> true`。
+pub(super) fn is_repo_root_path(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(id) = name.strip_suffix(".root.md") else {
+        return false;
+    };
+    is_stable_id(id, NODE_ID_LEN)
+}
+
+/// 从 Repo 根文件名读取稳定 ID。
+///
+/// 适用场景：构建 WorkflowTree。例：`a1b2.root.md -> a1b2`。
+fn repo_id_from_root_path(path: &Path) -> Result<String, String> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("invalid workflow root path: {}", path.display()))?;
+    let id = name
+        .strip_suffix(".root.md")
+        .filter(|id| is_stable_id(id, NODE_ID_LEN))
+        .ok_or_else(|| format!("invalid workflow repo id: {}", path.display()))?;
+    Ok(id.to_string())
+}
+
+/// 查找 gsdv-spec 内唯一的稳定 Repo 根文件。
+///
+/// 适用场景：本地加载和嵌套 repo 发现。例：一个 `a1b2.root.md -> Some(path)`。
+fn workflow_root_file(spec_root: &Path) -> Result<Option<PathBuf>, String> {
+    if !spec_root.is_dir() {
+        return Ok(None);
+    }
+    let mut roots = fs::read_dir(spec_root)
+        .map_err(|error| format!("failed to read {}: {error}", spec_root.display()))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && is_repo_root_path(path))
+        .collect::<Vec<_>>();
+    roots.sort();
+    match roots.len() {
+        0 => Ok(None),
+        1 => Ok(roots.pop()),
+        _ => Err(format!(
+            "multiple workflow repo roots found in {}",
+            spec_root.display()
+        )),
+    }
+}
+
+/// 判断规范目录是否含旧版或稳定 Repo 根文件。
+///
+/// 适用场景：惰性迁移前发现嵌套 repo；旧 `root.md` 也必须进入迁移。例：legacy root -> true。
+fn workflow_repo_has_root(spec_root: &Path) -> Result<bool, String> {
+    Ok(spec_root.join(LEGACY_ROOT_MD).is_file() || workflow_root_file(spec_root)?.is_some())
+}
+
+/// 为一个本地 repo 的旧 Workflow 结构惰性补齐全部稳定 ID。
+///
+/// 触发条件：打开 Workflow；只改 gsdv-spec 内受规范管理的文件。
+/// 不能依赖 UI 索引：迁移后 Agent 关联必须由文件内 ID 稳定定位。
+/// 例：`root.md + ps/main/task-a.md -> a1b2.root.md + ps/c3d4.main/e5f6.task-a.md`。
+fn migrate_workflow_repo(repo_root: &Path) -> Result<(), String> {
+    let spec_root = repo_root.join(GSDV_SPEC_DIR);
+    if !spec_root.is_dir() {
+        return Err(format!("{} not found", spec_root.display()));
+    }
+    ensure_workflow_gitignore(&spec_root)?;
+    migrate_repo_root_file(&spec_root)?;
+    let projects_root = spec_root.join(PROJECTS_DIR);
+    let project_dirs = sorted_dirs(&projects_root)?
+        .into_iter()
+        .filter(|path| path.join(LEGACY_ROOT_MD).is_file())
+        .collect::<Vec<_>>();
+    let mut used_project_ids = Vec::new();
+    for project_dir in &project_dirs {
+        let Some(name) = project_dir.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if let Some((id, _)) = split_stable_name(name, NODE_ID_LEN) {
+            if used_project_ids.iter().any(|existing| existing == id) {
+                return Err(format!("duplicate workflow project id: {id}"));
+            }
+            used_project_ids.push(id.to_string());
+        }
+    }
+    for project_dir in project_dirs {
+        let name = project_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("invalid workflow project path: {}", project_dir.display()))?;
+        let final_dir = if split_stable_name(name, NODE_ID_LEN).is_some() {
+            project_dir
+        } else {
+            let id = generate_short_id(NODE_ID_LEN, used_project_ids.iter().map(String::as_str));
+            used_project_ids.push(id.clone());
+            let target = projects_root.join(format!("{id}.{name}"));
+            fs::rename(&project_dir, &target).map_err(|error| {
+                format!(
+                    "failed to migrate {} to {}: {error}",
+                    project_dir.display(),
+                    target.display()
+                )
+            })?;
+            target
+        };
+        migrate_project_tasks(&final_dir)?;
+    }
+    Ok(())
+}
+
+/// 创建或增量补齐 gsdv-spec/.gitignore 的 sidecar 通配规则。
+///
+/// 适用场景：初始化和惰性迁移；保留用户已有内容。例：已有一条规则 -> 只追加缺失项。
+fn ensure_workflow_gitignore(spec_root: &Path) -> Result<(), String> {
+    let path = spec_root.join(".gitignore");
+    let current = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(format!("failed to read {}: {error}", path.display())),
+    };
+    let existing = current
+        .lines()
+        .map(str::trim)
+        .collect::<std::collections::BTreeSet<_>>();
+    let missing = WORKFLOW_GITIGNORE_RULES
+        .iter()
+        .filter(|rule| !existing.contains(**rule))
+        .copied()
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let mut next = current;
+    if !next.is_empty() && !next.ends_with('\n') {
+        next.push('\n');
+    }
+    for rule in missing {
+        next.push_str(rule);
+        next.push('\n');
+    }
+    atomic_write(&path, next.as_bytes())
+}
+
+/// 将旧 root.md 迁移为带四位 Repo ID 的根文件。
+///
+/// 适用场景：首次打开旧规范。例：`root.md -> a1b2.root.md`。
+fn migrate_repo_root_file(spec_root: &Path) -> Result<(), String> {
+    let stable = workflow_root_file(spec_root)?;
+    let legacy = spec_root.join(LEGACY_ROOT_MD);
+    match (stable, legacy.is_file()) {
+        (Some(_), false) => Ok(()),
+        (Some(_), true) => Err(format!(
+            "legacy and stable workflow repo roots both exist in {}",
+            spec_root.display()
+        )),
+        (None, true) => {
+            let id = generate_short_id(NODE_ID_LEN, std::iter::empty());
+            let target = spec_root.join(format!("{id}.root.md"));
+            fs::rename(&legacy, &target).map_err(|error| {
+                format!(
+                    "failed to migrate {} to {}: {error}",
+                    legacy.display(),
+                    target.display()
+                )
+            })
+        }
+        (None, false) => Err(format!("{} not found", spec_root.display())),
+    }
+}
+
+/// 迁移一个 Project 目录内的 Task 文件与 Step heading。
+///
+/// 适用场景：Project 已有稳定目录 ID。例：`task-a.md -> e5f6.task-a.md`。
+fn migrate_project_tasks(project_dir: &Path) -> Result<(), String> {
+    let mut task_paths = fs::read_dir(project_dir)
+        .map_err(|error| format!("failed to read {}: {error}", project_dir.display()))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path.extension().is_some_and(|ext| ext == MARKDOWN_EXT)
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name.starts_with(TASK_PREFIX)
+                            || name.split_once('.').is_some_and(|(id, rest)| {
+                                is_stable_id(id, NODE_ID_LEN) && rest.starts_with(TASK_PREFIX)
+                            })
+                    })
+        })
+        .collect::<Vec<_>>();
+    task_paths.sort();
+    let mut used_task_ids = Vec::new();
+    for task_path in &task_paths {
+        let Some(stem) = task_path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if let Some((id, _)) = split_stable_name(stem, NODE_ID_LEN) {
+            if used_task_ids.iter().any(|existing| existing == id) {
+                return Err(format!("duplicate workflow task id: {id}"));
+            }
+            used_task_ids.push(id.to_string());
+        }
+    }
+    for task_path in task_paths {
+        let content = fs::read_to_string(&task_path)
+            .map_err(|error| format!("failed to read {}: {error}", task_path.display()))?;
+        let next_content = migrate_legacy_step_content(&content)?;
+        let stem = task_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .ok_or_else(|| format!("invalid workflow task path: {}", task_path.display()))?;
+        let final_path = if split_stable_name(stem, NODE_ID_LEN).is_some() {
+            task_path.clone()
+        } else {
+            let id = generate_short_id(NODE_ID_LEN, used_task_ids.iter().map(String::as_str));
+            used_task_ids.push(id.clone());
+            let target = project_dir.join(format!("{id}.{stem}.{MARKDOWN_EXT}"));
+            fs::rename(&task_path, &target).map_err(|error| {
+                format!(
+                    "failed to migrate {} to {}: {error}",
+                    task_path.display(),
+                    target.display()
+                )
+            })?;
+            target
+        };
+        if next_content != content {
+            atomic_write(&final_path, next_content.as_bytes())?;
+        }
+    }
+    Ok(())
+}
+
+/// 把旧 `## [ ] title` 批量改为严格 `## [ ]<6位ID> title`。
+///
+/// 适用场景：Task 惰性迁移；格式疑似新格式但 ID 非法时硬错误。
+/// 例：两个旧 step -> 两个 task 内不重复的六位 ID。
+pub(super) fn migrate_legacy_step_content(content: &str) -> Result<String, String> {
+    let mut lines = markdown_lines(content);
+    let mut used = Vec::<String>::new();
+    let mut changed = false;
+    for line in &lines {
+        if line.starts_with("## [") && checkbox_step_rest(line).is_none() {
+            return Err(format!("invalid workflow checkbox heading: {line}"));
+        }
+        let Some((_, rest)) = checkbox_step_rest(line) else {
+            continue;
+        };
+        if let Some(title) = rest.strip_prefix(' ') {
+            if title.trim().is_empty() {
+                return Err("workflow step title is empty".to_string());
+            }
+            continue;
+        }
+        if rest.len() <= STEP_ID_LEN || rest.as_bytes().get(STEP_ID_LEN) != Some(&b' ') {
+            return Err(format!("invalid workflow step id heading: {line}"));
+        }
+        let id = &rest[..STEP_ID_LEN];
+        if !is_stable_id(id, STEP_ID_LEN) || rest[STEP_ID_LEN + 1..].trim().is_empty() {
+            return Err(format!("invalid workflow step id heading: {line}"));
+        }
+        if used.iter().any(|existing| existing == id) {
+            return Err(format!("duplicate workflow step id: {id}"));
+        }
+        used.push(id.to_string());
+    }
+    for line in &mut lines {
+        let Some((checked, rest)) = checkbox_step_rest(line) else {
+            continue;
+        };
+        let Some(title) = rest.strip_prefix(' ') else {
+            if line.starts_with("## [X]") {
+                *line = line.replacen("## [X]", "## [x]", 1);
+                changed = true;
+            }
+            continue;
+        };
+        let id = generate_short_id(STEP_ID_LEN, used.iter().map(String::as_str));
+        used.push(id.clone());
+        *line = step_line_with_checked(&id, title.trim(), checked);
+        changed = true;
+    }
+    if changed {
+        Ok(join_markdown_lines(&lines))
+    } else {
+        Ok(content.to_string())
+    }
+}
+
+/// 使用同目录临时文件原子覆盖业务 sidecar 或 Markdown。
+///
+/// 适用场景：迁移中断不能留下半份 JSON/Markdown。例：`bytes -> temp -> rename`。
+fn atomic_write(path: &Path, content: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("path parent not found: {}", path.display()))?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+    let temp = parent.join(format!(
+        ".{}.gsdv-{:016x}",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("workflow"),
+        rand::random::<u64>()
+    ));
+    fs::write(&temp, content)
+        .map_err(|error| format!("failed to write {}: {error}", temp.display()))?;
+    fs::rename(&temp, path).map_err(|error| {
+        let _ = fs::remove_file(&temp);
+        format!(
+            "failed to replace {} with {}: {error}",
+            path.display(),
+            temp.display()
+        )
+    })
+}
 
 /// 判断路径是否属于 workspace 的 workflow 规范目录。
 pub(super) fn path_is_workflow_spec_path(workspace_root: &Path, path: &Path) -> bool {
@@ -29,20 +419,26 @@ pub(super) fn path_is_workflow_spec_path(workspace_root: &Path, path: &Path) -> 
 
 /// 判断加载错误是否表示 workflow 根文件还没初始化。
 pub(super) fn workflow_root_missing_error(workspace_root: &Path, error: &str) -> bool {
-    error == format!("{} not found", workflow_root_path(workspace_root).display())
+    error == format!("{} not found", workspace_root.join(GSDV_SPEC_DIR).display())
 }
 
 /// workflow 树加载结果。
 #[derive(Debug, Clone, Default)]
 pub(super) struct WorkflowTree {
+    /// 当前 repo 的四位稳定 ID。
+    pub id: String,
     /// 当前 workflow 所属 repo 相对 workspace 的路径；主 repo 为空。
     pub repo_path: PathBuf,
     /// workspace 内相对的 gsdv-spec 目录。
     pub spec_path: PathBuf,
     /// workspace 级 workflow root.md 相对 workspace 的路径。
     pub root_path: PathBuf,
+    /// workspace 级 root.md 的完整 Markdown 内容。
+    pub content: String,
     /// 当前 workspace 的 workflow 项目列表。
     pub projects: Vec<WorkflowProjectNode>,
+    /// 当前 repo 从分层 sidecar 加载的 Workflow Agent。
+    pub agents: Vec<SubagentViewData>,
     /// workspace 内手动或首次扫描发现的子 repo workflow。
     pub sub_workflows: Vec<WorkflowTree>,
 }
@@ -99,12 +495,16 @@ pub(super) fn workflow_project_state_key_from_path(project_path: &Path) -> Optio
 /// workflow 项目节点。
 #[derive(Debug, Clone)]
 pub(super) struct WorkflowProjectNode {
+    /// Repo 内唯一的四位稳定 ID。
+    pub id: String,
     /// 项目目录名，也是 tree 中的稳定 key。
     pub key: String,
     /// tree 中显示的项目名。
     pub label: String,
     /// 项目 root.md 相对 workspace 的路径。
     pub root_path: PathBuf,
+    /// 项目 root.md 的完整 Markdown 内容。
+    pub content: String,
     /// 项目下的 task 文档节点。
     pub tasks: Vec<WorkflowTaskNode>,
 }
@@ -112,6 +512,8 @@ pub(super) struct WorkflowProjectNode {
 /// workflow task 节点。
 #[derive(Debug, Clone)]
 pub(super) struct WorkflowTaskNode {
+    /// Project 内唯一的四位稳定 ID。
+    pub id: String,
     /// task 文件名去扩展名后的展示文本。
     pub label: String,
     /// task 文档相对 workspace 的路径。
@@ -125,6 +527,8 @@ pub(super) struct WorkflowTaskNode {
 /// workflow step 节点。
 #[derive(Debug, Clone)]
 pub(super) struct WorkflowStepNode {
+    /// Task 内唯一的六位稳定 ID。
+    pub id: String,
     /// step 在同级列表中的索引路径。
     pub path: Vec<usize>,
     /// step 标题，不包含 checkbox。
@@ -153,6 +557,427 @@ pub(super) enum WorkflowSelectionTarget {
         task_path: PathBuf,
         step_path: Vec<usize>,
     },
+}
+
+/// Workflow Agent sidecar 的版本化载荷。
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct WorkflowAgentFile {
+    /// 文件格式版本。
+    #[serde(default = "workflow_agent_file_version")]
+    version: u8,
+    /// 当前 sidecar 管理的 Agent 记录。
+    #[serde(default)]
+    agents: Vec<WorkflowAgentRecord>,
+}
+
+/// 一条目标与现有 Agent 配置的关联。
+#[derive(Debug, Deserialize, Serialize)]
+struct WorkflowAgentRecord {
+    /// 稳定 Workflow 目标。
+    target: WorkflowAgentTarget,
+    /// 复用普通 Subagent 的运行配置与 session。
+    agent: SubagentViewData,
+}
+
+/// 返回当前 Workflow Agent sidecar 版本。
+///
+/// 适用场景：旧 JSON 缺 version 时使用。例：缺字段 -> 1。
+const fn workflow_agent_file_version() -> u8 {
+    1
+}
+
+/// Workflow 目标解析出的 Agent 绑定信息。
+#[derive(Debug, Clone)]
+pub(super) struct WorkflowAgentBinding {
+    /// 创建或打开 Agent 后需要保持的 UI 选择。
+    pub selection: WorkflowSelectionTarget,
+    /// 稳定层级身份。
+    pub target: WorkflowAgentTarget,
+    /// sidecar 相对 workspace 的路径。
+    pub sidecar_path: PathBuf,
+    /// 创建面板默认展示名。
+    pub label: String,
+}
+
+/// 把当前树中的 UI 选择解析成稳定 Agent 目标与 sidecar。
+///
+/// 适用场景：右键 Agent、销毁与 Busy 冒泡。例：Step -> task 专属 sidecar + step ID。
+pub(super) fn workflow_agent_binding(
+    tree: &WorkflowTree,
+    selected: &WorkflowSelectionTarget,
+) -> Option<WorkflowAgentBinding> {
+    for owner in workflow_trees(tree) {
+        if let WorkflowSelectionTarget::WorkspaceRoot { root_path } = selected
+            && root_path == &owner.root_path
+        {
+            return Some(WorkflowAgentBinding {
+                selection: selected.clone(),
+                target: WorkflowAgentTarget {
+                    kind: WorkflowAgentTargetKind::Repo,
+                    repo_path: owner.repo_path.clone(),
+                    repo_id: owner.id.clone(),
+                    project_id: None,
+                    task_id: None,
+                    step_id: None,
+                },
+                sidecar_path: owner.spec_path.join(WORKFLOW_AGENT_FILE),
+                label: format!("Repo {}", owner.id),
+            });
+        }
+        for project in &owner.projects {
+            let project_dir = project.root_path.parent()?;
+            if let WorkflowSelectionTarget::Project { root_path } = selected
+                && root_path == &project.root_path
+            {
+                return Some(WorkflowAgentBinding {
+                    selection: selected.clone(),
+                    target: WorkflowAgentTarget {
+                        kind: WorkflowAgentTargetKind::Project,
+                        repo_path: owner.repo_path.clone(),
+                        repo_id: owner.id.clone(),
+                        project_id: Some(project.id.clone()),
+                        task_id: None,
+                        step_id: None,
+                    },
+                    sidecar_path: project_dir.join(WORKFLOW_AGENT_FILE),
+                    label: project.label.clone(),
+                });
+            }
+            for task in &project.tasks {
+                let task_sidecar =
+                    project_dir.join(format!(".{}{}", task.id, WORKFLOW_TASK_AGENT_SUFFIX));
+                if let WorkflowSelectionTarget::Task { task_path } = selected
+                    && task_path == &task.path
+                {
+                    return Some(WorkflowAgentBinding {
+                        selection: selected.clone(),
+                        target: WorkflowAgentTarget {
+                            kind: WorkflowAgentTargetKind::Task,
+                            repo_path: owner.repo_path.clone(),
+                            repo_id: owner.id.clone(),
+                            project_id: Some(project.id.clone()),
+                            task_id: Some(task.id.clone()),
+                            step_id: None,
+                        },
+                        sidecar_path: task_sidecar,
+                        label: task.label.clone(),
+                    });
+                }
+                if let WorkflowSelectionTarget::Step {
+                    task_path,
+                    step_path,
+                } = selected
+                    && task_path == &task.path
+                    && let Some(step) = workflow_step_node_at_path(&task.steps, step_path)
+                {
+                    return Some(WorkflowAgentBinding {
+                        selection: selected.clone(),
+                        target: WorkflowAgentTarget {
+                            kind: WorkflowAgentTargetKind::Step,
+                            repo_path: owner.repo_path.clone(),
+                            repo_id: owner.id.clone(),
+                            project_id: Some(project.id.clone()),
+                            task_id: Some(task.id.clone()),
+                            step_id: Some(step.id.clone()),
+                        },
+                        sidecar_path: task_sidecar,
+                        label: step.title.clone(),
+                    });
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 按索引路径定位 step 节点。
+///
+/// 适用场景：选择仍使用 UI path，持久化改用稳定 ID。例：`[1] -> 第二个 step`。
+fn workflow_step_node_at_path<'a>(
+    nodes: &'a [WorkflowStepNode],
+    path: &[usize],
+) -> Option<&'a WorkflowStepNode> {
+    let (first, rest) = path.split_first()?;
+    let node = nodes.get(*first)?;
+    if rest.is_empty() {
+        Some(node)
+    } else {
+        workflow_step_node_at_path(&node.children, rest)
+    }
+}
+
+/// 从本地分层 sidecar 加载当前 repo 的 Workflow Agent。
+///
+/// 适用场景：Workflow tree 后台加载；缺 sidecar 等同于无 Agent。例：Repo + 2 Task 文件 -> 合并 records。
+fn load_local_workflow_agents(
+    workspace_root: &Path,
+    tree: &WorkflowTree,
+) -> Result<Vec<SubagentViewData>, String> {
+    let mut agents = Vec::new();
+    let mut seen_targets = BTreeSet::new();
+    for sidecar_path in workflow_agent_sidecar_paths(tree) {
+        let absolute = workspace_root.join(&sidecar_path);
+        let content = match fs::read_to_string(&absolute) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!("failed to read {}: {error}", absolute.display()));
+            }
+        };
+        append_workflow_agent_file(
+            &content,
+            &sidecar_path,
+            workspace_root,
+            tree,
+            &mut seen_targets,
+            &mut agents,
+        )?;
+    }
+    Ok(agents)
+}
+
+/// 从 Remote inventory 中加载当前 repo 的 Workflow Agent sidecar。
+///
+/// 适用场景：SSH inventory 已把 JSON 当作长度帧文档带回。例：`.a1b2.gsdv-wf-agents -> agents`。
+fn load_document_workflow_agents(
+    documents: &BTreeMap<PathBuf, String>,
+    agent_scope: &Path,
+    tree: &WorkflowTree,
+) -> Result<Vec<SubagentViewData>, String> {
+    let mut agents = Vec::new();
+    let mut seen_targets = BTreeSet::new();
+    for (path, content) in documents.iter().filter(|(path, _)| {
+        path.starts_with(&tree.spec_path)
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name == WORKFLOW_AGENT_FILE
+                        || (name.starts_with('.') && name.ends_with(WORKFLOW_TASK_AGENT_SUFFIX))
+                })
+    }) {
+        append_workflow_agent_file(
+            content,
+            path,
+            agent_scope,
+            tree,
+            &mut seen_targets,
+            &mut agents,
+        )?;
+    }
+    Ok(agents)
+}
+
+/// 返回一棵 repo tree 管理的全部 Workflow Agent sidecar 路径。
+///
+/// 适用场景：本地加载只读规范路径，不扫描无关隐藏文件。例：Repo + Project + Task 路径集合。
+fn workflow_agent_sidecar_paths(tree: &WorkflowTree) -> Vec<PathBuf> {
+    let mut paths = vec![tree.spec_path.join(WORKFLOW_AGENT_FILE)];
+    for project in &tree.projects {
+        let Some(project_dir) = project.root_path.parent() else {
+            continue;
+        };
+        paths.push(project_dir.join(WORKFLOW_AGENT_FILE));
+        paths.extend(
+            project.tasks.iter().map(|task| {
+                project_dir.join(format!(".{}{}", task.id, WORKFLOW_TASK_AGENT_SUFFIX))
+            }),
+        );
+    }
+    paths
+}
+
+/// 由稳定目标反查其唯一合法 sidecar 路径。
+///
+/// 适用场景：加载 JSON 时拒绝孤儿目标和层级错放。例：Step 记录只能位于所属 Task sidecar。
+fn workflow_agent_target_sidecar(
+    tree: &WorkflowTree,
+    target: &WorkflowAgentTarget,
+) -> Option<PathBuf> {
+    if target.repo_path != tree.repo_path || target.repo_id != tree.id {
+        return None;
+    }
+    if target.kind == WorkflowAgentTargetKind::Repo {
+        return (target.project_id.is_none()
+            && target.task_id.is_none()
+            && target.step_id.is_none())
+        .then(|| tree.spec_path.join(WORKFLOW_AGENT_FILE));
+    }
+    let project_id = target.project_id.as_deref()?;
+    let project = tree
+        .projects
+        .iter()
+        .find(|project| project.id == project_id)?;
+    let project_dir = project.root_path.parent()?;
+    if target.kind == WorkflowAgentTargetKind::Project {
+        return (target.task_id.is_none() && target.step_id.is_none())
+            .then(|| project_dir.join(WORKFLOW_AGENT_FILE));
+    }
+    let task_id = target.task_id.as_deref()?;
+    let task = project.tasks.iter().find(|task| task.id == task_id)?;
+    let task_sidecar = project_dir.join(format!(".{}{}", task.id, WORKFLOW_TASK_AGENT_SUFFIX));
+    match target.kind {
+        WorkflowAgentTargetKind::Task => target.step_id.is_none().then_some(task_sidecar),
+        WorkflowAgentTargetKind::Step => {
+            let step_id = target.step_id.as_deref()?;
+            workflow_step_id_exists(&task.steps, step_id).then_some(task_sidecar)
+        }
+        WorkflowAgentTargetKind::Repo | WorkflowAgentTargetKind::Project => None,
+    }
+}
+
+/// 递归判断 Task 内是否存在指定稳定 Step ID。
+///
+/// 适用场景：加载 Workflow Agent sidecar。例：子 Step ID 命中 -> true。
+fn workflow_step_id_exists(steps: &[WorkflowStepNode], id: &str) -> bool {
+    steps
+        .iter()
+        .any(|step| step.id == id || workflow_step_id_exists(&step.children, id))
+}
+
+/// 解析一个 sidecar，并把运行时目标与路径补回 Subagent。
+///
+/// 适用场景：本地与 Remote 共享 JSON 规则。例：重复 target -> 硬错误。
+fn append_workflow_agent_file(
+    content: &str,
+    sidecar_path: &Path,
+    workspace_scope: &Path,
+    tree: &WorkflowTree,
+    seen_targets: &mut BTreeSet<WorkflowAgentTarget>,
+    agents: &mut Vec<SubagentViewData>,
+) -> Result<(), String> {
+    let file = serde_json::from_str::<WorkflowAgentFile>(content)
+        .map_err(|error| format!("failed to parse {}: {error}", sidecar_path.display()))?;
+    if file.version != workflow_agent_file_version() {
+        return Err(format!(
+            "unsupported workflow agent file version {} in {}",
+            file.version,
+            sidecar_path.display()
+        ));
+    }
+    for mut record in file.agents {
+        record.target.repo_path = tree.repo_path.clone();
+        let Some(expected_sidecar) = workflow_agent_target_sidecar(tree, &record.target) else {
+            // mutation 与 sidecar writer 是异步串行的；节点先删除时忽略短暂孤儿记录。
+            continue;
+        };
+        if expected_sidecar != sidecar_path {
+            return Err(format!(
+                "workflow agent target does not belong in {}",
+                sidecar_path.display()
+            ));
+        }
+        if !seen_targets.insert(record.target.clone()) {
+            return Err(format!(
+                "duplicate workflow agent target in {}",
+                sidecar_path.display()
+            ));
+        }
+        let runtime_id = workflow_agent_runtime_id(workspace_scope, &record.target);
+        record.agent.id = runtime_id.clone();
+        record.agent.agent_id = runtime_id;
+        record.agent.workflow_target = Some(record.target);
+        record.agent.workflow_sidecar_path = Some(sidecar_path.to_path_buf());
+        record.agent.activity = WorkspaceActivity::Unknown;
+        agents.push(record.agent);
+    }
+    Ok(())
+}
+
+/// 返回一个目标稳定且不会进入普通 Agent 命名空间的运行时 ID。
+///
+/// 适用场景：新建或加载记录时隔离 workspace/repo 命名空间。例：同路径不同 SSH 主机 -> 不同 ID。
+pub(super) fn workflow_agent_runtime_id(
+    workspace_scope: &Path,
+    target: &WorkflowAgentTarget,
+) -> String {
+    let repo_scope =
+        crate::gui::data::workspace_store_key(&workspace_scope.join(&target.repo_path));
+    let leaf = target
+        .step_id
+        .as_deref()
+        .or(target.task_id.as_deref())
+        .or(target.project_id.as_deref())
+        .unwrap_or(target.repo_id.as_str());
+    format!(
+        "wf-{repo_scope}-{}-{}-{leaf}",
+        target.repo_id,
+        match target.kind {
+            WorkflowAgentTargetKind::Repo => "repo",
+            WorkflowAgentTargetKind::Project => "project",
+            WorkflowAgentTargetKind::Task => "task",
+            WorkflowAgentTargetKind::Step => "step",
+        }
+    )
+}
+
+/// 生成跨本地与 Remote Workspace 唯一的 Workflow Agent 作用域。
+///
+/// 适用场景：不同 SSH 主机可能拥有相同绝对路径。例：remote key + `/repo` -> 独立稳定哈希输入。
+pub(super) fn workflow_agent_workspace_scope(
+    workspace_path: &Path,
+    remote_workspace_key: Option<&str>,
+) -> PathBuf {
+    remote_workspace_key.map_or_else(
+        || workspace_path.to_path_buf(),
+        |key| PathBuf::from(format!("remote:{key}:{}", workspace_path.display())),
+    )
+}
+
+/// 原子保存一个本地 Workflow Agent sidecar；空记录直接删除文件。
+///
+/// 适用场景：创建、配置更新与销毁。例：最后一个 Agent 删除 -> sidecar 消失。
+pub(super) fn save_local_workflow_agent_sidecar(
+    workspace_root: &Path,
+    sidecar_path: &Path,
+    agents: &[SubagentViewData],
+) -> Result<(), String> {
+    let absolute = workspace_root.join(sidecar_path);
+    let Some(content) = workflow_agent_sidecar_content(sidecar_path, agents)? else {
+        return match fs::remove_file(&absolute) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("failed to delete {}: {error}", absolute.display())),
+        };
+    };
+    let parent = absolute
+        .parent()
+        .ok_or_else(|| format!("workflow agent parent not found: {}", absolute.display()))?;
+    if !parent.is_dir() {
+        return Err(format!(
+            "workflow agent parent not found: {}",
+            parent.display()
+        ));
+    }
+    atomic_write(&absolute, &content)
+}
+
+/// 序列化指定路径管理的 Workflow Agent；无记录返回 None。
+///
+/// 适用场景：本地与 Remote writer 共用完全相同的 JSON。例：一个 Task Agent -> versioned bytes。
+pub(super) fn workflow_agent_sidecar_content(
+    sidecar_path: &Path,
+    agents: &[SubagentViewData],
+) -> Result<Option<Vec<u8>>, String> {
+    let records = agents
+        .iter()
+        .filter(|agent| agent.workflow_sidecar_path.as_deref() == Some(sidecar_path))
+        .filter_map(|agent| {
+            Some(WorkflowAgentRecord {
+                target: agent.workflow_target.clone()?,
+                agent: agent.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    if records.is_empty() {
+        return Ok(None);
+    }
+    let content = serde_json::to_vec_pretty(&WorkflowAgentFile {
+        version: workflow_agent_file_version(),
+        agents: records,
+    })
+    .map_err(|error| format!("failed to serialize {}: {error}", sidecar_path.display()))?;
+    Ok(Some(content))
 }
 
 /// workflow task 说明编辑状态。
@@ -336,6 +1161,7 @@ pub(super) fn workflow_step_editor_from_node(
 
 /// 从 workspace 根目录加载 workflow tree。
 pub(super) fn load_workflow_tree(workspace_root: &Path) -> Result<WorkflowTree, String> {
+    migrate_workflow_repo(workspace_root)?;
     load_workflow_tree_at_repo(workspace_root, Path::new(""))
 }
 
@@ -355,13 +1181,11 @@ pub(super) fn load_workflow_tree_with_sub_workflows(
         known_repo_paths.to_vec()
     };
     for repo_path in repo_paths {
-        let root_path = workspace_root
-            .join(&repo_path)
-            .join(GSDV_SPEC_DIR)
-            .join(ROOT_MD);
-        if !root_path.is_file() {
+        let repo_root = workspace_root.join(&repo_path);
+        if !workflow_repo_has_root(&repo_root.join(GSDV_SPEC_DIR))? {
             continue;
         }
+        migrate_workflow_repo(&repo_root)?;
         tree.sub_workflows
             .push(load_workflow_tree_at_repo(workspace_root, &repo_path)?);
     }
@@ -380,35 +1204,47 @@ fn load_workflow_tree_at_repo(
 ) -> Result<WorkflowTree, String> {
     let repo_root = workspace_root.join(repo_path);
     let spec_root = repo_root.join(GSDV_SPEC_DIR);
-    let root_md = spec_root.join(ROOT_MD);
-    if !root_md.is_file() {
-        return Err(format!("{} not found", root_md.display()));
-    }
+    let root_md = workflow_root_file(&spec_root)?
+        .ok_or_else(|| format!("{} not found", spec_root.display()))?;
+    let repo_id = repo_id_from_root_path(&root_md)?;
+    let content = fs::read_to_string(&root_md)
+        .map_err(|error| format!("failed to read {}: {error}", root_md.display()))?;
     let projects_root = spec_root.join(PROJECTS_DIR);
     let mut projects = Vec::new();
     for entry in sorted_dirs(&projects_root)? {
-        let root_path = entry.join(ROOT_MD);
+        let root_path = entry.join(LEGACY_ROOT_MD);
         if !root_path.is_file() {
             continue;
         }
         let Some(project_name) = entry.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
+        let (project_id, project_label) = split_stable_name(project_name, NODE_ID_LEN)
+            .ok_or_else(|| format!("invalid workflow project id: {project_name}"))?;
+        let project_content = fs::read_to_string(&root_path)
+            .map_err(|error| format!("failed to read {}: {error}", root_path.display()))?;
         let tasks = load_project_tasks(workspace_root, &entry)?;
         projects.push(WorkflowProjectNode {
+            id: project_id.to_string(),
             key: project_name.to_string(),
-            label: project_name.to_string(),
+            label: project_label.to_string(),
             root_path: relative_to_workspace(workspace_root, &root_path),
+            content: project_content,
             tasks,
         });
     }
-    Ok(WorkflowTree {
+    let mut tree = WorkflowTree {
+        id: repo_id,
         repo_path: repo_path.to_path_buf(),
         spec_path: relative_to_workspace(workspace_root, &spec_root),
         root_path: relative_to_workspace(workspace_root, &root_md),
+        content,
         projects,
+        agents: Vec::new(),
         sub_workflows: Vec::new(),
-    })
+    };
+    tree.agents = load_local_workflow_agents(workspace_root, &tree)?;
+    Ok(tree)
 }
 
 /// 扫描 workspace 下最近一层嵌套 Git repo 的 workflow 路径。
@@ -434,11 +1270,40 @@ fn discover_nested_git_repo_paths_in(
     repo_paths: &mut Vec<PathBuf>,
 ) -> Result<(), String> {
     let absolute_dir = workspace_root.join(relative_dir);
-    let entries = fs::read_dir(&absolute_dir)
-        .map_err(|error| format!("failed to read {}: {error}", absolute_dir.display()))?;
+    if !relative_dir.as_os_str().is_empty()
+        && fs::symlink_metadata(absolute_dir.join(".git")).is_ok()
+    {
+        if workflow_repo_has_root(&absolute_dir.join(GSDV_SPEC_DIR))? {
+            repo_paths.push(relative_dir.to_path_buf());
+        }
+        return Ok(());
+    }
+    let entries = match fs::read_dir(&absolute_dir) {
+        Ok(entries) => entries,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            // 子 workflow 发现是可选能力。扫描期间目录消失或不可读时，
+            // 主 workflow 仍必须可用，不能让一个旁支目录拖垮整棵 tree。
+            return Ok(());
+        }
+        Err(error) => {
+            return Err(format!(
+                "failed to read {}: {error}",
+                absolute_dir.display()
+            ));
+        }
+    };
     for entry in entries {
-        let entry = entry.map_err(|error| error.to_string())?;
-        let file_type = entry.file_type().map_err(|error| error.to_string())?;
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
         if !file_type.is_dir() || file_type.is_symlink() {
             continue;
         }
@@ -447,13 +1312,6 @@ fn discover_nested_git_repo_paths_in(
             continue;
         }
         let child_relative = relative_dir.join(&name);
-        let child_absolute = entry.path();
-        if fs::symlink_metadata(child_absolute.join(".git")).is_ok() {
-            if child_absolute.join(GSDV_SPEC_DIR).join(ROOT_MD).is_file() {
-                repo_paths.push(child_relative);
-            }
-            continue;
-        }
         discover_nested_git_repo_paths_in(workspace_root, &child_relative, repo_paths)?;
     }
     Ok(())
@@ -465,10 +1323,15 @@ fn discover_nested_git_repo_paths_in(
 /// 例：`gsdv-spec/root.md + task-a.md -> WorkflowTree`。
 pub(super) fn load_workflow_tree_from_documents(
     workspace_root: &Path,
+    agent_scope: &Path,
     documents: &BTreeMap<PathBuf, String>,
 ) -> Result<WorkflowTree, String> {
-    let mut tree =
-        load_workflow_tree_from_documents_at_repo(workspace_root, documents, Path::new(""))?;
+    let mut tree = load_workflow_tree_from_documents_at_repo(
+        workspace_root,
+        agent_scope,
+        documents,
+        Path::new(""),
+    )?;
     let mut repo_paths = documents
         .keys()
         .filter_map(|path| workflow_document_repo_path(path))
@@ -480,6 +1343,7 @@ pub(super) fn load_workflow_tree_from_documents(
         tree.sub_workflows
             .push(load_workflow_tree_from_documents_at_repo(
                 workspace_root,
+                agent_scope,
                 documents,
                 &repo_path,
             )?);
@@ -493,27 +1357,28 @@ pub(super) fn load_workflow_tree_from_documents(
 /// 例：`services/api + documents -> 子 WorkflowTree`。
 fn load_workflow_tree_from_documents_at_repo(
     workspace_root: &Path,
+    agent_scope: &Path,
     documents: &BTreeMap<PathBuf, String>,
     repo_path: &Path,
 ) -> Result<WorkflowTree, String> {
     let spec_path = repo_path.join(GSDV_SPEC_DIR);
-    let root_path = spec_path.join(ROOT_MD);
-    if !documents.contains_key(&root_path) {
-        return Err(format!(
-            "{} not found",
-            workspace_root.join(&root_path).display()
-        ));
-    }
+    let root_path = documents
+        .keys()
+        .find(|path| path.parent() == Some(spec_path.as_path()) && is_repo_root_path(path))
+        .cloned()
+        .ok_or_else(|| format!("{} not found", workspace_root.join(&spec_path).display()))?;
 
     let projects_root = spec_path.join(PROJECTS_DIR);
     let mut project_keys = documents
         .keys()
         .filter_map(|path| {
             let project_dir = path.parent()?;
-            if path.file_name()? != ROOT_MD || project_dir.parent()? != projects_root {
+            if path.file_name()? != LEGACY_ROOT_MD || project_dir.parent()? != projects_root {
                 return None;
             }
-            Some(project_dir.file_name()?.to_string_lossy().to_string())
+            let key = project_dir.file_name()?.to_string_lossy().to_string();
+            split_stable_name(&key, NODE_ID_LEN)?;
+            Some(key)
         })
         .collect::<Vec<_>>();
     project_keys.sort();
@@ -529,7 +1394,10 @@ fn load_workflow_tree_from_documents_at_repo(
                 .filter(|path| {
                     path.file_name()
                         .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.starts_with(TASK_PREFIX))
+                        .and_then(|name| name.split_once('.'))
+                        .is_some_and(|(id, name)| {
+                            is_stable_id(id, NODE_ID_LEN) && name.starts_with(TASK_PREFIX)
+                        })
                         && path
                             .extension()
                             .is_some_and(|extension| extension == MARKDOWN_EXT)
@@ -541,8 +1409,10 @@ fn load_workflow_tree_from_documents_at_repo(
                 .into_iter()
                 .filter_map(|path| {
                     let content = documents.get(&path)?;
+                    let (task_id, task_label) = task_identity_for_path(&path).ok()?;
                     Some(WorkflowTaskNode {
-                        label: workflow_task_label_for_path(&path),
+                        id: task_id,
+                        label: task_label,
                         path,
                         desc: parse_task_desc(content),
                         steps: parse_task_steps(content),
@@ -550,21 +1420,35 @@ fn load_workflow_tree_from_documents_at_repo(
                 })
                 .collect();
             WorkflowProjectNode {
+                id: split_stable_name(&project_key, NODE_ID_LEN)
+                    .map(|(id, _)| id.to_string())
+                    .unwrap_or_default(),
                 key: project_key.clone(),
-                label: project_key,
-                root_path: project_dir.join(ROOT_MD),
+                label: split_stable_name(&project_key, NODE_ID_LEN)
+                    .map(|(_, label)| label.to_string())
+                    .unwrap_or_else(|| project_key.clone()),
+                root_path: project_dir.join(LEGACY_ROOT_MD),
+                content: documents
+                    .get(&project_dir.join(LEGACY_ROOT_MD))
+                    .cloned()
+                    .unwrap_or_default(),
                 tasks,
             }
         })
         .collect();
 
-    Ok(WorkflowTree {
+    let mut tree = WorkflowTree {
+        id: repo_id_from_root_path(&root_path).unwrap_or_default(),
         repo_path: repo_path.to_path_buf(),
         spec_path,
+        content: documents.get(&root_path).cloned().unwrap_or_default(),
         root_path,
         projects,
+        agents: Vec::new(),
         sub_workflows: Vec::new(),
-    })
+    };
+    tree.agents = load_document_workflow_agents(documents, agent_scope, &tree)?;
+    Ok(tree)
 }
 
 /// 从一条远端 inventory 文档路径识别其 repo 相对路径。
@@ -572,7 +1456,7 @@ fn load_workflow_tree_from_documents_at_repo(
 /// 适用场景：`services/api/gsdv-spec/root.md -> services/api`。
 /// 例：主 `gsdv-spec/root.md -> 空路径`。
 fn workflow_document_repo_path(path: &Path) -> Option<PathBuf> {
-    if path.file_name()? != ROOT_MD {
+    if !is_repo_root_path(path) {
         return None;
     }
     let spec_path = path.parent()?;
@@ -597,8 +1481,9 @@ fn load_project_tasks(
         let content = fs::read_to_string(&path)
             .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
         let steps = parse_task_steps(&content);
-        let label = workflow_task_label_for_path(&path);
+        let (id, label) = task_identity_for_path(&path)?;
         tasks.push(WorkflowTaskNode {
+            id,
             label,
             path: relative_to_workspace(workspace_root, &path),
             desc: parse_task_desc(&content),
@@ -609,14 +1494,18 @@ fn load_project_tasks(
 }
 
 /// 返回 task tree 的展示名，保留文件命名规范但隐藏 task- 前缀。
-fn workflow_task_label_for_path(path: &Path) -> String {
+fn task_identity_for_path(path: &Path) -> Result<(String, String), String> {
     let stem = path
         .file_stem()
         .map(|stem| stem.to_string_lossy().to_string())
-        .unwrap_or_else(|| "task".to_string());
-    stem.strip_prefix(TASK_PREFIX)
-        .map(str::to_string)
-        .unwrap_or(stem)
+        .ok_or_else(|| format!("task name not found: {}", path.display()))?;
+    let (id, legacy_name) = split_stable_name(&stem, NODE_ID_LEN)
+        .ok_or_else(|| format!("invalid workflow task id: {}", path.display()))?;
+    let label = legacy_name
+        .strip_prefix(TASK_PREFIX)
+        .unwrap_or(legacy_name)
+        .to_string();
+    Ok((id.to_string(), label))
 }
 
 /// 返回按文件名排序的直接子目录。
@@ -649,7 +1538,10 @@ fn sorted_markdown_tasks(root: &Path) -> Result<Vec<PathBuf>, String> {
         let is_task = path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with(TASK_PREFIX))
+            .and_then(|name| name.split_once('.'))
+            .is_some_and(|(id, name)| {
+                is_stable_id(id, NODE_ID_LEN) && name.starts_with(TASK_PREFIX)
+            })
             && path
                 .extension()
                 .is_some_and(|extension| extension == MARKDOWN_EXT);
@@ -744,20 +1636,16 @@ pub(super) fn save_workflow_step_content(
 
 /// 校验 task 说明，避免说明伪装成新的 step heading。
 fn validate_workflow_task_desc(text: &str) -> Result<(), String> {
-    if text.lines().any(|line| parse_step_line(line).is_some()) {
-        return Err(
-            "Task description cannot contain lines starting with `## [ ]` or `## [x]`".to_string(),
-        );
+    if text.lines().any(|line| line.starts_with("## [")) {
+        return Err("Task description cannot contain level-2 checkbox headings".to_string());
     }
     Ok(())
 }
 
 /// 校验 step 正文，避免正文伪装成新的 step heading。
 fn validate_workflow_step_desc(text: &str) -> Result<(), String> {
-    if text.lines().any(|line| parse_step_line(line).is_some()) {
-        return Err(
-            "Step description cannot contain lines starting with `## [ ]` or `## [x]`".to_string(),
-        );
+    if text.lines().any(|line| line.starts_with("## [")) {
+        return Err("Step description cannot contain level-2 checkbox headings".to_string());
     }
     Ok(())
 }
@@ -869,31 +1757,21 @@ pub(super) fn validate_workflow_step_title(title: &str) -> Result<&str, String> 
 
 /// 初始化 workspace 级 workflow 根文件。
 fn init_workflow_root(workspace_root: &Path) -> Result<(), String> {
-    let root_path = workflow_root_path(workspace_root);
-    if root_path.is_file() {
+    let spec_root = workspace_root.join(GSDV_SPEC_DIR);
+    fs::create_dir_all(&spec_root)
+        .map_err(|error| format!("failed to create {}: {error}", spec_root.display()))?;
+    ensure_workflow_gitignore(&spec_root)?;
+    if workflow_root_file(&spec_root)?.is_some() {
         return Ok(());
     }
-    if root_path.exists() {
-        return Err(format!(
-            "workflow root is not a file: {}",
-            root_path.display()
-        ));
+    let legacy = spec_root.join(LEGACY_ROOT_MD);
+    if legacy.exists() {
+        return migrate_repo_root_file(&spec_root);
     }
-    let Some(parent) = root_path.parent() else {
-        return Err(format!(
-            "invalid workflow root path: {}",
-            root_path.display()
-        ));
-    };
-    fs::create_dir_all(parent)
-        .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+    let id = generate_short_id(NODE_ID_LEN, std::iter::empty());
+    let root_path = spec_root.join(format!("{id}.root.md"));
     fs::write(&root_path, [])
         .map_err(|error| format!("failed to write {}: {error}", root_path.display()))
-}
-
-/// 返回 workspace 级 workflow 根文件路径。
-fn workflow_root_path(workspace_root: &Path) -> PathBuf {
-    workspace_root.join(GSDV_SPEC_DIR).join(ROOT_MD)
 }
 
 /// 创建 workflow project 根文件。
@@ -904,11 +1782,26 @@ fn add_workflow_project(
 ) -> Result<(), String> {
     validate_workflow_relative_path(spec_path)?;
     let project_key = validate_workflow_key(project_key)?;
-    let project_dir = workspace_root
-        .join(spec_path)
-        .join(PROJECTS_DIR)
-        .join(project_key);
-    let root_path = project_dir.join(ROOT_MD);
+    let projects_dir = workspace_root.join(spec_path).join(PROJECTS_DIR);
+    let identities = sorted_dirs(&projects_dir)?
+        .into_iter()
+        .filter(|path| path.join(LEGACY_ROOT_MD).is_file())
+        .filter_map(|path| path.file_name()?.to_str().map(str::to_string))
+        .filter_map(|name| {
+            split_stable_name(&name, NODE_ID_LEN)
+                .map(|(id, label)| (id.to_string(), label.to_string()))
+        })
+        .collect::<Vec<_>>();
+    if identities.iter().any(|(_, label)| label == project_key) {
+        return Err(format!("workflow project already exists: {project_key}"));
+    }
+    let used = identities
+        .iter()
+        .map(|(id, _)| id.as_str())
+        .collect::<Vec<_>>();
+    let project_id = generate_short_id(NODE_ID_LEN, used.into_iter());
+    let project_dir = projects_dir.join(format!("{project_id}.{project_key}"));
+    let root_path = project_dir.join(LEGACY_ROOT_MD);
     if root_path.exists() {
         return Err(format!("workflow project already exists: {project_key}"));
     }
@@ -935,7 +1828,15 @@ fn add_workflow_task(
     if !project_dir.is_dir() {
         return Err(format!("workflow project not found: {project_key}"));
     }
-    let task_path = project_dir.join(format!("{TASK_PREFIX}{task_key}.{MARKDOWN_EXT}"));
+    let identities = sorted_markdown_tasks(&project_dir)?
+        .into_iter()
+        .filter_map(|path| task_identity_for_path(&path).ok())
+        .collect::<Vec<_>>();
+    if identities.iter().any(|(_, label)| label == task_key) {
+        return Err(format!("task already exists: {task_key}"));
+    }
+    let task_id = generate_short_id(NODE_ID_LEN, identities.iter().map(|(id, _)| id.as_str()));
+    let task_path = project_dir.join(format!("{task_id}.{TASK_PREFIX}{task_key}.{MARKDOWN_EXT}"));
     if task_path.exists() {
         return Err(format!("task already exists: {task_key}"));
     }
@@ -962,16 +1863,15 @@ fn add_workflow_step(
 fn add_workflow_step_content(content: &str, key: &str, desc: &str) -> Result<String, String> {
     let key = validate_workflow_step_title(key)?;
     let mut lines = markdown_lines(&content);
-    if parse_step_records(&content)
-        .iter()
-        .any(|record| record.title == key)
-    {
+    let records = parse_step_records(content);
+    if records.iter().any(|record| record.title == key) {
         return Err(format!("step already exists at this level: {key}"));
     }
+    let step_id = generate_short_id(STEP_ID_LEN, records.iter().map(|record| record.id.as_str()));
     if !lines.is_empty() && lines.last().is_some_and(|line| !line.trim().is_empty()) {
         lines.push(String::new());
     }
-    lines.push(format!("## [ ] {key}"));
+    lines.push(format!("## [ ]{step_id} {key}"));
     if !desc.trim().is_empty() {
         lines.extend(desc.lines().map(str::to_string));
     }
@@ -994,9 +1894,10 @@ fn rename_workflow_project(
                 project_path.display()
             )
         })?;
-    let project_key = validate_workflow_key(project_key)?;
+    let (project_id, current_label) = split_stable_name(project_key, NODE_ID_LEN)
+        .ok_or_else(|| format!("invalid workflow project id: {project_key}"))?;
     let new_key = validate_workflow_key(new_key)?;
-    if project_key == new_key {
+    if current_label == new_key {
         return Ok(());
     }
     let old_dir = workspace_root.join(project_path);
@@ -1006,9 +1907,9 @@ fn rename_workflow_project(
             project_path.display()
         )
     })?;
-    let new_dir = projects_dir.join(new_key);
+    let new_dir = projects_dir.join(format!("{project_id}.{new_key}"));
     if !old_dir.is_dir() {
-        return Err(format!("workflow project not found: {project_key}"));
+        return Err(format!("workflow project not found: {current_label}"));
     }
     if new_dir.exists() {
         return Err(format!("project already exists: {new_key}"));
@@ -1040,7 +1941,8 @@ fn rename_workflow_task(
     let parent = absolute
         .parent()
         .ok_or_else(|| format!("task parent not found: {}", task_path.display()))?;
-    let target = parent.join(format!("{TASK_PREFIX}{new_key}.{MARKDOWN_EXT}"));
+    let task_id = task_identity_for_path(task_path)?.0;
+    let target = parent.join(format!("{task_id}.{TASK_PREFIX}{new_key}.{MARKDOWN_EXT}"));
     if target.exists() {
         return Err(format!("task already exists at this level: {new_key}"));
     }
@@ -1192,7 +2094,8 @@ fn merge_workflow_steps_content(
         .iter()
         .map(|index| records[*index].clone())
         .collect::<Vec<_>>();
-    let replacement = merged_workflow_step_lines(selected_records, title);
+    let merged_id = generate_short_id(STEP_ID_LEN, records.iter().map(|record| record.id.as_str()));
+    let replacement = merged_workflow_step_lines(selected_records, &merged_id, title);
     for index in selected_indices.iter().skip(1).rev() {
         let delete_end = records
             .get(*index + 1)
@@ -1270,9 +2173,13 @@ fn workflow_step_indices_for_merge(
 }
 
 /// 生成合并后的 step 行，只顺序保留原 step 正文。
-fn merged_workflow_step_lines(records: Vec<StepRecord>, title: &str) -> Vec<String> {
+fn merged_workflow_step_lines(
+    records: Vec<StepRecord>,
+    merged_id: &str,
+    title: &str,
+) -> Vec<String> {
     let checked = records.iter().all(|record| record.checked);
-    let mut lines = vec![renamed_step_line_with_checked(title, checked)];
+    let mut lines = vec![step_line_with_checked(merged_id, title, checked)];
     let mut appended_desc_count = 0usize;
     for record in records {
         let desc = record.desc.trim_end();
@@ -1304,6 +2211,7 @@ fn parse_task_steps(content: &str) -> Vec<WorkflowStepNode> {
     records
         .into_iter()
         .map(|record| WorkflowStepNode {
+            id: record.id,
             path: record.path,
             title: record.title,
             checked: record.checked,
@@ -1327,6 +2235,7 @@ fn parse_step_records(content: &str) -> Vec<StepRecord> {
                 .map(|next| next.line_index)
                 .unwrap_or(lines.len());
             StepRecord {
+                id: step.id.clone(),
                 path: vec![index],
                 line_index: step.line_index,
                 title: step.title.clone(),
@@ -1349,6 +2258,7 @@ fn collect_step_lines(lines: &[String]) -> Vec<StepLine> {
     for (line_index, line) in lines.iter().enumerate() {
         if let Some(parsed) = parse_step_line(line) {
             steps.push(StepLine {
+                id: parsed.id,
                 line_index,
                 title: parsed.title,
                 checked: parsed.checked,
@@ -1361,18 +2271,17 @@ fn collect_step_lines(lines: &[String]) -> Vec<StepLine> {
 
 /// 解析单行 Markdown 二级 checkbox step 标题。
 fn parse_step_line(line: &str) -> Option<ParsedStepLine> {
-    let rest = line.strip_prefix("## ")?;
-    let (checked, title) = if let Some(title) = rest.strip_prefix("[ ] ") {
-        (false, title)
-    } else if let Some(title) = rest.strip_prefix("[x] ") {
-        (true, title)
-    } else if let Some(title) = rest.strip_prefix("[X] ") {
-        (true, title)
-    } else {
+    let (checked, rest) = checkbox_step_rest(line)?;
+    if rest.len() <= STEP_ID_LEN || rest.as_bytes().get(STEP_ID_LEN) != Some(&b' ') {
         return None;
-    };
-    let title = title.trim().to_string();
+    }
+    let id = &rest[..STEP_ID_LEN];
+    if !is_stable_id(id, STEP_ID_LEN) {
+        return None;
+    }
+    let title = rest[STEP_ID_LEN + 1..].trim().to_string();
     (!title.is_empty()).then_some(ParsedStepLine {
+        id: id.to_string(),
         title,
         checked,
         checkable: true,
@@ -1415,25 +2324,18 @@ fn replace_step_desc(
 
 /// 生成重命名后的 step 行，保留 checkbox 状态。
 fn renamed_step_line(record: &StepRecord, new_key: &str) -> String {
-    renamed_step_line_with_checked(new_key, record.checked)
+    step_line_with_checked(&record.id, new_key, record.checked)
 }
 
 /// 按指定 checkbox 状态生成 step 行。
-fn renamed_step_line_with_checked(title: &str, checked: bool) -> String {
+fn step_line_with_checked(id: &str, title: &str, checked: bool) -> String {
     let checkbox = if checked { "[x]" } else { "[ ]" };
-    format!("## {checkbox} {title}")
+    format!("## {checkbox}{id} {title}")
 }
 
 /// 从 task 路径提取不带 `task-` 前缀的 key。
 fn task_key_from_path(task_path: &Path) -> Result<String, String> {
-    let stem = task_path
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().to_string())
-        .ok_or_else(|| format!("task key not found: {}", task_path.display()))?;
-    Ok(stem
-        .strip_prefix(TASK_PREFIX)
-        .map(str::to_string)
-        .unwrap_or(stem))
+    Ok(task_identity_for_path(task_path)?.1)
 }
 
 /// 将 Markdown 文本切成不带换行符的行。
@@ -1462,6 +2364,8 @@ fn join_markdown_lines(lines: &[String]) -> String {
 /// 解析后的 step 行。
 #[derive(Debug, Clone)]
 struct StepLine {
+    /// task 内唯一的六位稳定 ID。
+    id: String,
     /// step 行号。
     line_index: usize,
     /// step 标题。
@@ -1475,6 +2379,8 @@ struct StepLine {
 /// 带 range 的 step 记录。
 #[derive(Debug, Clone)]
 struct StepRecord {
+    /// task 内唯一的六位稳定 ID。
+    id: String,
     /// step 在同级列表中的索引路径。
     path: Vec<usize>,
     /// step 行号。
@@ -1495,6 +2401,8 @@ struct StepRecord {
 
 /// 单行 step 的解析结果。
 struct ParsedStepLine {
+    /// task 内唯一的六位稳定 ID。
+    id: String,
     /// step 标题。
     title: String,
     /// step 是否完成。

@@ -510,7 +510,12 @@ impl GsdvGuiApp {
             agent_fast_mode: workspace.agent_fast_mode,
             agent_work_dir: workspace.agent_work_dir.clone(),
             helix_work_dir: workspace.helix_work_dir.clone(),
-            subagents: workspace.subagents.clone(),
+            subagents: workspace
+                .subagents
+                .iter()
+                .filter(|agent| agent.workflow_target.is_none())
+                .cloned()
+                .collect(),
             rows: workspace.agent_rows.clone(),
             focus: workspace.agent_focus,
         };
@@ -612,7 +617,12 @@ impl GsdvGuiApp {
             agent_fast_mode: workspace.agent_fast_mode,
             agent_work_dir: workspace.agent_work_dir.clone(),
             helix_work_dir: workspace.helix_work_dir.clone(),
-            subagents: workspace.subagents.clone(),
+            subagents: workspace
+                .subagents
+                .iter()
+                .filter(|agent| agent.workflow_target.is_none())
+                .cloned()
+                .collect(),
             rows: workspace.agent_rows.clone(),
             focus: workspace.agent_focus,
         };

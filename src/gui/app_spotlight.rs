@@ -261,6 +261,9 @@ impl GsdvGuiApp {
                 });
             }
             for subagent in &workspace.subagents {
+                if subagent.workflow_target.is_some() {
+                    continue;
+                }
                 let Some(level) = self.spotlight_agents.get(&subagent.agent_id).copied() else {
                     continue;
                 };
@@ -450,6 +453,7 @@ impl GsdvGuiApp {
                             name.as_deref(),
                             session.as_deref(),
                             Some(entry.spotlight_level),
+                            true,
                             &mut action,
                             self.app_language,
                         );
@@ -482,7 +486,7 @@ impl GsdvGuiApp {
             });
             return;
         };
-        self.agent_terminal_host_surface(ui, entry.slot, None);
+        self.agent_terminal_host_surface(ui, entry.slot, None, false);
     }
 
     /// Copies the small Agent configuration subset needed by a context menu.

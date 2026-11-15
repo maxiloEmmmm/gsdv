@@ -194,23 +194,32 @@ pub(super) fn agent_title(app: &GsdvGuiApp, target: &AgentTarget) -> String {
     }
 }
 
-/// 绘制 terminal snapshot 最后一个 viewport，保留 run 样式。
+/// 按本地 scrollback offset 绘制 terminal snapshot。
 ///
-/// 适用场景：pane body。示例：500 行 snapshot + 20 行 pane -> 只画末 20 行。
-pub(super) fn draw_terminal_snapshot(
+/// 适用场景：普通 shell 未启用鼠标协议时由 TUI 自己滚动。示例：offset=3 -> 上移三行。
+pub(super) fn draw_terminal_snapshot_with_offset(
     frame: &mut [RenderLine],
     rect: TuiRect,
     snapshot: &TerminalRemoteSnapshot,
+    scroll_offset: usize,
 ) {
     let take = usize::from(rect.height);
-    let start = snapshot.rows.len().saturating_sub(take);
-    let pad = take.saturating_sub(snapshot.rows.len().saturating_sub(start));
+    let max_offset = snapshot.rows.len().saturating_sub(take);
+    let end = snapshot
+        .rows
+        .len()
+        .saturating_sub(scroll_offset.min(max_offset));
+    let start = end.saturating_sub(take);
+    let visible_len = end.saturating_sub(start);
+    let pad = take.saturating_sub(visible_len);
     for offset in 0..take {
         let y = rect.y.saturating_add(offset as u16);
         if offset < pad {
             continue;
         }
-        if let Some(row) = snapshot.rows.get(start + offset - pad) {
+        if let Some(row) = snapshot.rows.get(start + offset - pad)
+            && start + offset - pad < end
+        {
             let ansi = render_terminal_row(row, rect.width);
             if let Some(line) = frame.get_mut(usize::from(y)) {
                 line.overlays.push((rect.x, ansi));
@@ -219,16 +228,22 @@ pub(super) fn draw_terminal_snapshot(
     }
 }
 
-/// 把 terminal 逻辑光标映射到当前 pane 的可见字符坐标。
+/// 把 terminal 光标映射到带本地 scrollback offset 的视口。
 ///
-/// 适用场景：聚焦 Agent 且没有菜单或弹窗。示例：最后一行第 3 列 -> pane 内光标。
-pub(super) fn terminal_cursor_position(
+/// 适用场景：只在光标仍处于当前视口时显示。示例：滚到历史 -> None。
+pub(super) fn terminal_cursor_position_with_offset(
     rect: TuiRect,
     snapshot: &TerminalRemoteSnapshot,
+    scroll_offset: usize,
 ) -> Option<(u16, u16)> {
     let take = usize::from(rect.height);
-    let start = snapshot.rows.len().saturating_sub(take);
-    let visible = &snapshot.rows[start..];
+    let max_offset = snapshot.rows.len().saturating_sub(take);
+    let end = snapshot
+        .rows
+        .len()
+        .saturating_sub(scroll_offset.min(max_offset));
+    let start = end.saturating_sub(take);
+    let visible = &snapshot.rows[start..end];
     let pad = take.saturating_sub(visible.len());
     let row = visible
         .iter()

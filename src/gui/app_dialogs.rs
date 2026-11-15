@@ -332,10 +332,10 @@ impl GsdvGuiApp {
                 AppDialog::WorkflowQuickModal => {
                     if quick_overlay_dialog.is_some() {
                         ui.add_enabled_ui(false, |ui| {
-                            self.workflow_quick_modal_surface(ui);
+                            self.workflow_column_modal_surface(ui);
                         });
                     } else {
-                        self.workflow_quick_modal_surface(ui);
+                        self.workflow_column_modal_surface(ui);
                     }
                 }
                 AppDialog::RecentMarkdownOutline { mut nodes } => {
@@ -2489,20 +2489,42 @@ impl GsdvGuiApp {
             session_id,
         )) = add_subagent
         {
-            self.add_subagent(
-                ctx,
-                index,
-                column_id,
-                name,
-                agent_kind,
-                agent_model,
-                agent_model_provider,
-                agent_effort,
-                agent_fast_mode,
-                agent_work_dir,
-                helix_work_dir,
-                session_id,
-            );
+            let workflow_binding = self
+                .pending_workflow_agent_binding
+                .take()
+                .filter(|(binding_index, _)| *binding_index == index)
+                .map(|(_, binding)| binding);
+            if let Some(binding) = workflow_binding {
+                self.add_workflow_agent(
+                    ctx,
+                    index,
+                    binding,
+                    name,
+                    agent_kind,
+                    agent_model,
+                    agent_model_provider,
+                    agent_effort,
+                    agent_fast_mode,
+                    agent_work_dir,
+                    helix_work_dir,
+                    session_id,
+                );
+            } else {
+                self.add_subagent(
+                    ctx,
+                    index,
+                    column_id,
+                    name,
+                    agent_kind,
+                    agent_model,
+                    agent_model_provider,
+                    agent_effort,
+                    agent_fast_mode,
+                    agent_work_dir,
+                    helix_work_dir,
+                    session_id,
+                );
+            }
         }
         if let Some((index, slot, resume)) = restart_agent {
             self.restart_agent_slot(ctx, index, slot, resume);
@@ -2528,6 +2550,12 @@ impl GsdvGuiApp {
         }
         if restart_agent_without_resume {
             self.restart_active_agent_without_resume(ctx);
+        }
+        if !matches!(
+            self.active_app_dialog(),
+            Some(AppDialog::AddSubagent { .. })
+        ) {
+            self.pending_workflow_agent_binding = None;
         }
     }
 

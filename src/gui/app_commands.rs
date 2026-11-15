@@ -282,6 +282,15 @@ impl GsdvGuiApp {
                     self.apply_agent_status_hook_data(status);
                 }
             }
+            hook::IMAGE_SHOW_KEY => {
+                let path = PathBuf::from(&event.data);
+                if path.is_absolute() {
+                    self.queue_app_event(AppEvent::RequestLocalImage {
+                        path,
+                        gallery: true,
+                    });
+                }
+            }
             _ => {}
         }
     }
@@ -293,7 +302,8 @@ impl GsdvGuiApp {
         let normalized_workspace = workspace_path.canonicalize().unwrap_or(workspace_path);
         let mut render_changed = false;
         let mut session_changed = false;
-        for workspace in &mut self.workspaces {
+        let mut workflow_sidecars = BTreeSet::new();
+        for (index, workspace) in self.workspaces.iter_mut().enumerate() {
             if let Some(subagent) = workspace
                 .subagents
                 .iter_mut()
@@ -309,6 +319,9 @@ impl GsdvGuiApp {
                     subagent.session_id = Some(status.session_id.clone());
                     render_changed = true;
                     session_changed = true;
+                    if let Some(path) = subagent.workflow_sidecar_path.clone() {
+                        workflow_sidecars.insert((index, path));
+                    }
                 }
                 continue;
             }
@@ -334,6 +347,9 @@ impl GsdvGuiApp {
         }
         if session_changed {
             self.mark_workspace_store_dirty();
+            for (index, sidecar_path) in workflow_sidecars {
+                self.request_workflow_agent_sidecar_save(index, sidecar_path);
+            }
         }
         if render_changed {
             self.sync_spotlight_hook_activity(&status.agent_id, activity);

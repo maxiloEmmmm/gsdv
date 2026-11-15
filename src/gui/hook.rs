@@ -8,6 +8,8 @@ pub(crate) const MAX_HOOK_PAYLOAD_LEN: usize = 64 * 1024;
 pub(crate) const HELIX_CURRENT_KEY: &str = "helix.current";
 /// Agent 状态变化 hook key。
 pub(crate) const AGENT_STATUS_KEY: &str = "agent.status";
+/// 请求前端展示本地图片的 hook key。
+pub(crate) const IMAGE_SHOW_KEY: &str = "image.show";
 
 /// 外部 hook 事件。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,6 +229,18 @@ pub(crate) fn send_hook_event(endpoint: &str, key: &str, data: &str) -> Result<(
 
 /// 规范化 hook-client 数据，保证 Helix current 发送绝对路径。
 pub(crate) fn normalize_client_data(key: &str, data: &str) -> String {
+    if key == IMAGE_SHOW_KEY {
+        let path = PathBuf::from(data);
+        return if path.is_absolute() {
+            path
+        } else {
+            std::env::current_dir()
+                .map(|dir| dir.join(path))
+                .unwrap_or_else(|_| PathBuf::from(data))
+        }
+        .to_string_lossy()
+        .to_string();
+    }
     if key != HELIX_CURRENT_KEY {
         return data.to_string();
     }

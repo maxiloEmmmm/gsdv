@@ -2,7 +2,724 @@
 
 use super::*;
 
+/// 新 Workflow Agent 首次启动后自动发送的固定提示词模板；`$path` 会替换为逻辑路径。
+const WORKFLOW_AGENT_BOOTSTRAP_PROMPT_TEMPLATE: &str =
+    "当前gsdv-wf 关注的路径是$path,请你对它进行综合的评估, 简短的回答概况";
+
 impl GsdvGuiApp {
+    /// 绘制通用 Workflow Agent 右键菜单项。
+    ///
+    /// 适用场景：Outline 与 Quick Modal 共用。例：已有 Agent -> Agent + Destroy Agent。
+    pub(super) fn workflow_agent_context_items(
+        &self,
+        ui: &mut Ui,
+        tree: &WorkflowTree,
+        selection: &WorkflowSelectionTarget,
+        action: &mut Option<WorkflowAgentUiAction>,
+    ) {
+        let Some(binding) = crate::gui::workflow::workflow_agent_binding(tree, selection) else {
+            return;
+        };
+        if ui.button("Agent").clicked() {
+            *action = Some(WorkflowAgentUiAction::Open(selection.clone()));
+            ui.close_menu();
+        }
+        let exists = self
+            .workspaces
+            .get(self.active_workspace)
+            .is_some_and(|workspace| {
+                workspace
+                    .subagents
+                    .iter()
+                    .any(|agent| agent.workflow_target.as_ref() == Some(&binding.target))
+            });
+        if exists && ui.button("Destroy Agent").clicked() {
+            *action = Some(WorkflowAgentUiAction::Destroy(selection.clone()));
+            ui.close_menu();
+        }
+        ui.separator();
+    }
+
+    /// 执行 Workflow 右键菜单产生的 Agent 动作。
+    ///
+    /// 适用场景：render 完成后再修改 app 状态。例：Destroy -> 稳定 target 批量清理。
+    pub(super) fn apply_workflow_agent_ui_action(
+        &mut self,
+        ctx: &egui::Context,
+        tree: &WorkflowTree,
+        action: WorkflowAgentUiAction,
+    ) {
+        match action {
+            WorkflowAgentUiAction::Open(selection) => {
+                self.request_workflow_agent(ctx, selection);
+            }
+            WorkflowAgentUiAction::Destroy(selection) => {
+                if let Some(binding) =
+                    crate::gui::workflow::workflow_agent_binding(tree, &selection)
+                {
+                    self.destroy_workflow_agent(ctx, self.active_workspace, &binding.target);
+                }
+            }
+        }
+    }
+
+    /// 判断目标自身或任一后代是否存在 Busy Workflow Agent。
+    ///
+    /// 适用场景：Outline/Quick Modal 状态标签；上级自身没有 Agent 也会冒泡。例：Step Busy -> Repo Busy。
+    pub(super) fn workflow_selection_is_busy(
+        &self,
+        tree: &WorkflowTree,
+        selection: &WorkflowSelectionTarget,
+    ) -> bool {
+        let Some(binding) = crate::gui::workflow::workflow_agent_binding(tree, selection) else {
+            return false;
+        };
+        self.workspaces
+            .get(self.active_workspace)
+            .into_iter()
+            .flat_map(|workspace| workspace.subagents.iter())
+            .filter(|agent| agent.activity == WorkspaceActivity::Busy)
+            .filter_map(|agent| agent.workflow_target.as_ref())
+            .any(|busy| {
+                if busy.repo_path != binding.target.repo_path
+                    || busy.repo_id != binding.target.repo_id
+                {
+                    return false;
+                }
+                match binding.target.kind {
+                    data::WorkflowAgentTargetKind::Repo => true,
+                    data::WorkflowAgentTargetKind::Project => {
+                        busy.project_id == binding.target.project_id
+                    }
+                    data::WorkflowAgentTargetKind::Task => {
+                        busy.project_id == binding.target.project_id
+                            && busy.task_id == binding.target.task_id
+                    }
+                    data::WorkflowAgentTargetKind::Step => busy == &binding.target,
+                }
+            })
+    }
+
+    /// 若当前选择正显示 Workflow Agent，则绘制 terminal surface 并返回 true。
+    ///
+    /// 适用场景：宽版 Column View 与窄版 Quick Modal 共用。例：Markdown 按钮 -> 返回普通编辑器。
+    pub(super) fn workflow_agent_workbench_surface(
+        &mut self,
+        ui: &mut Ui,
+        tree: &WorkflowTree,
+        selected: Option<&WorkflowSelectionTarget>,
+    ) -> bool {
+        let active_target = self
+            .workflow_states
+            .get(self.active_workspace)
+            .and_then(|state| state.active_agent_target.clone());
+        let selected_binding = selected
+            .and_then(|selection| crate::gui::workflow::workflow_agent_binding(tree, selection));
+        let active_agent = active_target
+            .filter(|target| {
+                selected_binding
+                    .as_ref()
+                    .is_some_and(|binding| binding.target == *target)
+            })
+            .and_then(|target| {
+                self.workspaces
+                    .get(self.active_workspace)?
+                    .subagents
+                    .iter()
+                    .find(|agent| agent.workflow_target.as_ref() == Some(&target))
+                    .cloned()
+                    .map(|agent| (target, agent))
+            });
+        let Some((target, agent)) = active_agent else {
+            return false;
+        };
+        let slot = AgentSlotId::Subagent(agent.id.clone());
+        let mut show_markdown = false;
+        let mut destroy = false;
+        let mut agent_action = None;
+        let header = ui.horizontal(|ui| {
+            ui.label(RichText::new(&agent.name).strong());
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.button("Markdown").clicked() {
+                    show_markdown = true;
+                }
+            });
+        });
+        header.response.context_menu(|ui| {
+            agent_slot_context_menu(
+                ui,
+                slot.clone(),
+                self.agent_slot_manually_stopped(self.active_workspace, &slot),
+                agent.agent_kind,
+                agent.agent_model.as_deref(),
+                agent.agent_model_provider.as_deref(),
+                agent.agent_effort.as_deref(),
+                agent.agent_fast_mode,
+                agent.agent_work_dir.as_deref(),
+                agent.helix_work_dir.as_deref(),
+                Some(agent.name.as_str()),
+                agent.session_id.as_deref(),
+                None,
+                false,
+                &mut agent_action,
+                self.app_language,
+            );
+            ui.separator();
+            if ui.button("Destroy Agent").clicked() {
+                destroy = true;
+                ui.close_menu();
+            }
+        });
+        if let Some(action) = agent_action {
+            self.handle_agent_tab_action(ui.ctx(), action);
+        }
+        if destroy {
+            self.destroy_workflow_agent(ui.ctx(), self.active_workspace, &target);
+            return false;
+        }
+        ui.separator();
+        if show_markdown {
+            if let Some(state) = self.workflow_states.get_mut(self.active_workspace)
+                && state.active_agent_target.as_ref() == Some(&target)
+            {
+                state.active_agent_target = None;
+            }
+            return false;
+        }
+        self.agent_terminal_host_surface(ui, slot, None, true);
+        true
+    }
+
+    /// 在 Workflow Agent 首次 host 创建成功后发送且只发送一次固定提示词。
+    ///
+    /// 适用场景：新建且未 resume 的 Agent；已有 session 不发送。例：pending + task path -> paste + submit。
+    pub(super) fn submit_workflow_agent_bootstrap(&mut self, key: &TerminalSpawnKey) {
+        if key.kind != TerminalSurfaceKind::Agent {
+            return;
+        }
+        let AgentSlotId::Subagent(id) = &key.agent_slot else {
+            return;
+        };
+        let pending = self.workspaces.get(key.index).and_then(|workspace| {
+            workspace
+                .subagents
+                .iter()
+                .find(|agent| agent.id == *id && agent.workflow_target.is_some())
+                .filter(|agent| agent.bootstrap_pending && agent.session_id.is_none())
+                .and_then(|agent| {
+                    Some((
+                        agent.workflow_sidecar_path.clone()?,
+                        agent.workflow_target.clone()?,
+                    ))
+                })
+        });
+        let Some((sidecar_path, target)) = pending else {
+            return;
+        };
+        let path = self
+            .workflow_states
+            .get(key.index)
+            .and_then(|state| state.tree.as_ref())
+            .and_then(|tree| workflow_agent_logical_path(tree, &target));
+        let Some(path) = path else {
+            return;
+        };
+        let prompt = WORKFLOW_AGENT_BOOTSTRAP_PROMPT_TEMPLATE.replace("$path", &path);
+        let Some(host) = self
+            .terminal_hosts
+            .get_mut(key.index)
+            .and_then(|hosts| hosts.agents.get_mut(&key.agent_slot))
+            .and_then(|slot| slot.host.as_mut())
+        else {
+            return;
+        };
+        if !host.ready_for_remote_input() || host.submit_remote_text(&prompt).is_err() {
+            return;
+        }
+        if let Some(agent) = self
+            .workspaces
+            .get_mut(key.index)
+            .and_then(|workspace| workspace.subagents.iter_mut().find(|agent| agent.id == *id))
+        {
+            agent.bootstrap_pending = false;
+        }
+        self.request_workflow_agent_sidecar_save(key.index, sidecar_path);
+    }
+
+    /// 在 terminal runtime 更新后重试尚未发送的 Workflow Agent 首次提示词。
+    ///
+    /// 适用场景：Codex 冷启动时 composer 晚于 PTY 建立。例：首个可输入帧 -> 原子发送提示词与 Enter。
+    pub(super) fn submit_workflow_agent_bootstrap_for_terminal(&mut self, terminal_id: u64) {
+        let Some((index, agent_slot)) = self.agent_terminal_slot_by_id(terminal_id) else {
+            return;
+        };
+        let Some(workspace_path) = self
+            .workspaces
+            .get(index)
+            .map(|workspace| workspace.path.clone())
+        else {
+            return;
+        };
+        self.submit_workflow_agent_bootstrap(&TerminalSpawnKey {
+            index,
+            workspace_path,
+            kind: TerminalSurfaceKind::Agent,
+            agent_slot,
+        });
+    }
+    /// 打开目标已有 Workflow Agent，或复用 AddSubagent 面板创建它。
+    ///
+    /// 适用场景：Repo/Project/Task/Step 右键 Agent。例：已有记录 -> 右侧直接显示。
+    pub(super) fn request_workflow_agent(
+        &mut self,
+        ctx: &egui::Context,
+        target: WorkflowSelectionTarget,
+    ) {
+        let index = self.active_workspace;
+        let binding = self
+            .workflow_states
+            .get(index)
+            .and_then(|state| state.tree.as_ref())
+            .and_then(|tree| crate::gui::workflow::workflow_agent_binding(tree, &target));
+        let Some(binding) = binding else {
+            return;
+        };
+        if let Some(state) = self.workflow_states.get_mut(index) {
+            state.selected = Some(target.clone());
+        }
+        let existing = self.workspaces.get(index).and_then(|workspace| {
+            workspace
+                .subagents
+                .iter()
+                .find(|agent| agent.workflow_target.as_ref() == Some(&binding.target))
+                .map(|agent| agent.id.clone())
+        });
+        if let Some(id) = existing {
+            if let Some(state) = self.workflow_states.get_mut(index) {
+                state.active_agent_target = Some(binding.target);
+            }
+            if let Some(tab) = self.outline_panel_tabs.get_mut(index) {
+                *tab = OutlinePanelTab::Workflow;
+            }
+            if let Some(workspace) = self.workspaces.get_mut(index) {
+                workspace.center_mode = CenterMode::Editor;
+            }
+            self.ensure_agent_terminal_host(ctx, index, &AgentSlotId::Subagent(id));
+            self.request_app_repaint();
+            return;
+        }
+        let agent_kind = self
+            .workspaces
+            .get(index)
+            .map(|workspace| workspace.agent_kind)
+            .unwrap_or(self.default_agent_kind);
+        self.pending_workflow_agent_binding = Some((index, binding.clone()));
+        self.set_active_app_dialog(Some(AppDialog::AddSubagent {
+            index,
+            column_id: "main".to_string(),
+            name: binding.label,
+            agent_kind,
+            agent_model: String::new(),
+            agent_model_provider: String::new(),
+            model_providers: data::load_codex_model_provider_names(),
+            agent_effort: String::new(),
+            agent_fast_mode: None,
+            agent_work_dir: String::new(),
+            helix_work_dir: String::new(),
+            session_id: String::new(),
+        }));
+    }
+
+    /// 创建不进入普通 Agent 网格的 Workflow Agent 并启动现有 terminal host。
+    ///
+    /// 适用场景：AddSubagent 面板带 pending Workflow binding 提交。例：Task -> task sidecar + host。
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn add_workflow_agent(
+        &mut self,
+        ctx: &egui::Context,
+        index: usize,
+        binding: WorkflowAgentBinding,
+        name: String,
+        agent_kind: AgentKind,
+        agent_model: Option<String>,
+        agent_model_provider: Option<String>,
+        agent_effort: Option<String>,
+        agent_fast_mode: Option<bool>,
+        agent_work_dir: Option<PathBuf>,
+        helix_work_dir: Option<PathBuf>,
+        session_id: Option<String>,
+    ) {
+        let Some(workspace) = self.workspaces.get_mut(index) else {
+            return;
+        };
+        if workspace
+            .subagents
+            .iter()
+            .any(|agent| agent.workflow_target.as_ref() == Some(&binding.target))
+        {
+            return;
+        }
+        let mut agent = data::new_subagent(
+            &workspace.path,
+            name,
+            agent_kind,
+            agent_model,
+            agent_model_provider,
+            agent_effort,
+            agent_fast_mode,
+            agent_work_dir,
+            helix_work_dir,
+            session_id.clone(),
+        );
+        let agent_scope = crate::gui::workflow::workflow_agent_workspace_scope(
+            &workspace.path,
+            workspace
+                .remote
+                .as_ref()
+                .map(|remote| remote.workspace_key.as_str()),
+        );
+        let id = crate::gui::workflow::workflow_agent_runtime_id(&agent_scope, &binding.target);
+        agent.id = id.clone();
+        agent.agent_id = id.clone();
+        agent.workflow_target = Some(binding.target.clone());
+        agent.workflow_sidecar_path = Some(binding.sidecar_path.clone());
+        agent.bootstrap_pending = session_id.is_none();
+        workspace.subagents.push(agent);
+        if let Some(state) = self.workflow_states.get_mut(index) {
+            state.selected = Some(binding.selection.clone());
+            state.active_agent_target = Some(binding.target);
+        }
+        if let Some(tab) = self.outline_panel_tabs.get_mut(index) {
+            *tab = OutlinePanelTab::Workflow;
+        }
+        if let Some(workspace) = self.workspaces.get_mut(index) {
+            workspace.center_mode = CenterMode::Editor;
+        }
+        if let Some(states) = self.agent_busy_watchdogs.get_mut(index) {
+            states.entry(AgentSlotId::Subagent(id.clone())).or_default();
+        }
+        self.request_workflow_agent_sidecar_save(index, binding.sidecar_path);
+        self.ensure_agent_terminal_host(ctx, index, &AgentSlotId::Subagent(id));
+        self.request_app_repaint();
+    }
+
+    /// 把指定 Workflow sidecar 的当前内存快照交给后台 writer。
+    ///
+    /// 适用场景：创建、session 更新、配置变更与销毁；AppEvent drain 不做 IO。
+    /// 例：本地 -> atomic file，Remote -> SSH atomic write。
+    pub(super) fn request_workflow_agent_sidecar_save(
+        &mut self,
+        index: usize,
+        sidecar_path: PathBuf,
+    ) {
+        let Some(workspace) = self.workspaces.get(index) else {
+            return;
+        };
+        let key = (index, sidecar_path.clone());
+        let workspace_path = workspace.path.clone();
+        let agents = workspace.subagents.clone();
+        let remote = self.remote_workflow_context(index);
+        let should_start = match self.workflow_agent_sidecar_saves.get_mut(&key) {
+            Some(state) => {
+                state.workspace_path = workspace_path;
+                state.agents = agents;
+                state.remote = remote;
+                state.revision = state.revision.saturating_add(1);
+                !state.in_flight
+            }
+            None => {
+                self.workflow_agent_sidecar_saves.insert(
+                    key,
+                    WorkflowAgentSidecarSaveState {
+                        workspace_path,
+                        agents,
+                        remote,
+                        revision: 1,
+                        in_flight: false,
+                    },
+                );
+                true
+            }
+        };
+        if should_start {
+            self.start_workflow_agent_sidecar_save(index, sidecar_path);
+        }
+    }
+
+    /// 启动一个 sidecar 当前最新快照的后台写入。
+    ///
+    /// 适用场景：首次 dirty 或上一代写完后仍有更新。例：revision 2 等 revision 1 完成后启动。
+    fn start_workflow_agent_sidecar_save(&mut self, index: usize, sidecar_path: PathBuf) {
+        let key = (index, sidecar_path.clone());
+        let Some(state) = self.workflow_agent_sidecar_saves.get_mut(&key) else {
+            return;
+        };
+        if state.in_flight {
+            return;
+        }
+        state.in_flight = true;
+        let workspace_path = state.workspace_path.clone();
+        let agents = state.agents.clone();
+        let remote = state.remote.clone();
+        let revision = state.revision;
+        let tx = self.app_event_tx.clone();
+        let repaint_controller = self.repaint_controller.clone();
+        let repaint_ctx = self.app_repaint_ctx.clone();
+        self.background_runtime.spawn(async move {
+            let task_sidecar = sidecar_path.clone();
+            let result = tokio::task::spawn_blocking(move || match remote {
+                Ok(Some((config, shell))) => remote_workspace::save_remote_workflow_agent_sidecar(
+                    &config,
+                    shell,
+                    &workspace_path,
+                    &task_sidecar,
+                    &agents,
+                ),
+                Ok(None) => crate::gui::workflow::save_local_workflow_agent_sidecar(
+                    &workspace_path,
+                    &task_sidecar,
+                    &agents,
+                ),
+                Err(error) => Err(error),
+            })
+            .await
+            .unwrap_or_else(|error| Err(error.to_string()));
+            let _ = tx.send(AppEvent::WorkflowAgentSidecarSaved {
+                index,
+                sidecar_path,
+                revision,
+                result,
+            });
+            if let Some(ctx) = repaint_ctx.as_ref() {
+                repaint_controller.request_repaint(ctx);
+            }
+        });
+    }
+
+    /// 消费一次 sidecar 写入结果，并在期间又变脏时启动下一代。
+    ///
+    /// 适用场景：后台 writer AppEvent。例：revision 1 完成但 latest=3 -> 直接写 revision 3。
+    pub(super) fn finish_workflow_agent_sidecar_save(
+        &mut self,
+        index: usize,
+        sidecar_path: PathBuf,
+        revision: u64,
+    ) -> bool {
+        let key = (index, sidecar_path.clone());
+        let Some(state) = self.workflow_agent_sidecar_saves.get_mut(&key) else {
+            return false;
+        };
+        state.in_flight = false;
+        let restart = state.revision > revision;
+        if restart {
+            self.start_workflow_agent_sidecar_save(index, sidecar_path);
+        } else {
+            self.workflow_agent_sidecar_saves.remove(&key);
+        }
+        !restart
+    }
+
+    /// 返回一个运行时 Agent 槽位对应的 Workflow sidecar。
+    ///
+    /// 适用场景：复用普通 Agent 设置菜单后选择正确 persistence writer。例：普通 subagent -> None。
+    pub(super) fn workflow_agent_sidecar_for_slot(
+        &self,
+        index: usize,
+        slot: &AgentSlotId,
+    ) -> Option<PathBuf> {
+        let AgentSlotId::Subagent(id) = slot else {
+            return None;
+        };
+        self.workspaces
+            .get(index)?
+            .subagents
+            .iter()
+            .find(|agent| agent.id == *id && agent.workflow_target.is_some())?
+            .workflow_sidecar_path
+            .clone()
+    }
+
+    /// 按 Agent 类型把配置变化写入普通 store 或 Workflow sidecar。
+    ///
+    /// 适用场景：Switch/Model/Effort/Workdir 等复用菜单。例：WF slot -> 只写分层 JSON。
+    pub(super) fn persist_agent_slot_change(&mut self, index: usize, slot: &AgentSlotId) {
+        if let Some(sidecar_path) = self.workflow_agent_sidecar_for_slot(index, slot) {
+            self.request_workflow_agent_sidecar_save(index, sidecar_path);
+        } else {
+            self.persist_workspaces();
+        }
+    }
+
+    /// 销毁一个 Workflow Agent：先断开 host，再删除关联记录并写回 sidecar。
+    ///
+    /// 适用场景：右键 Destroy Agent 与 Workflow 级联删除。例：Step Agent -> host exit + JSON record removed。
+    pub(super) fn destroy_workflow_agent(
+        &mut self,
+        ctx: &egui::Context,
+        index: usize,
+        target: &data::WorkflowAgentTarget,
+    ) {
+        self.destroy_workflow_agent_targets(ctx, index, &BTreeSet::from([target.clone()]));
+    }
+
+    /// 批量销毁目标集合，确保同一 sidecar 只写一次最终快照。
+    ///
+    /// 适用场景：删除 Project/Task 与 Merge Steps。例：三个 Step Agent -> 一次 task sidecar 写回。
+    fn destroy_workflow_agent_targets(
+        &mut self,
+        ctx: &egui::Context,
+        index: usize,
+        targets: &BTreeSet<data::WorkflowAgentTarget>,
+    ) {
+        if targets.is_empty() {
+            return;
+        }
+        let removed = self
+            .workspaces
+            .get(index)
+            .map(|workspace| {
+                workspace
+                    .subagents
+                    .iter()
+                    .filter(|agent| {
+                        agent
+                            .workflow_target
+                            .as_ref()
+                            .is_some_and(|target| targets.contains(target))
+                    })
+                    .map(|agent| {
+                        (
+                            agent.id.clone(),
+                            agent.workflow_sidecar_path.clone(),
+                            agent.workflow_target.clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let sidecars = removed
+            .iter()
+            .filter_map(|(_, path, _)| path.clone())
+            .collect::<BTreeSet<_>>();
+        for (id, _, _) in &removed {
+            self.remove_subagent(ctx, index, id);
+        }
+        if let Some(state) = self.workflow_states.get_mut(index)
+            && state
+                .active_agent_target
+                .as_ref()
+                .is_some_and(|target| targets.contains(target))
+        {
+            state.active_agent_target = None;
+        }
+        for sidecar_path in sidecars {
+            self.request_workflow_agent_sidecar_save(index, sidecar_path);
+        }
+    }
+
+    /// 返回一次 Workflow mutation 成功后必须销毁的稳定 Agent 目标。
+    ///
+    /// 适用场景：文件修改成功后再清理关联，失败不误杀 Agent。例：Merge -> 所有参与 Step target。
+    fn workflow_agent_targets_removed_by_mutation(
+        &self,
+        index: usize,
+        request: &WorkflowMutationRequest,
+    ) -> BTreeSet<data::WorkflowAgentTarget> {
+        let Some(tree) = self
+            .workflow_states
+            .get(index)
+            .and_then(|state| state.tree.as_ref())
+        else {
+            return BTreeSet::new();
+        };
+        let mut removed = BTreeSet::new();
+        match request {
+            WorkflowMutationRequest::DeleteProject { project_path } => {
+                if let Some((owner, project)) = workflow_trees(tree).find_map(|owner| {
+                    owner.projects.iter().find_map(|project| {
+                        (project.root_path.parent() == Some(project_path.as_path()))
+                            .then_some((owner, project))
+                    })
+                }) {
+                    for agent in self
+                        .workspaces
+                        .get(index)
+                        .into_iter()
+                        .flat_map(|workspace| workspace.subagents.iter())
+                    {
+                        if let Some(target) = agent.workflow_target.as_ref()
+                            && target.repo_path == owner.repo_path
+                            && target.repo_id == owner.id
+                            && target.project_id.as_deref() == Some(project.id.as_str())
+                        {
+                            removed.insert(target.clone());
+                        }
+                    }
+                }
+            }
+            WorkflowMutationRequest::DeleteTask { task_path } => {
+                if let Some((owner, project, task)) = workflow_trees(tree).find_map(|owner| {
+                    owner.projects.iter().find_map(|project| {
+                        project
+                            .tasks
+                            .iter()
+                            .find(|task| task.path == *task_path)
+                            .map(|task| (owner, project, task))
+                    })
+                }) {
+                    for agent in self
+                        .workspaces
+                        .get(index)
+                        .into_iter()
+                        .flat_map(|workspace| workspace.subagents.iter())
+                    {
+                        if let Some(target) = agent.workflow_target.as_ref()
+                            && target.repo_path == owner.repo_path
+                            && target.repo_id == owner.id
+                            && target.project_id.as_deref() == Some(project.id.as_str())
+                            && target.task_id.as_deref() == Some(task.id.as_str())
+                        {
+                            removed.insert(target.clone());
+                        }
+                    }
+                }
+            }
+            WorkflowMutationRequest::DeleteStep {
+                task_path,
+                step_path,
+            } => {
+                let selection = WorkflowSelectionTarget::Step {
+                    task_path: task_path.clone(),
+                    step_path: step_path.clone(),
+                };
+                if let Some(binding) =
+                    crate::gui::workflow::workflow_agent_binding(tree, &selection)
+                {
+                    removed.insert(binding.target);
+                }
+            }
+            WorkflowMutationRequest::MergeSteps {
+                task_path,
+                step_paths,
+                ..
+            } => {
+                for step_path in step_paths {
+                    let selection = WorkflowSelectionTarget::Step {
+                        task_path: task_path.clone(),
+                        step_path: step_path.clone(),
+                    };
+                    if let Some(binding) =
+                        crate::gui::workflow::workflow_agent_binding(tree, &selection)
+                    {
+                        removed.insert(binding.target);
+                    }
+                }
+            }
+            _ => {}
+        }
+        removed
+    }
+
     /// 返回指定 workspace 的 Remote WF 连接快照。
     ///
     /// 适用场景：后台任务发出前固定 config 与 shell，避免 render 状态跨线程借用。
@@ -395,6 +1112,10 @@ impl GsdvGuiApp {
         if !self.workflow_request_identity_matches(index, &workspace_path, remote_runtime_id) {
             return;
         }
+        let result = result.map(|tree| {
+            self.merge_loaded_workflow_agents(index, &tree);
+            tree
+        });
         let Some(state) = self.workflow_states.get_mut(index) else {
             return;
         };
@@ -447,6 +1168,43 @@ impl GsdvGuiApp {
             self.open_workflow_target_now_with_mode(ctx, target, pending_target_mode);
         }
         self.sync_fs_watches();
+    }
+
+    /// 用 sidecar 快照替换当前 workspace 的 Workflow Agent，同时保留运行态 activity。
+    ///
+    /// 适用场景：Workflow 刷新或 Remote 重载。例：普通 subagent + 2 个 WF Agent -> 后两者按 target 更新。
+    fn merge_loaded_workflow_agents(&mut self, index: usize, tree: &WorkflowTree) {
+        let loaded = workflow_trees(tree)
+            .flat_map(|tree| tree.agents.iter().cloned())
+            .collect::<Vec<_>>();
+        let Some(workspace) = self.workspaces.get_mut(index) else {
+            return;
+        };
+        let existing = workspace
+            .subagents
+            .iter()
+            .filter_map(|agent| Some((agent.workflow_target.clone()?, agent.clone())))
+            .collect::<BTreeMap<_, _>>();
+        workspace
+            .subagents
+            .retain(|agent| agent.workflow_target.is_none());
+        for mut agent in loaded {
+            if let Some(existing) = agent
+                .workflow_target
+                .as_ref()
+                .and_then(|target| existing.get(target))
+            {
+                let sidecar_path = agent.workflow_sidecar_path.clone();
+                agent = existing.clone();
+                agent.workflow_sidecar_path = sidecar_path;
+            }
+            if let Some(states) = self.agent_busy_watchdogs.get_mut(index) {
+                states
+                    .entry(AgentSlotId::Subagent(agent.id.clone()))
+                    .or_default();
+            }
+            workspace.subagents.push(agent);
+        }
     }
 
     /// 请求打开 workflow 目标，必要时先弹出未保存片段确认。
@@ -891,6 +1649,9 @@ impl GsdvGuiApp {
         let remote = workspace.remote.is_some();
         match result {
             Ok(()) => {
+                let removed_targets =
+                    self.workflow_agent_targets_removed_by_mutation(index, &request);
+                self.destroy_workflow_agent_targets(ctx, index, &removed_targets);
                 self.cleanup_after_workflow_mutation(index, &request);
                 if !remote {
                     self.spawn_outline_refresh_tasks(ctx, BTreeSet::from([index]));
@@ -918,11 +1679,23 @@ impl GsdvGuiApp {
                 new_key,
             } => {
                 let old_prefix = project_path.clone();
+                let project_id = project_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| {
+                        crate::gui::workflow::split_stable_name(
+                            name,
+                            crate::gui::workflow::NODE_ID_LEN,
+                        )
+                        .map(|(id, _)| id.to_string())
+                    })
+                    .unwrap_or_else(|| "project".to_string());
                 let new_prefix = project_path
                     .parent()
-                    .map(|parent| parent.join(new_key))
-                    .unwrap_or_else(|| PathBuf::from(new_key));
+                    .map(|parent| parent.join(format!("{project_id}.{new_key}")))
+                    .unwrap_or_else(|| PathBuf::from(format!("{project_id}.{new_key}")));
                 self.rename_workflow_document_prefix(index, &old_prefix, &new_prefix);
+                self.rename_workflow_agent_sidecars(index, &old_prefix, &new_prefix);
                 if let Some(state) = self.workflow_states.get_mut(index) {
                     let old_state_key = workflow_project_state_key_from_path(project_path);
                     let new_state_key = workflow_project_state_key_from_path(&new_prefix);
@@ -1023,6 +1796,41 @@ impl GsdvGuiApp {
                     step_path: editor.step_path.clone(),
                 };
             }
+        }
+    }
+
+    /// 重写 Project 重命名后 Workflow Agent 的 sidecar 路径并写回最新快照。
+    ///
+    /// 适用场景：目录已在后台完成 rename；旧 writer 不得重建旧目录。例：`a.old -> a.new`。
+    fn rename_workflow_agent_sidecars(
+        &mut self,
+        index: usize,
+        old_prefix: &Path,
+        new_prefix: &Path,
+    ) {
+        let mut sidecars = BTreeSet::new();
+        if let Some(workspace) = self.workspaces.get_mut(index) {
+            for agent in workspace
+                .subagents
+                .iter_mut()
+                .filter(|agent| agent.workflow_target.is_some())
+            {
+                let Some(path) = agent.workflow_sidecar_path.as_ref() else {
+                    continue;
+                };
+                let Some(next) = rewritten_path_prefix(path, old_prefix, new_prefix) else {
+                    continue;
+                };
+                agent.workflow_sidecar_path = Some(next.clone());
+                sidecars.insert(next);
+            }
+        }
+        self.workflow_agent_sidecar_saves
+            .retain(|(workspace_index, path), _| {
+                *workspace_index != index || !path.starts_with(old_prefix)
+            });
+        for sidecar in sidecars {
+            self.request_workflow_agent_sidecar_save(index, sidecar);
         }
     }
 
@@ -1184,7 +1992,13 @@ impl GsdvGuiApp {
                     return Some(error);
                 }
                 let project_key = project_path.file_name()?.to_string_lossy();
-                if project_key == new_key.as_str() {
+                let current_label = crate::gui::workflow::split_stable_name(
+                    &project_key,
+                    crate::gui::workflow::NODE_ID_LEN,
+                )
+                .map(|(_, label)| label)
+                .unwrap_or(&project_key);
+                if current_label == new_key.as_str() {
                     return None;
                 }
                 let spec_path = project_path.parent()?.parent()?;
@@ -1250,7 +2064,7 @@ impl GsdvGuiApp {
             .find(|tree| tree.spec_path == spec_path)?
             .projects
             .iter()
-            .any(|project| project.key != current_key && project.key == key)
+            .any(|project| project.key != current_key && project.label == key)
             .then(|| format!("project already exists: {key}"))
     }
 
@@ -1463,24 +2277,82 @@ fn workflow_copy_path_from_parts(parts: &[String]) -> String {
     parts.join(" > ")
 }
 
+/// 从稳定 Agent 目标恢复不含文件名的 Workflow 层级路径。
+///
+/// 适用场景：Agent 首次提示词不能依赖当前 UI 选择。例：Step -> `Root > project > task > step`。
+fn workflow_agent_logical_path(
+    tree: &WorkflowTree,
+    target: &data::WorkflowAgentTarget,
+) -> Option<String> {
+    for owner in workflow_trees(tree) {
+        if owner.repo_path != target.repo_path || owner.id != target.repo_id {
+            continue;
+        }
+        let mut parts = vec![if owner.repo_path.as_os_str().is_empty() {
+            "Root".to_string()
+        } else {
+            owner.repo_path.to_string_lossy().replace('\\', "/")
+        }];
+        if target.kind == data::WorkflowAgentTargetKind::Repo {
+            return Some(workflow_copy_path_from_parts(&parts));
+        }
+        let project_id = target.project_id.as_deref()?;
+        let project = owner
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)?;
+        parts.push(project.label.clone());
+        if target.kind == data::WorkflowAgentTargetKind::Project {
+            return Some(workflow_copy_path_from_parts(&parts));
+        }
+        let task_id = target.task_id.as_deref()?;
+        let task = project.tasks.iter().find(|task| task.id == task_id)?;
+        parts.push(task.label.clone());
+        if target.kind == data::WorkflowAgentTargetKind::Task {
+            return Some(workflow_copy_path_from_parts(&parts));
+        }
+        let step_id = target.step_id.as_deref()?;
+        parts.extend(workflow_step_titles_for_id(&task.steps, step_id)?);
+        return Some(workflow_copy_path_from_parts(&parts));
+    }
+    None
+}
+
+/// 返回目标 Step 从顶层到自身的标题链。
+///
+/// 适用场景：Step Agent 只持久化稳定 ID。例：父子 Step -> `[父, 子]`。
+fn workflow_step_titles_for_id(nodes: &[WorkflowStepNode], step_id: &str) -> Option<Vec<String>> {
+    for node in nodes {
+        if node.id == step_id {
+            return Some(vec![node.title.clone()]);
+        }
+        if let Some(mut titles) = workflow_step_titles_for_id(&node.children, step_id) {
+            titles.insert(0, node.title.clone());
+            return Some(titles);
+        }
+    }
+    None
+}
+
 /// 从 task 节点提取新增弹窗使用的 task key。
 fn workflow_task_key(task: &WorkflowTaskNode) -> String {
-    let stem = task
-        .path
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().to_string())
-        .unwrap_or_else(|| task.label.clone());
-    stem.strip_prefix("task-")
-        .map(str::to_string)
-        .unwrap_or(stem)
+    task.label.clone()
 }
 
 /// 计算 task 重命名后的 workspace 相对路径。
 fn workflow_task_path_after_rename(task_path: &Path, new_key: &str) -> PathBuf {
+    let task_id = task_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| {
+            crate::gui::workflow::split_stable_name(stem, crate::gui::workflow::NODE_ID_LEN)
+                .map(|(id, _)| id.to_string())
+        })
+        .unwrap_or_else(|| "task".to_string());
     task_path
         .parent()
-        .map(|parent| parent.join(format!("task-{new_key}.md")))
-        .unwrap_or_else(|| PathBuf::from(format!("task-{new_key}.md")))
+        .map(|parent| parent.join(format!("{task_id}.task-{new_key}.md")))
+        .unwrap_or_else(|| PathBuf::from(format!("{task_id}.task-{new_key}.md")))
 }
 
 /// 如果路径正好匹配旧路径，则改写成新路径。

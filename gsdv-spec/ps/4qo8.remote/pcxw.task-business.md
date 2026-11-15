@@ -1,6 +1,6 @@
 梳理 remote 能力需要暴露的业务数据与 agent 操作语义。
 
-## [x] 定义 workspace 元数据范围
+## [x]kjqi7n 定义 workspace 元数据范围
 确认 API 需要返回的 workspace 数据边界。
 
 已明确需要包含：
@@ -19,7 +19,7 @@
 - agent 当前状态：暂时不返回
 - agent 所属路径、模型、会话信息：暂时不返回，当前只保留已确认的最小元数据
 
-## [x] 定义 agent 输入能力
+## [x]7ibkoi 定义 agent 输入能力
 确认远程调用 agent 时的业务动作。
 
 已明确需要支持：
@@ -38,7 +38,7 @@
 - 图片发送到 agent 的最终输入形态：如复用 `egui::Context::copy_image`，输入最终需要变成 `egui::ColorImage`；也就是需要宽、高和 RGBA 像素数据，或可解码成 RGBA 的 PNG/JPEG 等图片字节；`copy_image` 只负责写入系统剪贴板，不等同于已发送给 agent
 - agent 不存在或未启动时的业务错误：直接返回找不到错误，不区分 agent id 不存在和 terminal host 未就绪
 
-## [x] 定义 agent 输出订阅语义
+## [x]hw8shf 定义 agent 输出订阅语义
 确认 WebSocket 绑定某个 agent 后的数据流规则。
 
 已明确需要支持：

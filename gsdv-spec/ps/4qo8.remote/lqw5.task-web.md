@@ -1,6 +1,6 @@
 在 web/ 下实现 Vue + AntV remote 页面。
 
-## [x] 创建 web 工程
+## [x]6hlqak 创建 web 工程
 在代码目录 web/ 下创建前端工程。
 
 已明确技术方向：
@@ -16,7 +16,7 @@
 
 - Rust include 静态资源的具体接入方式
 
-## [x] 实现页面布局
+## [x]h5b089 实现页面布局
 实现 remote 页面基础结构。
 
 已明确布局：
@@ -26,7 +26,7 @@
 - 点击 left icon 划出左侧抽屉
 - 主区域展示 terminal 输出
 - 底部输入框发送文本
-## [x] 实现 workspace 抽屉 tree
+## [x]rbc05q 实现 workspace 抽屉 tree
 在左侧抽屉展示 workspace 级别 tree。
 
 树结构：
@@ -41,7 +41,7 @@
 - 建立绑定该 agent 的 WebSocket
 - 关闭抽屉
 - 页面渲染为该 agent terminal 输出
-## [x] 实现 agent terminal 输出视图
+## [x]gszygd 实现 agent terminal 输出视图
 展示 WebSocket 推送的 agent 输出。
 
 已明确行为：
@@ -54,7 +54,7 @@
 - 保留 ANSI 样式，并应用到 CSS 上
 - 收到 snapshot/append 后自动滚动到底部
 - 前端最多保留最近 2000 行
-## [x] 实现 agent 输入框
+## [x]p02kvc 实现 agent 输入框
 底部输入框调用 API 给当前 agent 发送输入。
 
 已确认：
@@ -63,7 +63,7 @@
 - Shift+Enter 换行
 - 输入框左边增加 ESC 按钮
 - 图片入口为本地文件选择
-## [x] 接入 web 构建与 remote 静态前端
+## [x]7g11yx 接入 web 构建与 remote 静态前端
 增加 Makefile 构建入口，并让 remote HTTP 服务挂载前端构建产物。
 
 已确认：
@@ -82,3 +82,4 @@
 - 前端构建产物通过 Rust 二进制内嵌方式随应用一起可用
 - 未构建 `web/dist/index.html` 时 Rust 编译失败
 - 非 `/` 和 `/assets/...` 的前端路径返回 404
+

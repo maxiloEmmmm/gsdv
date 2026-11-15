@@ -34,6 +34,7 @@ static GLOBAL_ALLOCATOR: pprof_alloc::PprofAlloc = pprof_alloc::PprofAlloc::new(
     .with_stats();
 
 const GSDV_WF_SKILL: &str = include_str!("../../assets/skills/gsdv-wf/SKILL.md");
+const GSDV_IMAGE_SKILL: &str = include_str!("../../assets/skills/gsdv-image/SKILL.md");
 const CODEX_AGENT_STATUS_HOOK_EVENTS: [&str; 5] = [
     "SessionStart",
     "UserPromptSubmit",
@@ -142,6 +143,7 @@ fn install_self() -> Result<()> {
     install_agent_status_hook(&current)?;
     install_codex_hooks()?;
     install_claude_hooks()?;
+    install_show_image_hook(&current)?;
     install_agent_skills()?;
     Ok(())
 }
@@ -189,6 +191,23 @@ fn set_hook_executable(path: &Path) -> Result<()> {
 fn agent_status_hook_script(gsdv_exe: &Path) -> String {
     let gsdv_exe = shell_quote(&agent_hook_shell_path(gsdv_exe));
     format!("#!/bin/sh\nexec {gsdv_exe} agent-status-hook\n")
+}
+
+/// 安装 skill 调用的图片展示 hook 脚本。
+///
+/// 适用场景：agent 需要把生成图片交给当前 GSDV。示例：绝对路径 -> `image.show`。
+fn install_show_image_hook(gsdv_exe: &Path) -> Result<()> {
+    let hook_dir = gsdv_home_dir()?.join("hooks");
+    fs::create_dir_all(&hook_dir)
+        .with_context(|| format!("failed to create {}", hook_dir.display()))?;
+    let hook_path = hook_dir.join("show-image");
+    let exe = shell_quote(&agent_hook_shell_path(gsdv_exe));
+    let script = format!(
+        "#!/bin/sh\nset -eu\n: \"${{GSDV_HOOK_ENDPOINT:?GSDV_HOOK_ENDPOINT is not set}}\"\n[ \"${{1:-}}\" != \"\" ]\nexec {exe} hook-client --endpoint \"$GSDV_HOOK_ENDPOINT\" --key image.show --data \"$1\"\n"
+    );
+    fs::write(&hook_path, script)
+        .with_context(|| format!("failed to write {}", hook_path.display()))?;
+    set_hook_executable(&hook_path)
 }
 
 /// 安装 Codex hooks，并把 gsdv 自己写入的 hook 标记为已信任。
@@ -570,6 +589,14 @@ fn install_agent_skills() -> Result<()> {
     install_skill(
         &home.join(".claude").join("skills").join("gsdv-wf"),
         GSDV_WF_SKILL,
+    )?;
+    install_skill(
+        &home.join(".codex").join("skills").join("gsdv-image"),
+        GSDV_IMAGE_SKILL,
+    )?;
+    install_skill(
+        &home.join(".claude").join("skills").join("gsdv-image"),
+        GSDV_IMAGE_SKILL,
     )?;
     Ok(())
 }

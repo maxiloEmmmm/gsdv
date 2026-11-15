@@ -2,11 +2,27 @@
 # 验证嵌套 workflow 扫描的文件系统边界规则。
 #
 # 场景：workspace 自身可以有 .git；扫描会继续进入普通目录，命中子目录
-# 的 .git 文件或目录后只检查该 repo 自身的 gsdv-spec/root.md，并停止深入。
+# 的 .git 文件或目录后只检查该 repo 自身的旧 root.md 或 `<4位ID>.root.md`，
+# 并停止深入。
 # 该脚本只使用临时目录，不修改真实 workspace。
 # 示例：./tests/e2e/third_party/nested_workflow_scan.sh -> ok
 
 set -euo pipefail
+
+# 判断目录是否包含旧版或稳定 ID 版 Workflow 根文件。
+# 示例：has_workflow_root gsdv-spec -> true。
+has_workflow_root() {
+    local spec_root="$1"
+    local root name
+
+    [[ -f "$spec_root/root.md" ]] && return 0
+    for root in "$spec_root"/*.root.md; do
+        [[ -f "$root" ]] || continue
+        name="${root##*/}"
+        [[ "$name" =~ ^[0-9a-z]{4}\.root\.md$ ]] && return 0
+    done
+    return 1
+}
 
 # 收集含 workflow 的嵌套 Git repo，输出 workspace 相对路径。
 # 示例：scan "$tmp/workspace" -> services/api
@@ -23,7 +39,7 @@ scan() {
         child="${relative_dir:+$relative_dir/}$name"
         git_marker="$entry/.git"
         if [[ -e "$git_marker" || -L "$git_marker" ]]; then
-            [[ -f "$entry/gsdv-spec/root.md" ]] && printf '%s\n' "$child"
+            has_workflow_root "$entry/gsdv-spec" && printf '%s\n' "$child"
         else
             scan "$workspace" "$child"
         fi
@@ -39,8 +55,8 @@ mkdir -p "$workspace/.git" "$workspace/services/api/.git/objects" \
     "$workspace/tools/plain/nested/.git" "$workspace/tools/plain/nested/gsdv-spec" \
     "$workspace/no-spec/.git/objects" "$workspace/no-spec/deeper/.git"
 touch "$workspace/services/api/gsdv-spec/root.md" \
-    "$workspace/services/api/vendor/ignored/gsdv-spec/root.md" \
-    "$workspace/tools/plain/nested/gsdv-spec/root.md"
+    "$workspace/services/api/vendor/ignored/gsdv-spec/dead.root.md" \
+    "$workspace/tools/plain/nested/gsdv-spec/a1b2.root.md"
 
 mapfile -t discovered < <(scan "$workspace")
 [[ "${#discovered[@]}" -eq 2 ]] || {

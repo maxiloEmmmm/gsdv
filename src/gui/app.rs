@@ -7,6 +7,7 @@ use crate::gui::data::{
 };
 use crate::gui::hook;
 use crate::gui::i18n;
+use crate::gui::local_image;
 use crate::gui::markdown_preview;
 #[cfg(test)]
 use crate::gui::outline::tree_row_content_width_from_label_width;
@@ -33,11 +34,12 @@ use crate::gui::terminal_host::{
 };
 use crate::gui::theme;
 use crate::gui::workflow::{
-    WorkflowMutationRequest, WorkflowProjectNode, WorkflowSaveRequest, WorkflowSaveSuccess,
-    WorkflowSelectionTarget, WorkflowStepEditor, WorkflowStepNode, WorkflowTaskEditor,
-    WorkflowTaskNode, WorkflowTree, path_is_workflow_spec_path, workflow_project_state_key,
-    workflow_project_state_key_from_path, workflow_projects, workflow_root_missing_error,
-    workflow_step_editor_from_node, workflow_task_editor_from_node, workflow_tasks, workflow_trees,
+    WorkflowAgentBinding, WorkflowMutationRequest, WorkflowProjectNode, WorkflowSaveRequest,
+    WorkflowSaveSuccess, WorkflowSelectionTarget, WorkflowStepEditor, WorkflowStepNode,
+    WorkflowTaskEditor, WorkflowTaskNode, WorkflowTree, path_is_workflow_spec_path,
+    workflow_project_state_key, workflow_project_state_key_from_path, workflow_projects,
+    workflow_root_missing_error, workflow_step_editor_from_node, workflow_task_editor_from_node,
+    workflow_tasks, workflow_trees,
 };
 use crate::reviewer::app::{GuiReviewerRowTone, ReviewerGitDataResult};
 use eframe::egui::text_edit::{TextEditOutput, TextEditState};
@@ -100,6 +102,9 @@ mod app_input;
 use app_input::{process_input_runtime_request, read_base_route_command_for_input};
 #[path = "app_markdown.rs"]
 mod app_markdown;
+
+#[path = "app_local_image.rs"]
+mod app_local_image;
 use app_markdown::*;
 
 #[path = "app_notifications.rs"]
@@ -144,6 +149,9 @@ mod app_tasks;
 
 #[path = "app_workflow.rs"]
 mod app_workflow;
+
+#[path = "app_workflow_columns.rs"]
+mod app_workflow_columns;
 
 #[cfg(test)]
 use app_input::{agent_tab_own_shortcut_pressed, read_reviewer_command, read_ui_command};
@@ -417,6 +425,23 @@ fn command_exists(command: &str) -> bool {
     std::env::split_paths(&paths).any(|dir| dir.join(command).is_file())
 }
 
+/// 单个 Workflow Agent sidecar 的合并写入状态。
+///
+/// 适用场景：创建后 hook 立即补 session 时只允许顺序写盘。例：revision 1 写完再写 revision 2。
+#[derive(Clone)]
+struct WorkflowAgentSidecarSaveState {
+    /// 当前 workspace 根路径快照。
+    workspace_path: PathBuf,
+    /// 最新一次请求对应的 Agent 内存快照。
+    agents: Vec<data::SubagentViewData>,
+    /// 最新一次请求对应的本地或 Remote 连接快照。
+    remote: Result<Option<(RemoteWorkspaceConfig, RemoteShell)>, String>,
+    /// 最新快照代次。
+    revision: u64,
+    /// 该 sidecar 是否已有后台 writer 正在运行。
+    in_flight: bool,
+}
+
 struct GsdvGuiApp {
     active_workspace: usize,
     workspaces: Vec<WorkspaceViewData>,
@@ -442,7 +467,15 @@ struct GsdvGuiApp {
     reviewer_helix_drawers: Vec<bool>,
     pending_agent_theme_restarts: Vec<Option<Instant>>,
     documents: Vec<DocumentState>,
+    /// GUI/TUI 共用的本地图片解码与纹理缓存。
+    local_images: local_image::LocalImageStore,
+    /// socket 图片展示请求形成的顶层内存画廊。
+    image_gallery: local_image::ImageGalleryState,
     app_dialogs: Vec<Option<AppDialog>>,
+    /// 复用 AddSubagent 面板时暂存的 Workflow Agent 创建目标。
+    pending_workflow_agent_binding: Option<(usize, WorkflowAgentBinding)>,
+    /// 按 workspace 与 sidecar 合并的 Workflow Agent 后台写队列。
+    workflow_agent_sidecar_saves: BTreeMap<(usize, PathBuf), WorkflowAgentSidecarSaveState>,
     /// quick workflow modal 上方的二级确认框，按 workspace 隔离。
     workflow_quick_overlay_dialogs: Vec<Option<AppDialog>>,
     global_app_dialog: Option<AppDialog>,
@@ -882,6 +915,7 @@ impl GsdvGuiApp {
     fn attach_frontend_runtime(&mut self, ctx: &egui::Context) {
         self.app_repaint_ctx = Some(ctx.clone());
         self.set_fs_watch_repaint_context(ctx.clone());
+        self.spawn_external_hook_server(ctx.clone());
         self.restart_remote_server(ctx, false);
         self.start_remote_workspace_loads(ctx);
     }
@@ -989,7 +1023,11 @@ impl GsdvGuiApp {
             reviewer_helix_drawers,
             pending_agent_theme_restarts,
             documents,
+            local_images: local_image::LocalImageStore::default(),
+            image_gallery: local_image::ImageGalleryState::default(),
             app_dialogs,
+            pending_workflow_agent_binding: None,
+            workflow_agent_sidecar_saves: BTreeMap::new(),
             workflow_quick_overlay_dialogs,
             global_app_dialog: None,
             outline_tree_rects,
@@ -1093,7 +1131,6 @@ impl GsdvGuiApp {
             suppress_default_agent_input: false,
         };
         app.sync_fs_watches();
-        app.spawn_external_hook_server();
         app.initialize_spotlight_stopped_order();
         app
     }
@@ -1257,6 +1294,8 @@ struct AgentHostSlot {
 #[derive(Default)]
 struct DocumentState {
     path: Option<PathBuf>,
+    /// 当前 Markdown 的绝对路径，用于解析本地图片相对地址。
+    absolute_path: Option<PathBuf>,
     /// 正在后台加载的目标 Markdown，用于避免点击时出现半切换状态。
     loading_path: Option<PathBuf>,
     text: String,
@@ -1297,6 +1336,15 @@ enum WorkflowTargetOpenMode {
     QuickModal,
 }
 
+/// Workflow 右键菜单产生的 Agent 动作。
+#[derive(Debug, Clone)]
+enum WorkflowAgentUiAction {
+    /// 显示已有 Agent 或打开创建面板。
+    Open(WorkflowSelectionTarget),
+    /// 销毁目标 Agent 关联。
+    Destroy(WorkflowSelectionTarget),
+}
+
 #[derive(Debug, Clone, Default)]
 /// 单个 workspace 的 workflow UI 状态。
 struct WorkflowUiState {
@@ -1314,6 +1362,8 @@ struct WorkflowUiState {
     sub_workflow_repo_paths: Vec<PathBuf>,
     /// 当前选中的 workflow 目标。
     selected: Option<WorkflowSelectionTarget>,
+    /// 右侧工作台当前显示的 Workflow Agent；None 显示 Markdown。
+    active_agent_target: Option<data::WorkflowAgentTarget>,
     /// 最近一次选中的 task 工作台目标，用于切回 workflow 时恢复上下文。
     last_task_surface_target: Option<WorkflowSelectionTarget>,
     /// workflow tree 加载完成后是否需要恢复 task 上下文。
@@ -1784,6 +1834,20 @@ enum AppEvent {
         outline_entries: Vec<MarkdownOutlineEntry>,
         preview_blocks: Vec<markdown_preview::MarkdownBlock>,
     },
+    /// 请求在后台加载一张本地图片。
+    RequestLocalImage {
+        /// 已解析的绝对图片路径。
+        path: PathBuf,
+        /// 加载成功后是否加入顶层画廊。
+        gallery: bool,
+    },
+    /// 本地图片后台解码完成。
+    LocalImageLoaded {
+        /// 请求对应的绝对图片路径。
+        path: PathBuf,
+        /// 解码像素或安全校验错误。
+        result: Result<local_image::DecodedLocalImage, String>,
+    },
     /// 单个 workspace 的 memo 保存完成。
     MemoSaved { index: usize, error: Option<String> },
     /// 单个 workspace 的 outline 刷新完成。
@@ -1894,6 +1958,17 @@ enum AppEvent {
         /// mutation 发出时的 Remote runtime ID；本地 workspace 为 None。
         remote_runtime_id: Option<u64>,
         request: WorkflowMutationRequest,
+        result: Result<(), String>,
+    },
+    /// Workflow Agent 分层 sidecar 后台保存完成。
+    WorkflowAgentSidecarSaved {
+        /// 所属 workspace。
+        index: usize,
+        /// 保存或删除的 workspace 相对 sidecar 路径。
+        sidecar_path: PathBuf,
+        /// 本次后台写入使用的快照代次。
+        revision: u64,
+        /// 本地或 Remote writer 的结果。
         result: Result<(), String>,
     },
     /// Recent Markdown diff context prepared for the active Agent input.
@@ -3130,6 +3205,8 @@ impl GsdvGuiApp {
             self.toast_overlay(ctx);
             self.bottom_bar_overlay(ctx);
         }
+
+        self.image_gallery_overlay(ctx);
 
         self.rendering_frame = false;
         self.last_full_frame_at = Some(Instant::now());

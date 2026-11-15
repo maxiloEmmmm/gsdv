@@ -6,6 +6,7 @@ mod diff_viewer;
 mod glow_gravity_lens;
 pub(crate) mod hook;
 mod i18n;
+mod local_image;
 mod markdown_preview;
 mod outline;
 mod perf_log;

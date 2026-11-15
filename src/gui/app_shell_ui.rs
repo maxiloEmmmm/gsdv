@@ -817,6 +817,7 @@ impl GsdvGuiApp {
         let mut copy_path = None;
         let mut init_workflow_root = false;
         let mut scan_sub_workflows = false;
+        let mut agent_action = None;
         ScrollArea::both()
             .max_height(tree_height)
             .auto_shrink([false, false])
@@ -833,24 +834,25 @@ impl GsdvGuiApp {
                 } else if let Some(error) = load_error {
                     ui.colored_label(theme::warning(), error);
                 }
-                let Some(tree) = tree else {
+                let Some(tree) = tree.as_ref() else {
                     return;
                 };
                 self.render_workflow_root_node(
                     ui,
-                    &tree,
+                    tree,
                     selected.as_ref(),
                     &mut target,
                     &mut context_dialog,
                     &mut copy_path,
                     &mut scan_sub_workflows,
+                    &mut agent_action,
                 );
                 for project in &tree.projects {
                     let collapsed = collapsed_project_keys
-                        .contains(&workflow_project_state_key(&tree, &project.key));
+                        .contains(&workflow_project_state_key(tree, &project.key));
                     self.render_workflow_project_node(
                         ui,
-                        &tree,
+                        tree,
                         project,
                         collapsed,
                         selected.as_ref(),
@@ -858,6 +860,7 @@ impl GsdvGuiApp {
                         &mut toggled_project_key,
                         &mut context_dialog,
                         &mut copy_path,
+                        &mut agent_action,
                     );
                 }
                 for sub_workflow in &tree.sub_workflows {
@@ -877,6 +880,7 @@ impl GsdvGuiApp {
                         &mut context_dialog,
                         &mut copy_path,
                         &mut scan_sub_workflows,
+                        &mut agent_action,
                     );
                     for project in &sub_workflow.projects {
                         let collapsed = collapsed_project_keys
@@ -891,10 +895,11 @@ impl GsdvGuiApp {
                             &mut toggled_project_key,
                             &mut context_dialog,
                             &mut copy_path,
+                            &mut agent_action,
                         );
                     }
                 }
-                if workflow_projects(&tree).next().is_none() {
+                if workflow_projects(tree).next().is_none() {
                     let response =
                         ui.label(muted(i18n::text(self.app_language, "No workflow projects")));
                     response.context_menu(|ui| {
@@ -911,7 +916,9 @@ impl GsdvGuiApp {
                     });
                 }
             });
-        if let Some(dialog) = context_dialog {
+        if let (Some(action), Some(tree)) = (agent_action, tree.as_ref()) {
+            self.apply_workflow_agent_ui_action(ui.ctx(), tree, action);
+        } else if let Some(dialog) = context_dialog {
             self.set_active_app_dialog(Some(dialog));
         } else if init_workflow_root {
             self.request_workflow_mutation(ui.ctx(), WorkflowMutationRequest::InitRoot);
@@ -945,6 +952,7 @@ impl GsdvGuiApp {
         context_dialog: &mut Option<AppDialog>,
         copy_path: &mut Option<String>,
         scan_sub_workflows: &mut bool,
+        agent_action: &mut Option<WorkflowAgentUiAction>,
     ) {
         let root_target = WorkflowSelectionTarget::WorkspaceRoot {
             root_path: tree.root_path.clone(),
@@ -958,9 +966,14 @@ impl GsdvGuiApp {
             false,
             "root.md",
             selected == Some(&root_target),
-            Some("ROOT"),
+            Some(if self.workflow_selection_is_busy(tree, &root_target) {
+                "BUSY"
+            } else {
+                "ROOT"
+            }),
         );
         response.context_menu(|ui| {
+            self.workflow_agent_context_items(ui, tree, &root_target, agent_action);
             if ui
                 .button(i18n::text(self.app_language, "Copy path"))
                 .clicked()
@@ -1010,6 +1023,7 @@ impl GsdvGuiApp {
         toggled_project_key: &mut Option<String>,
         context_dialog: &mut Option<AppDialog>,
         copy_path: &mut Option<String>,
+        agent_action: &mut Option<WorkflowAgentUiAction>,
     ) {
         let project_target = WorkflowSelectionTarget::Project {
             root_path: project.root_path.clone(),
@@ -1028,9 +1042,14 @@ impl GsdvGuiApp {
             false,
             &project.label,
             selected == Some(&project_target),
-            Some("PROJECT"),
+            Some(if self.workflow_selection_is_busy(tree, &project_target) {
+                "BUSY"
+            } else {
+                "PROJECT"
+            }),
         );
         response.context_menu(|ui| {
+            self.workflow_agent_context_items(ui, tree, &project_target, agent_action);
             if ui
                 .button(i18n::text(self.app_language, "Copy path"))
                 .clicked()
@@ -1051,7 +1070,7 @@ impl GsdvGuiApp {
             {
                 *context_dialog = Some(AppDialog::WorkflowRenameProject {
                     project_path: workflow_project_path(tree, project),
-                    key: project.key.clone(),
+                    key: project.label.clone(),
                 });
                 ui.close_menu();
             }
@@ -1093,6 +1112,7 @@ impl GsdvGuiApp {
                     target,
                     context_dialog,
                     copy_path,
+                    agent_action,
                 );
             }
         }
@@ -1109,15 +1129,27 @@ impl GsdvGuiApp {
         target: &mut Option<WorkflowSelectionTarget>,
         context_dialog: &mut Option<AppDialog>,
         copy_path: &mut Option<String>,
+        agent_action: &mut Option<WorkflowAgentUiAction>,
     ) {
         let task_target = WorkflowSelectionTarget::Task {
             task_path: task.path.clone(),
         };
         let selected = workflow_task_is_selected(task, selected);
         let done = workflow_task_done(task);
-        let (response, _, _) =
-            workflow_tree_row(ui, 1, None, None, None, done, &task.label, selected, None);
+        let (response, _, _) = workflow_tree_row(
+            ui,
+            1,
+            None,
+            None,
+            None,
+            done,
+            &task.label,
+            selected,
+            self.workflow_selection_is_busy(tree, &task_target)
+                .then_some("BUSY"),
+        );
         response.context_menu(|ui| {
+            self.workflow_agent_context_items(ui, tree, &task_target, agent_action);
             if ui
                 .button(i18n::text(self.app_language, "Copy path"))
                 .clicked()
@@ -1166,7 +1198,9 @@ impl GsdvGuiApp {
 
     /// 绘制 workflow step 节点。
     fn render_workflow_step_node(
+        &self,
         ui: &mut Ui,
+        tree: &WorkflowTree,
         task: &WorkflowTaskNode,
         step: &WorkflowStepNode,
         depth: usize,
@@ -1180,6 +1214,7 @@ impl GsdvGuiApp {
         copy_path: &mut Option<String>,
         path_parts: &[String],
         language: AppLanguage,
+        agent_action: &mut Option<WorkflowAgentUiAction>,
     ) {
         let step_target = WorkflowSelectionTarget::Step {
             task_path: task.path.clone(),
@@ -1200,9 +1235,11 @@ impl GsdvGuiApp {
             step.checked,
             &step.title,
             selected,
-            None,
+            self.workflow_selection_is_busy(tree, &step_target)
+                .then_some("BUSY"),
         );
         response.context_menu(|ui| {
+            self.workflow_agent_context_items(ui, tree, &step_target, agent_action);
             if step_selected
                 && selected_step_paths.len() >= 2
                 && ui.button(i18n::text(language, "Merge steps")).clicked()
@@ -1409,6 +1446,19 @@ impl GsdvGuiApp {
 
     /// Renders the route content that remains visible in F11 app fullscreen.
     fn workspace_center_surface(&mut self, ui: &mut Ui, current_mode: CenterMode) {
+        let workflow_context = (self.outline_panel_tabs.get(self.active_workspace)
+            == Some(&OutlinePanelTab::Workflow))
+        .then(|| {
+            self.workflow_states
+                .get(self.active_workspace)
+                .and_then(|state| Some((state.tree.clone()?, state.selected.clone())))
+        })
+        .flatten();
+        if let Some((tree, selected)) = workflow_context
+            && self.workflow_agent_workbench_surface(ui, &tree, selected.as_ref())
+        {
+            return;
+        }
         match current_mode {
             CenterMode::Agent => self.agent_surface(ui, current_mode),
             CenterMode::Terminal => self.agent_surface(ui, current_mode),
@@ -1779,6 +1829,7 @@ impl GsdvGuiApp {
                         workspace,
                         workspace_targets,
                     }),
+                    false,
                 );
             }
         }
@@ -1839,6 +1890,7 @@ impl GsdvGuiApp {
                         None,
                         workspace.session_id.as_deref(),
                         self.spotlight_agents.get(&workspace.agent_id).copied(),
+                        true,
                         agent_tab_action,
                         self.app_language,
                     );
@@ -1885,6 +1937,7 @@ impl GsdvGuiApp {
                         Some(subagent.name.as_str()),
                         subagent.session_id.as_deref(),
                         self.spotlight_agents.get(&subagent.agent_id).copied(),
+                        true,
                         agent_tab_action,
                         self.app_language,
                     );
@@ -2249,6 +2302,13 @@ impl GsdvGuiApp {
 
     /// 绘制 workflow task 专属工作台。
     pub(super) fn workflow_task_surface(&mut self, ui: &mut Ui) {
+        let Some(tree) = self
+            .workflow_states
+            .get(self.active_workspace)
+            .and_then(|state| state.tree.clone())
+        else {
+            return;
+        };
         let Some((repo_path, project_label, task)) = self.current_workflow_task_context() else {
             empty_document_panel(
                 ui,
@@ -2271,6 +2331,7 @@ impl GsdvGuiApp {
         let mut step_select = None;
         let mut context_dialog = None;
         let mut merge_step_paths = None;
+        let mut agent_action = None;
         let available = ui.available_size();
         if available.x <= 1.0 || available.y <= 1.0 {
             return;
@@ -2297,7 +2358,9 @@ impl GsdvGuiApp {
                         .horizontal(|mut strip| {
                             strip.cell(|ui| {
                                 workflow_task_step_tree_panel(
+                                    self,
                                     ui,
+                                    &tree,
                                     &task,
                                     selected.as_ref(),
                                     &selected_step_paths,
@@ -2309,6 +2372,7 @@ impl GsdvGuiApp {
                                     &repo_path,
                                     &project_label,
                                     self.app_language,
+                                    &mut agent_action,
                                 );
                             });
                             strip.empty();
@@ -2318,7 +2382,9 @@ impl GsdvGuiApp {
                         });
                 });
             });
-        if let Some(dialog) = context_dialog {
+        if let Some(action) = agent_action {
+            self.apply_workflow_agent_ui_action(ui.ctx(), &tree, action);
+        } else if let Some(dialog) = context_dialog {
             self.set_active_app_dialog(Some(dialog));
         } else if let Some(step_paths) = merge_step_paths {
             let title = workflow_merge_default_title(&task, &step_paths);
@@ -2395,6 +2461,7 @@ impl GsdvGuiApp {
         let mut scan_sub_workflows = false;
         let mut step_select = None;
         let mut merge_step_paths = None;
+        let mut agent_action = None;
         let task_context = self.current_workflow_task_context();
         let selected_step_paths = task_context
             .as_ref()
@@ -2431,13 +2498,16 @@ impl GsdvGuiApp {
                         &mut context_dialog,
                         &mut copy_path,
                         &mut scan_sub_workflows,
+                        &mut agent_action,
                     );
                 });
                 strip.empty();
                 strip.cell(|ui| {
                     if let Some((repo_path, project_label, task)) = task_context.as_ref() {
                         workflow_task_step_tree_panel(
+                            self,
                             ui,
+                            &tree,
                             task,
                             selected.as_ref(),
                             &selected_step_paths,
@@ -2449,6 +2519,7 @@ impl GsdvGuiApp {
                             repo_path,
                             project_label,
                             self.app_language,
+                            &mut agent_action,
                         );
                     } else {
                         workflow_empty_editor_message(
@@ -2459,6 +2530,9 @@ impl GsdvGuiApp {
                 });
                 strip.empty();
                 strip.cell(|ui| {
+                    if self.workflow_agent_workbench_surface(ui, &tree, selected.as_ref()) {
+                        return;
+                    }
                     StripBuilder::new(ui)
                         .size(Size::remainder())
                         .size(Size::exact(8.0))
@@ -2471,7 +2545,9 @@ impl GsdvGuiApp {
                 });
             });
 
-        if let Some(dialog) = context_dialog {
+        if let Some(action) = agent_action {
+            self.apply_workflow_agent_ui_action(ui.ctx(), &tree, action);
+        } else if let Some(dialog) = context_dialog {
             self.set_active_app_dialog(Some(dialog));
         } else if let Some(step_paths) = merge_step_paths {
             if let Some((_, _, task)) = task_context.as_ref() {
@@ -2519,6 +2595,7 @@ impl GsdvGuiApp {
         context_dialog: &mut Option<AppDialog>,
         copy_path: &mut Option<String>,
         scan_sub_workflows: &mut bool,
+        agent_action: &mut Option<WorkflowAgentUiAction>,
     ) {
         let collapsed_project_keys = self
             .workflow_states
@@ -2539,6 +2616,7 @@ impl GsdvGuiApp {
                     context_dialog,
                     copy_path,
                     scan_sub_workflows,
+                    agent_action,
                 );
                 for project in &tree.projects {
                     self.render_workflow_project_node(
@@ -2552,6 +2630,7 @@ impl GsdvGuiApp {
                         toggled_project_key,
                         context_dialog,
                         copy_path,
+                        agent_action,
                     );
                 }
                 for sub_workflow in &tree.sub_workflows {
@@ -2571,6 +2650,7 @@ impl GsdvGuiApp {
                         context_dialog,
                         copy_path,
                         scan_sub_workflows,
+                        agent_action,
                     );
                     for project in &sub_workflow.projects {
                         self.render_workflow_project_node(
@@ -2584,6 +2664,7 @@ impl GsdvGuiApp {
                             toggled_project_key,
                             context_dialog,
                             copy_path,
+                            agent_action,
                         );
                     }
                 }
@@ -2594,7 +2675,7 @@ impl GsdvGuiApp {
     }
 
     /// 应用 task 工作台里的 step 单选或 Shift 范围选择。
-    fn apply_workflow_step_selection(
+    pub(super) fn apply_workflow_step_selection(
         &mut self,
         ctx: &egui::Context,
         task: &WorkflowTaskNode,
@@ -2668,7 +2749,11 @@ impl GsdvGuiApp {
     /// Renders the task description editor with caller-controlled interactivity.
     ///
     /// Example: center surface uses normal keyboard ownership; quick modal passes `true`.
-    fn workflow_task_desc_editor_surface_inner(&mut self, ui: &mut Ui, interactive: bool) {
+    pub(super) fn workflow_task_desc_editor_surface_inner(
+        &mut self,
+        ui: &mut Ui,
+        interactive: bool,
+    ) {
         let Some(editor) = self
             .workflow_states
             .get(self.active_workspace)
@@ -2697,6 +2782,7 @@ impl GsdvGuiApp {
             ui.add_space(8.0);
         }
         if preview {
+            let preview_blocks = self.workflow_preview_blocks(&next_task_text, &editor.task_path);
             workflow_fragment_preview(
                 ui,
                 (
@@ -2704,7 +2790,7 @@ impl GsdvGuiApp {
                     self.active_workspace,
                     editor.task_path.clone(),
                 ),
-                &next_task_text,
+                &preview_blocks,
                 self.theme_mode,
                 ui.available_height().max(1.0),
             );
@@ -2741,7 +2827,7 @@ impl GsdvGuiApp {
     /// Renders the step description editor with caller-controlled interactivity.
     ///
     /// Example: quick modal passes `true` so text editing works while the modal is open.
-    fn workflow_step_editor_surface_inner(&mut self, ui: &mut Ui, interactive: bool) {
+    pub(super) fn workflow_step_editor_surface_inner(&mut self, ui: &mut Ui, interactive: bool) {
         let Some(editor) = self
             .workflow_states
             .get(self.active_workspace)
@@ -2770,6 +2856,7 @@ impl GsdvGuiApp {
             ui.add_space(8.0);
         }
         if preview {
+            let preview_blocks = self.workflow_preview_blocks(&next_step_text, &editor.task_path);
             workflow_fragment_preview(
                 ui,
                 (
@@ -2778,7 +2865,7 @@ impl GsdvGuiApp {
                     editor.task_path.clone(),
                     editor.step_path.clone(),
                 ),
-                &next_step_text,
+                &preview_blocks,
                 self.theme_mode,
                 ui.available_height().max(1.0),
             );
@@ -3271,7 +3358,7 @@ fn workflow_fragment_editor(
 fn workflow_fragment_preview(
     ui: &mut Ui,
     id_salt: impl std::hash::Hash + Clone,
-    text: &str,
+    blocks: &[markdown_preview::MarkdownBlock],
     theme_mode: theme::ThemeMode,
     height: f32,
 ) {
@@ -3307,10 +3394,15 @@ fn workflow_fragment_preview(
             .show(ui, |ui| {
                 ui.set_min_width(inner_rect.width());
                 ui.set_max_width(inner_rect.width());
-                if text.trim().is_empty() {
+                if blocks.is_empty() {
                     ui.label(muted(""));
                 } else {
-                    markdown_preview::render(ui, text, inner_rect.width(), theme_mode);
+                    markdown_preview::render_blocks_with_heading_offsets(
+                        ui,
+                        blocks,
+                        inner_rect.width(),
+                        theme_mode,
+                    );
                 }
             });
     });
@@ -3325,7 +3417,9 @@ fn workflow_empty_editor_message(ui: &mut Ui, message: &str) {
 
 /// 绘制 task 工作台左侧 step tree。
 fn workflow_task_step_tree_panel(
+    app: &GsdvGuiApp,
     ui: &mut Ui,
+    tree: &WorkflowTree,
     task: &WorkflowTaskNode,
     selected: Option<&WorkflowSelectionTarget>,
     selected_step_paths: &BTreeSet<Vec<usize>>,
@@ -3337,6 +3431,7 @@ fn workflow_task_step_tree_panel(
     repo_path: &Path,
     project_label: &str,
     language: AppLanguage,
+    agent_action: &mut Option<WorkflowAgentUiAction>,
 ) {
     let mut path_parts = workflow_repo_copy_parts(repo_path);
     path_parts.push(project_label.to_string());
@@ -3352,8 +3447,9 @@ fn workflow_task_step_tree_panel(
                 return;
             }
             for step in &task.steps {
-                GsdvGuiApp::render_workflow_step_node(
+                app.render_workflow_step_node(
                     ui,
+                    tree,
                     task,
                     step,
                     0,
@@ -3367,13 +3463,14 @@ fn workflow_task_step_tree_panel(
                     copy_path,
                     &path_parts,
                     language,
+                    agent_action,
                 );
             }
         });
 }
 
 /// task 工作台中的 step 选择动作。
-enum WorkflowStepSelect {
+pub(super) enum WorkflowStepSelect {
     /// 普通点击，只保留当前 step。
     Single {
         /// 被点击的 step 路径。
@@ -3534,21 +3631,14 @@ fn workflow_step_child_indent(ui: &Ui) -> f32 {
 
 /// 返回 task 重命名弹窗里显示和编辑的 key。
 fn workflow_task_dialog_key(task: &WorkflowTaskNode) -> String {
-    let stem = task
-        .path
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().to_string())
-        .unwrap_or_else(|| task.label.clone());
-    stem.strip_prefix("task-")
-        .map(str::to_string)
-        .unwrap_or(stem)
+    task.label.clone()
 }
 
 /// 返回 workflow root 的可复制路径。
 ///
 /// 适用场景：子 repo root 复制时保留 workspace 相对 repo 前缀。
 /// 例：`services/api -> services/api > root.md`。
-fn workflow_root_copy_path(tree: &WorkflowTree) -> String {
+pub(super) fn workflow_root_copy_path(tree: &WorkflowTree) -> String {
     let mut parts = workflow_repo_copy_parts(&tree.repo_path);
     parts.push("root.md".to_string());
     workflow_path_from_parts(&parts)
@@ -3558,7 +3648,10 @@ fn workflow_root_copy_path(tree: &WorkflowTree) -> String {
 ///
 /// 适用场景：主 repo 保持旧格式，子 repo 增加 repo 相对路径。
 /// 例：`services/api + main -> services/api > main`。
-fn workflow_project_copy_path(tree: &WorkflowTree, project: &WorkflowProjectNode) -> String {
+pub(super) fn workflow_project_copy_path(
+    tree: &WorkflowTree,
+    project: &WorkflowProjectNode,
+) -> String {
     let mut parts = workflow_repo_copy_parts(&tree.repo_path);
     parts.push(project.label.clone());
     workflow_path_from_parts(&parts)
@@ -3568,7 +3661,7 @@ fn workflow_project_copy_path(tree: &WorkflowTree, project: &WorkflowProjectNode
 ///
 /// 适用场景：右键复制 task 逻辑路径。
 /// 例：`services/api + main + build -> services/api > main > build`。
-fn workflow_task_copy_path(
+pub(super) fn workflow_task_copy_path(
     tree: &WorkflowTree,
     project: &WorkflowProjectNode,
     task: &WorkflowTaskNode,

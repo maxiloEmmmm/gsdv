@@ -1,4 +1,5 @@
 use crate::gui::theme;
+use crate::gui::{local_image, local_image::LocalImageRef};
 use eframe::egui::{
     self, Align, Color32, FontId, Frame, Label, Margin, Pos2, Rect, RichText, Stroke, TextFormat,
     Ui, Vec2, text::LayoutJob,
@@ -12,6 +13,7 @@ pub(crate) struct InlineStyle {
     strikethrough: bool,
     code: bool,
     link: Option<String>,
+    image: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,6 +69,16 @@ pub(crate) enum MarkdownBlock {
         blocks: Vec<MarkdownBlock>,
     },
     Rule,
+    Image {
+        /// Markdown 中的原始图片地址。
+        source: String,
+        /// 图片替代文本。
+        alt: String,
+        /// 相对路径解析后的绝对路径。
+        path: Option<std::path::PathBuf>,
+        /// 后台加载完成后的 GUI 纹理引用。
+        image: Option<LocalImageRef>,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -112,6 +124,79 @@ pub(crate) fn render(ui: &mut Ui, markdown: &str, width: f32, mode: theme::Theme
 /// Parses Markdown into reusable blocks for render-only preview frames.
 pub(crate) fn parse(markdown: &str) -> Vec<MarkdownBlock> {
     parse_markdown(markdown)
+}
+
+/// 收集 Markdown block 中的全部本地图片源地址。
+///
+/// 适用场景：解析结束后批量派发图片加载。示例：嵌套引用中的图片也会被返回。
+pub(crate) fn image_sources(blocks: &[MarkdownBlock]) -> Vec<&str> {
+    let mut sources = Vec::new();
+    collect_image_sources(blocks, &mut sources);
+    sources
+}
+
+/// 递归收集 Markdown 图片地址。
+///
+/// 适用场景：list、quote、footnote 里的图片。示例：嵌套一层 list -> 找到图片。
+fn collect_image_sources<'a>(blocks: &'a [MarkdownBlock], sources: &mut Vec<&'a str>) {
+    for block in blocks {
+        match block {
+            MarkdownBlock::Image { source, .. } => sources.push(source),
+            MarkdownBlock::List(list) => {
+                for item in &list.items {
+                    collect_image_sources(&item.blocks, sources);
+                }
+            }
+            MarkdownBlock::Quote(children)
+            | MarkdownBlock::FootnoteDefinition {
+                blocks: children, ..
+            } => collect_image_sources(children, sources),
+            MarkdownBlock::Paragraph(_)
+            | MarkdownBlock::Heading { .. }
+            | MarkdownBlock::CodeBlock { .. }
+            | MarkdownBlock::Table(_)
+            | MarkdownBlock::Rule => {}
+        }
+    }
+}
+
+/// 把图片缓存中的纹理引用装饰到已解析 Markdown block。
+///
+/// 适用场景：图片加载完成后只更新轻量 render 状态。示例：source -> TextureId。
+pub(crate) fn decorate_images(
+    blocks: &mut [MarkdownBlock],
+    markdown_file: &std::path::Path,
+    store: &local_image::LocalImageStore,
+) {
+    for block in blocks {
+        match block {
+            MarkdownBlock::Image {
+                source,
+                path,
+                image,
+                ..
+            } => {
+                *path = local_image::resolve_markdown_image(markdown_file, source);
+                *image = path
+                    .as_deref()
+                    .and_then(|resolved| store.image_ref(resolved));
+            }
+            MarkdownBlock::List(list) => {
+                for item in &mut list.items {
+                    decorate_images(&mut item.blocks, markdown_file, store);
+                }
+            }
+            MarkdownBlock::Quote(children)
+            | MarkdownBlock::FootnoteDefinition {
+                blocks: children, ..
+            } => decorate_images(children, markdown_file, store),
+            MarkdownBlock::Paragraph(_)
+            | MarkdownBlock::Heading { .. }
+            | MarkdownBlock::CodeBlock { .. }
+            | MarkdownBlock::Table(_)
+            | MarkdownBlock::Rule => {}
+        }
+    }
 }
 
 /// Renders Markdown and returns heading top offsets in rendered content space.
@@ -395,7 +480,7 @@ fn start_tag(
         Tag::Image { dest_url, .. } => {
             let url = dest_url.to_string();
             push_inline_style(inline_style, inline_style_stack, move |style| {
-                style.link = Some(url);
+                style.image = Some(url);
             });
         }
         Tag::HtmlBlock
@@ -417,7 +502,7 @@ fn end_tag(
             if let Some(BlockContext::Paragraph(spans)) = stack.pop()
                 && !spans.is_empty()
             {
-                append_block(stack, MarkdownBlock::Paragraph(spans));
+                append_block(stack, paragraph_or_image(spans));
             }
         }
         TagEnd::Heading(_) => {
@@ -518,6 +603,31 @@ fn end_tag(
         | TagEnd::DefinitionListTitle
         | TagEnd::DefinitionListDefinition
         | TagEnd::MetadataBlock(_) => {}
+    }
+}
+
+/// 将纯图片段落提升为图片 block，混排内容仍按普通段落显示 alt 文本。
+///
+/// 适用场景：CommonMark 的 `![alt](path)`。示例：单图段落 -> Image block。
+fn paragraph_or_image(spans: Vec<InlineSpan>) -> MarkdownBlock {
+    let source = spans
+        .first()
+        .and_then(|span| span.style.image.as_ref())
+        .cloned();
+    let pure_image = source.as_ref().is_some_and(|source| {
+        spans
+            .iter()
+            .all(|span| span.style.image.as_deref() == Some(source.as_str()))
+    });
+    if pure_image {
+        MarkdownBlock::Image {
+            source: source.unwrap_or_default(),
+            alt: spans.iter().map(|span| span.text.as_str()).collect(),
+            path: None,
+            image: None,
+        }
+    } else {
+        MarkdownBlock::Paragraph(spans)
     }
 }
 
@@ -674,6 +784,9 @@ fn render_blocks_range(
             MarkdownBlock::Rule => {
                 ui.separator();
             }
+            MarkdownBlock::Image {
+                source, alt, image, ..
+            } => render_image(ui, source, alt, *image, width, mode),
         }
 
         let mut block_bottom = (ui.cursor().top() - origin_y).max(block_top);
@@ -695,10 +808,49 @@ fn block_spacing(block: &MarkdownBlock) -> f32 {
         MarkdownBlock::List(_) => 6.0,
         MarkdownBlock::CodeBlock { .. } => 10.0,
         MarkdownBlock::Table(_) => 12.0,
+        MarkdownBlock::Image { .. } => 12.0,
         MarkdownBlock::Quote(_)
         | MarkdownBlock::FootnoteDefinition { .. }
         | MarkdownBlock::Rule => 8.0,
     }
+}
+
+/// 绘制已加载图片，加载期间保持稳定占位高度。
+///
+/// 适用场景：GUI Markdown preview。示例：宽图 -> 等比缩到内容宽度。
+fn render_image(
+    ui: &mut Ui,
+    source: &str,
+    alt: &str,
+    image: Option<LocalImageRef>,
+    width: f32,
+    mode: theme::ThemeMode,
+) {
+    if let Some(image) = image {
+        let original = Vec2::new(image.width as f32, image.height as f32);
+        let max_height = 640.0_f32.min(ui.available_height().max(160.0));
+        let scale = (width / original.x)
+            .min(max_height / original.y)
+            .min(1.0)
+            .max(0.01);
+        ui.add(egui::Image::new((image.texture_id, original * scale)));
+        if !alt.trim().is_empty() {
+            ui.label(RichText::new(alt).small().color(theme::muted_for(mode)));
+        }
+        return;
+    }
+    Frame::new()
+        .fill(theme::bg_for(mode).gamma_multiply(1.15))
+        .stroke(Stroke::new(1.0, theme::muted_for(mode).gamma_multiply(0.5)))
+        .corner_radius(egui::CornerRadius::same(theme::RADIUS_SM))
+        .inner_margin(Margin::same(10))
+        .show(ui, |ui| {
+            ui.set_min_width(width.min(360.0));
+            ui.label(
+                RichText::new(if alt.trim().is_empty() { source } else { alt })
+                    .color(theme::muted_for(mode)),
+            );
+        });
 }
 
 fn render_list(

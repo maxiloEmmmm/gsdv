@@ -459,7 +459,12 @@ pub fn save_remote_layout(
         crate::gui::data::workspace_store_key(&payload.workspace_path)
     );
     let latest = read_remote_json(config, shell, &sidecar_path, true)?;
-    let mut subagents = payload.subagents.clone();
+    let mut subagents = payload
+        .subagents
+        .iter()
+        .filter(|subagent| subagent.workflow_target.is_none())
+        .cloned()
+        .collect::<Vec<_>>();
     preserve_session_ids(&latest, &mut subagents);
     let sidecar = serde_json::json!({
         "subagents": subagents,
@@ -489,7 +494,253 @@ pub(super) fn load_remote_workflow_tree(
     )?;
     let output = run_ssh_command(config, &command).map_err(|error| error.to_string())?;
     let documents = parse_remote_workflow_inventory(&output).map_err(|error| error.to_string())?;
-    workflow::load_workflow_tree_from_documents(workspace_path, &documents)
+    let migrated = migrate_remote_workflow_documents(config, shell, workspace_path, &documents)?;
+    let documents = if migrated {
+        let command = remote_workflow_inventory_command(
+            shell,
+            workspace_path,
+            scan_sub_workflows,
+            known_repo_paths,
+        )?;
+        let output = run_ssh_command(config, &command).map_err(|error| error.to_string())?;
+        parse_remote_workflow_inventory(&output).map_err(|error| error.to_string())?
+    } else {
+        documents
+    };
+    let agent_scope = workflow::workflow_agent_workspace_scope(
+        workspace_path,
+        Some(config.workspace_key.as_str()),
+    );
+    workflow::load_workflow_tree_from_documents(workspace_path, &agent_scope, &documents)
+}
+
+/// 把远端 inventory 中的旧 Workflow 结构原地迁移为稳定 ID 结构。
+///
+/// 适用场景：Remote Workflow 首次打开；所有写入仍通过既有 SSH 原子文件路径。
+/// 例：`root.md + ps/main/task-a.md -> a1b2.root.md + ps/c3d4.main/e5f6.task-a.md`。
+fn migrate_remote_workflow_documents(
+    config: &RemoteWorkspaceConfig,
+    shell: RemoteShell,
+    workspace_path: &Path,
+    documents: &BTreeMap<PathBuf, String>,
+) -> Result<bool, String> {
+    let mut spec_paths = documents
+        .keys()
+        .filter_map(|path| {
+            let parent = path.parent()?;
+            if parent.file_name()? != "gsdv-spec" {
+                return None;
+            }
+            let name = path.file_name()?.to_str()?;
+            (name == "root.md" || workflow::is_repo_root_path(path)).then(|| parent.to_path_buf())
+        })
+        .collect::<Vec<_>>();
+    spec_paths.sort();
+    spec_paths.dedup();
+    let mut changed = false;
+    for spec_path in spec_paths {
+        let repo_documents = documents
+            .iter()
+            .filter(|(path, _)| path.starts_with(&spec_path))
+            .map(|(path, content)| (path.clone(), content.clone()))
+            .collect::<BTreeMap<_, _>>();
+        changed |= migrate_remote_workflow_repo(
+            config,
+            shell,
+            workspace_path,
+            &spec_path,
+            &repo_documents,
+        )?;
+    }
+    Ok(changed)
+}
+
+/// 迁移远端单个 repo，并确保顶层 .gitignore 包含 sidecar 通配规则。
+///
+/// 适用场景：主 repo 与嵌套 repo 分别执行，避免 ID 唯一范围串线。
+/// 例：`services/api/gsdv-spec -> 只迁移 services/api`。
+fn migrate_remote_workflow_repo(
+    config: &RemoteWorkspaceConfig,
+    shell: RemoteShell,
+    workspace_path: &Path,
+    spec_path: &Path,
+    documents: &BTreeMap<PathBuf, String>,
+) -> Result<bool, String> {
+    let legacy_root = spec_path.join("root.md");
+    let stable_roots = documents
+        .keys()
+        .filter(|path| path.parent() == Some(spec_path) && workflow::is_repo_root_path(path))
+        .cloned()
+        .collect::<Vec<_>>();
+    if stable_roots.len() > 1 || (!stable_roots.is_empty() && documents.contains_key(&legacy_root))
+    {
+        return Err(format!(
+            "legacy and stable workflow repo roots conflict in {}",
+            spec_path.display()
+        ));
+    }
+    let mut directory_renames = Vec::<(PathBuf, PathBuf)>::new();
+    let mut file_renames = Vec::<(PathBuf, PathBuf)>::new();
+    let mut writes = Vec::<(PathBuf, String)>::new();
+    if stable_roots.is_empty() {
+        if !documents.contains_key(&legacy_root) {
+            return Err(format!("{} not found", spec_path.display()));
+        }
+        let id = workflow::generate_short_id(workflow::NODE_ID_LEN, std::iter::empty());
+        file_renames.push((legacy_root, spec_path.join(format!("{id}.root.md"))));
+    }
+
+    let projects_root = spec_path.join("ps");
+    let mut project_dirs = documents
+        .keys()
+        .filter_map(|path| {
+            (path.file_name()?.to_str()? == "root.md"
+                && path.parent()?.parent() == Some(projects_root.as_path()))
+            .then(|| path.parent().map(Path::to_path_buf))
+            .flatten()
+        })
+        .collect::<Vec<_>>();
+    project_dirs.sort();
+    project_dirs.dedup();
+    let mut used_project_ids = Vec::new();
+    for project_dir in &project_dirs {
+        let Some(name) = project_dir.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if let Some((id, _)) = workflow::split_stable_name(name, workflow::NODE_ID_LEN) {
+            if used_project_ids.iter().any(|existing| existing == id) {
+                return Err(format!("duplicate workflow project id: {id}"));
+            }
+            used_project_ids.push(id.to_string());
+        }
+    }
+    for project_dir in project_dirs {
+        let name = project_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("invalid workflow project path: {}", project_dir.display()))?;
+        let final_dir = if workflow::split_stable_name(name, workflow::NODE_ID_LEN).is_some() {
+            project_dir.clone()
+        } else {
+            let id = workflow::generate_short_id(
+                workflow::NODE_ID_LEN,
+                used_project_ids.iter().map(String::as_str),
+            );
+            used_project_ids.push(id.clone());
+            let target = projects_root.join(format!("{id}.{name}"));
+            directory_renames.push((project_dir.clone(), target.clone()));
+            target
+        };
+        let mut tasks = documents
+            .iter()
+            .filter(|(path, _)| path.parent() == Some(project_dir.as_path()))
+            .filter(|(path, _)| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name.starts_with("task-")
+                            || name.split_once('.').is_some_and(|(id, rest)| {
+                                workflow::is_stable_id(id, workflow::NODE_ID_LEN)
+                                    && rest.starts_with("task-")
+                            })
+                    })
+            })
+            .map(|(path, content)| (path.clone(), content.clone()))
+            .collect::<Vec<_>>();
+        tasks.sort_by(|left, right| left.0.cmp(&right.0));
+        let mut used_task_ids = Vec::new();
+        for (task_path, _) in &tasks {
+            let Some(stem) = task_path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            if let Some((id, _)) = workflow::split_stable_name(stem, workflow::NODE_ID_LEN) {
+                if used_task_ids.iter().any(|existing| existing == id) {
+                    return Err(format!("duplicate workflow task id: {id}"));
+                }
+                used_task_ids.push(id.to_string());
+            }
+        }
+        for (task_path, content) in tasks {
+            let file_name = task_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| format!("invalid workflow task path: {}", task_path.display()))?;
+            let stem = task_path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| format!("invalid workflow task path: {}", task_path.display()))?;
+            let source_after_project_rename = final_dir.join(file_name);
+            let final_path = if workflow::split_stable_name(stem, workflow::NODE_ID_LEN).is_some() {
+                source_after_project_rename.clone()
+            } else {
+                let id = workflow::generate_short_id(
+                    workflow::NODE_ID_LEN,
+                    used_task_ids.iter().map(String::as_str),
+                );
+                used_task_ids.push(id.clone());
+                let target = final_dir.join(format!("{id}.{stem}.md"));
+                file_renames.push((source_after_project_rename, target.clone()));
+                target
+            };
+            let next_content = workflow::migrate_legacy_step_content(&content)?;
+            if next_content != content {
+                writes.push((final_path, next_content));
+            }
+        }
+    }
+
+    let changed = !directory_renames.is_empty() || !file_renames.is_empty() || !writes.is_empty();
+    ensure_remote_workflow_gitignore(config, shell, workspace_path, spec_path)?;
+    for (source, target) in directory_renames {
+        let source = remote_workflow_path(shell, workspace_path, &source)?;
+        let target = remote_workflow_path(shell, workspace_path, &target)?;
+        run_remote_workflow_command(
+            config,
+            remote_workflow_rename_command(shell, &source, &target, true),
+        )?;
+    }
+    for (source, target) in &file_renames {
+        let source = remote_workflow_path(shell, workspace_path, source)?;
+        let target = remote_workflow_path(shell, workspace_path, target)?;
+        run_remote_workflow_command(
+            config,
+            remote_workflow_rename_command(shell, &source, &target, false),
+        )?;
+    }
+    for (path, content) in &writes {
+        let absolute = remote_workflow_path(shell, workspace_path, path)?;
+        write_remote_workflow_file(config, shell, &absolute, content.as_bytes(), true)?;
+    }
+    Ok(changed)
+}
+
+/// 远端幂等补齐 gsdv-spec/.gitignore 的 workflow agent 规则。
+///
+/// 适用场景：Remote 不依赖本地文件 API。例：缺两条规则 -> 原文件末尾追加。
+fn ensure_remote_workflow_gitignore(
+    config: &RemoteWorkspaceConfig,
+    shell: RemoteShell,
+    workspace_path: &Path,
+    spec_path: &Path,
+) -> Result<(), String> {
+    let relative = spec_path.join(".gitignore");
+    let absolute = remote_workflow_path(shell, workspace_path, &relative)?;
+    let command = match shell {
+        RemoteShell::Posix => {
+            let path = posix_quote_str(&absolute);
+            format!(
+                "p={path}; d=${{p%/*}}; mkdir -p \"$d\"; touch \"$p\"; grep -Fqx '.gsdv-wf-agents' \"$p\" || printf '%s\\n' '.gsdv-wf-agents' >>\"$p\"; grep -Fqx '.*.gsdv-wf-agents' \"$p\" || printf '%s\\n' '.*.gsdv-wf-agents' >>\"$p\""
+            )
+        }
+        RemoteShell::PowerShell | RemoteShell::Cmd => {
+            let path = powershell_quote(&absolute);
+            let script = format!(
+                "$p={path};$d=[IO.Path]::GetDirectoryName($p);[IO.Directory]::CreateDirectory($d)|Out-Null;if([IO.File]::Exists($p)){{$l=[IO.File]::ReadAllLines($p)}}else{{$l=@()}};foreach($r in @('.gsdv-wf-agents','.*.gsdv-wf-agents')){{if($l -notcontains $r){{[IO.File]::AppendAllText($p,$r+[Environment]::NewLine);$l+=$r}}}}"
+            );
+            wrap_powershell_command(shell, script)
+        }
+    };
+    run_remote_workflow_command(config, command)
 }
 
 /// 通过 SSH 保存当前远端项目的 task/step 文本。
@@ -505,8 +756,38 @@ pub(super) fn save_remote_workflow_step(
     let absolute = remote_workflow_path(shell, workspace_path, &request.task_path)?;
     let content = read_remote_workflow_file(config, shell, &absolute)?;
     let (next_content, saved) = workflow::save_workflow_step_content(&content, &request)?;
-    write_remote_workflow_file(config, shell, &absolute, next_content.as_bytes())?;
+    write_remote_workflow_file(config, shell, &absolute, next_content.as_bytes(), true)?;
     Ok(saved)
+}
+
+/// 通过 SSH 保存或删除一个 Workflow Agent sidecar。
+///
+/// 适用场景：创建、session 更新和销毁 Remote Workflow Agent。例：空 records -> 删除隐藏 JSON。
+pub(super) fn save_remote_workflow_agent_sidecar(
+    config: &RemoteWorkspaceConfig,
+    shell: RemoteShell,
+    workspace_path: &Path,
+    sidecar_path: &Path,
+    agents: &[SubagentViewData],
+) -> Result<(), String> {
+    let absolute = remote_workflow_path(shell, workspace_path, sidecar_path)?;
+    if let Some(content) = workflow::workflow_agent_sidecar_content(sidecar_path, agents)? {
+        return write_remote_workflow_file(config, shell, &absolute, &content, false);
+    }
+    let command = match shell {
+        RemoteShell::Posix => {
+            let path = posix_quote_str(&absolute);
+            format!("p={path}; [ ! -e \"$p\" ] || rm -f -- \"$p\"")
+        }
+        RemoteShell::PowerShell | RemoteShell::Cmd => {
+            let path = powershell_quote(&absolute);
+            let script = format!(
+                "$p={path};if([IO.File]::Exists($p)){{Remove-Item -LiteralPath $p -Force}}"
+            );
+            wrap_powershell_command(shell, script)
+        }
+    };
+    run_remote_workflow_command(config, command)
 }
 
 /// 通过 SSH 执行完整的 workflow tree mutation。
@@ -527,15 +808,38 @@ pub(super) fn apply_remote_workflow_mutation(
             let absolute = remote_workflow_path(shell, workspace_path, task_path)?;
             let content = read_remote_workflow_file(config, shell, &absolute)?;
             let next_content = workflow::apply_workflow_task_content_mutation(&content, &request)?;
-            write_remote_workflow_file(config, shell, &absolute, next_content.as_bytes())
+            write_remote_workflow_file(config, shell, &absolute, next_content.as_bytes(), true)
         }
         WorkflowMutationRequest::InitRoot => {
-            let relative = PathBuf::from("gsdv-spec/root.md");
-            let absolute = remote_workflow_path(shell, workspace_path, &relative)?;
-            run_remote_workflow_command(
-                config,
-                remote_workflow_create_file_command(shell, &absolute, None, true),
-            )
+            let parent = remote_workflow_path(shell, workspace_path, Path::new("gsdv-spec"))?;
+            let mut result = Err("failed to allocate a unique workflow repo id".to_string());
+            for _ in 0..128 {
+                let id = workflow::generate_short_id(workflow::NODE_ID_LEN, std::iter::empty());
+                let relative = PathBuf::from(format!("gsdv-spec/{id}.root.md"));
+                let absolute = remote_workflow_path(shell, workspace_path, &relative)?;
+                result = run_remote_workflow_command(
+                    config,
+                    remote_workflow_create_file_command(
+                        shell,
+                        &absolute,
+                        None,
+                        false,
+                        Some((&parent, &id)),
+                    ),
+                );
+                if result.is_ok() || !workflow_create_id_collision(&result) {
+                    break;
+                }
+            }
+            if result.is_ok() {
+                ensure_remote_workflow_gitignore(
+                    config,
+                    shell,
+                    workspace_path,
+                    Path::new("gsdv-spec"),
+                )?;
+            }
+            result
         }
         WorkflowMutationRequest::AddProject {
             spec_path,
@@ -543,12 +847,31 @@ pub(super) fn apply_remote_workflow_mutation(
         } => {
             validate_remote_workflow_relative_path(spec_path)?;
             let project_key = workflow::validate_workflow_key(project_key)?;
-            let relative = spec_path.join("ps").join(project_key).join("root.md");
-            let absolute = remote_workflow_path(shell, workspace_path, &relative)?;
-            run_remote_workflow_command(
-                config,
-                remote_workflow_create_file_command(shell, &absolute, None, false),
-            )
+            let parent_relative = spec_path.join("ps");
+            let parent = remote_workflow_path(shell, workspace_path, &parent_relative)?;
+            let mut result = Err("failed to allocate a unique workflow project id".to_string());
+            for _ in 0..128 {
+                let project_id =
+                    workflow::generate_short_id(workflow::NODE_ID_LEN, std::iter::empty());
+                let relative = parent_relative
+                    .join(format!("{project_id}.{project_key}"))
+                    .join("root.md");
+                let absolute = remote_workflow_path(shell, workspace_path, &relative)?;
+                result = run_remote_workflow_command(
+                    config,
+                    remote_workflow_create_file_command(
+                        shell,
+                        &absolute,
+                        None,
+                        false,
+                        Some((&parent, &project_id)),
+                    ),
+                );
+                if result.is_ok() || !workflow_create_id_collision(&result) {
+                    break;
+                }
+            }
+            result
         }
         WorkflowMutationRequest::AddTask {
             spec_path,
@@ -559,13 +882,28 @@ pub(super) fn apply_remote_workflow_mutation(
             let project_key = workflow::validate_workflow_key(project_key)?;
             let task_key = workflow::validate_workflow_key(task_key)?;
             let project_relative = spec_path.join("ps").join(project_key);
-            let relative = project_relative.join(format!("task-{task_key}.md"));
             let project = remote_workflow_path(shell, workspace_path, &project_relative)?;
-            let absolute = remote_workflow_path(shell, workspace_path, &relative)?;
-            run_remote_workflow_command(
-                config,
-                remote_workflow_create_file_command(shell, &absolute, Some(&project), false),
-            )
+            let mut result = Err("failed to allocate a unique workflow task id".to_string());
+            for _ in 0..128 {
+                let task_id =
+                    workflow::generate_short_id(workflow::NODE_ID_LEN, std::iter::empty());
+                let relative = project_relative.join(format!("{task_id}.task-{task_key}.md"));
+                let absolute = remote_workflow_path(shell, workspace_path, &relative)?;
+                result = run_remote_workflow_command(
+                    config,
+                    remote_workflow_create_file_command(
+                        shell,
+                        &absolute,
+                        Some(&project),
+                        false,
+                        Some((&project, &task_id)),
+                    ),
+                );
+                if result.is_ok() || !workflow_create_id_collision(&result) {
+                    break;
+                }
+            }
+            result
         }
         WorkflowMutationRequest::RenameProject {
             project_path,
@@ -581,9 +919,11 @@ pub(super) fn apply_remote_workflow_mutation(
                         project_path.display()
                     )
                 })?;
-            let project_key = workflow::validate_workflow_key(project_key)?;
+            let (project_id, current_label) =
+                workflow::split_stable_name(project_key, workflow::NODE_ID_LEN)
+                    .ok_or_else(|| format!("invalid workflow project id: {project_key}"))?;
             let new_key = workflow::validate_workflow_key(new_key)?;
-            if project_key == new_key {
+            if current_label == new_key {
                 return Ok(());
             }
             let projects = project_path.parent().ok_or_else(|| {
@@ -593,7 +933,11 @@ pub(super) fn apply_remote_workflow_mutation(
                 )
             })?;
             let old_path = remote_workflow_path(shell, workspace_path, project_path)?;
-            let new_path = remote_workflow_path(shell, workspace_path, &projects.join(new_key))?;
+            let new_path = remote_workflow_path(
+                shell,
+                workspace_path,
+                &projects.join(format!("{project_id}.{new_key}")),
+            )?;
             run_remote_workflow_command(
                 config,
                 remote_workflow_rename_command(shell, &old_path, &new_path, true),
@@ -605,7 +949,16 @@ pub(super) fn apply_remote_workflow_mutation(
             let parent = task_path
                 .parent()
                 .ok_or_else(|| format!("task parent not found: {}", task_path.display()))?;
-            let target = parent.join(format!("task-{new_key}.md"));
+            let stem = task_path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .ok_or_else(|| format!("task key not found: {}", task_path.display()))?;
+            let (task_id, current_name) = workflow::split_stable_name(stem, workflow::NODE_ID_LEN)
+                .ok_or_else(|| format!("invalid workflow task id: {}", task_path.display()))?;
+            if current_name.strip_prefix("task-") == Some(new_key) {
+                return Ok(());
+            }
+            let target = parent.join(format!("{task_id}.task-{new_key}.md"));
             if target == *task_path {
                 return Ok(());
             }
@@ -666,7 +1019,7 @@ fn remote_workflow_inventory_command(
                 cached
             };
             format!(
-                "w={workspace}; E() {{ f=$1; r=$2; [ -f \"$f\" ] || return 0; pn=$(printf %s \"$r\" | wc -c); cn=$(wc -c <\"$f\"); printf 'GSDV-WF %s %s\\n' \"$pn\" \"$cn\"; printf %s \"$r\"; printf '\\n'; cat \"$f\"; printf '\\n'; }}; T() {{ b=$1; r=$2; s=\"$b/gsdv-spec\"; q=${{r:+$r/}}gsdv-spec; E \"$s/root.md\" \"$q/root.md\"; p=\"$s/ps\"; if [ -d \"$p\" ]; then for d in \"$p\"/*; do [ -d \"$d\" ] || continue; k=${{d##*/}}; E \"$d/root.md\" \"$q/ps/$k/root.md\"; for f in \"$d\"/task-*.md; do [ -f \"$f\" ] || continue; n=${{f##*/}}; E \"$f\" \"$q/ps/$k/$n\"; done; done; fi; }}; S() {{ b=$1; r=$2; for d in \"$b\"/* \"$b\"/.[!.]* \"$b\"/..?*; do [ -d \"$d\" ] || continue; [ -L \"$d\" ] && continue; n=${{d##*/}}; [ \"$n\" = .git ] && continue; q=${{r:+$r/}}$n; g=\"$d/.git\"; if [ -e \"$g\" ] || [ -L \"$g\" ]; then [ -f \"$d/gsdv-spec/root.md\" ] && T \"$d\" \"$q\"; else S \"$d\" \"$q\"; fi; done; }}; T \"$w\" ''; {sub_workflows}"
+                "w={workspace}; E() {{ f=$1; r=$2; [ -f \"$f\" ] || return 0; pn=$(printf %s \"$r\" | wc -c); cn=$(wc -c <\"$f\"); printf 'GSDV-WF %s %s\\n' \"$pn\" \"$cn\"; printf %s \"$r\"; printf '\\n'; cat \"$f\"; printf '\\n'; }}; R() {{ s=$1; [ -f \"$s/root.md\" ] && return 0; for f in \"$s\"/*.root.md; do [ -f \"$f\" ] && return 0; done; return 1; }}; T() {{ b=$1; r=$2; s=\"$b/gsdv-spec\"; q=${{r:+$r/}}gsdv-spec; E \"$s/root.md\" \"$q/root.md\"; E \"$s/.gsdv-wf-agents\" \"$q/.gsdv-wf-agents\"; for f in \"$s\"/*.root.md; do [ -f \"$f\" ] || continue; n=${{f##*/}}; E \"$f\" \"$q/$n\"; done; p=\"$s/ps\"; if [ -d \"$p\" ]; then for d in \"$p\"/*; do [ -d \"$d\" ] || continue; k=${{d##*/}}; E \"$d/root.md\" \"$q/ps/$k/root.md\"; E \"$d/.gsdv-wf-agents\" \"$q/ps/$k/.gsdv-wf-agents\"; for f in \"$d\"/task-*.md \"$d\"/*.task-*.md \"$d\"/.*.gsdv-wf-agents; do [ -f \"$f\" ] || continue; n=${{f##*/}}; E \"$f\" \"$q/ps/$k/$n\"; done; done; fi; }}; S() {{ b=$1; r=$2; for d in \"$b\"/* \"$b\"/.[!.]* \"$b\"/..?*; do [ -d \"$d\" ] || continue; [ -L \"$d\" ] && continue; n=${{d##*/}}; [ \"$n\" = .git ] && continue; q=${{r:+$r/}}$n; g=\"$d/.git\"; if [ -e \"$g\" ] || [ -L \"$g\" ]; then R \"$d/gsdv-spec\" && T \"$d\" \"$q\"; else S \"$d\" \"$q\"; fi; done; }}; T \"$w\" ''; {sub_workflows}"
             )
         }
         RemoteShell::PowerShell | RemoteShell::Cmd => {
@@ -684,7 +1037,7 @@ fn remote_workflow_inventory_command(
                 cached
             };
             let script = format!(
-                "$o=[Console]::OpenStandardOutput();function W([string]$s){{$b=[Text.Encoding]::UTF8.GetBytes($s);$o.Write($b,0,$b.Length)}};function E([string]$f,[string]$r){{if([IO.File]::Exists($f)){{$p=[Text.Encoding]::UTF8.GetBytes($r);$b=[IO.File]::ReadAllBytes($f);W(('GSDV-WF '+$p.Length+' '+$b.Length+[char]10));$o.Write($p,0,$p.Length);W([string][char]10);$o.Write($b,0,$b.Length);W([string][char]10)}}}};function T([string]$b,[string]$r){{$s=Join-Path $b 'gsdv-spec';$q=if($r){{$r+'/gsdv-spec'}}else{{'gsdv-spec'}};E (Join-Path $s 'root.md') ($q+'/root.md');$p=Join-Path $s 'ps';if([IO.Directory]::Exists($p)){{foreach($d in [IO.Directory]::GetDirectories($p)){{$k=[IO.Path]::GetFileName($d);E (Join-Path $d 'root.md') ($q+'/ps/'+$k+'/root.md');foreach($f in [IO.Directory]::GetFiles($d,'task-*.md')){{$n=[IO.Path]::GetFileName($f);E $f ($q+'/ps/'+$k+'/'+$n)}}}}}}}};function S([string]$b,[string]$r){{foreach($d in [IO.Directory]::GetDirectories($b)){{$a=[IO.File]::GetAttributes($d);if(($a -band [IO.FileAttributes]::ReparsePoint) -ne 0){{continue}};$n=[IO.Path]::GetFileName($d);if($n -eq '.git'){{continue}};$q=if($r){{$r+'/'+$n}}else{{$n}};$g=Join-Path $d '.git';if([IO.File]::Exists($g) -or [IO.Directory]::Exists($g)){{if([IO.File]::Exists((Join-Path $d 'gsdv-spec/root.md'))){{T $d $q}}}}else{{S $d $q}}}}}};$w={workspace};T $w '';{sub_workflows}"
+                "$o=[Console]::OpenStandardOutput();function W([string]$s){{$b=[Text.Encoding]::UTF8.GetBytes($s);$o.Write($b,0,$b.Length)}};function E([string]$f,[string]$r){{if([IO.File]::Exists($f)){{$p=[Text.Encoding]::UTF8.GetBytes($r);$b=[IO.File]::ReadAllBytes($f);W(('GSDV-WF '+$p.Length+' '+$b.Length+[char]10));$o.Write($p,0,$p.Length);W([string][char]10);$o.Write($b,0,$b.Length);W([string][char]10)}}}};function R([string]$s){{if(![IO.Directory]::Exists($s)){{return $false}};return ([IO.File]::Exists((Join-Path $s 'root.md')) -or [IO.Directory]::GetFiles($s,'*.root.md').Length -gt 0)}};function T([string]$b,[string]$r){{$s=Join-Path $b 'gsdv-spec';$q=if($r){{$r+'/gsdv-spec'}}else{{'gsdv-spec'}};E (Join-Path $s 'root.md') ($q+'/root.md');E (Join-Path $s '.gsdv-wf-agents') ($q+'/.gsdv-wf-agents');foreach($f in [IO.Directory]::GetFiles($s,'*.root.md')){{$n=[IO.Path]::GetFileName($f);E $f ($q+'/'+$n)}};$p=Join-Path $s 'ps';if([IO.Directory]::Exists($p)){{foreach($d in [IO.Directory]::GetDirectories($p)){{$k=[IO.Path]::GetFileName($d);E (Join-Path $d 'root.md') ($q+'/ps/'+$k+'/root.md');E (Join-Path $d '.gsdv-wf-agents') ($q+'/ps/'+$k+'/.gsdv-wf-agents');foreach($pattern in @('task-*.md','*.task-*.md','.*.gsdv-wf-agents')){{foreach($f in [IO.Directory]::GetFiles($d,$pattern)){{$n=[IO.Path]::GetFileName($f);E $f ($q+'/ps/'+$k+'/'+$n)}}}}}}}}}};function S([string]$b,[string]$r){{foreach($d in [IO.Directory]::GetDirectories($b)){{$a=[IO.File]::GetAttributes($d);if(($a -band [IO.FileAttributes]::ReparsePoint) -ne 0){{continue}};$n=[IO.Path]::GetFileName($d);if($n -eq '.git'){{continue}};$q=if($r){{$r+'/'+$n}}else{{$n}};$g=Join-Path $d '.git';if([IO.File]::Exists($g) -or [IO.Directory]::Exists($g)){{if(R (Join-Path $d 'gsdv-spec')){{T $d $q}}}}else{{S $d $q}}}}}};$w={workspace};T $w '';{sub_workflows}"
             );
             wrap_powershell_command(shell, script)
         }
@@ -818,18 +1171,30 @@ fn write_remote_workflow_file(
     shell: RemoteShell,
     absolute: &str,
     content: &[u8],
+    create_parent: bool,
 ) -> Result<(), String> {
     let command = match shell {
         RemoteShell::Posix => {
             let path = posix_quote_str(absolute);
+            let prepare = if create_parent {
+                "mkdir -p \"$d\";".to_string()
+            } else {
+                "[ -d \"$d\" ] || { printf 'workflow agent parent not found: %s\\n' \"$d\" >&2; exit 1; };".to_string()
+            };
             format!(
-                "umask 077; p={path}; d=${{p%/*}}; mkdir -p \"$d\"; t=\"$p.gsdv-$$\"; cat >\"$t\" && mv -f -- \"$t\" \"$p\""
+                "umask 077; p={path}; d=${{p%/*}}; {prepare} t=\"$p.gsdv-$$\"; cat >\"$t\" && mv -f -- \"$t\" \"$p\""
             )
         }
         RemoteShell::PowerShell | RemoteShell::Cmd => {
             let path = powershell_quote(absolute);
+            let prepare = if create_parent {
+                "[IO.Directory]::CreateDirectory($d)|Out-Null;".to_string()
+            } else {
+                "if(![IO.Directory]::Exists($d)){throw ('workflow agent parent not found: '+$d)};"
+                    .to_string()
+            };
             let script = format!(
-                "$p={path};$d=[IO.Path]::GetDirectoryName($p);[IO.Directory]::CreateDirectory($d)|Out-Null;$t=$p+'.gsdv-'+$PID;$m=[IO.MemoryStream]::new();[Console]::OpenStandardInput().CopyTo($m);[IO.File]::WriteAllBytes($t,$m.ToArray());Move-Item -LiteralPath $t -Destination $p -Force"
+                "$p={path};$d=[IO.Path]::GetDirectoryName($p);{prepare}$t=$p+'.gsdv-'+$PID;$m=[IO.MemoryStream]::new();[Console]::OpenStandardInput().CopyTo($m);[IO.File]::WriteAllBytes($t,$m.ToArray());Move-Item -LiteralPath $t -Destination $p -Force"
             );
             wrap_powershell_command(shell, script)
         }
@@ -848,6 +1213,7 @@ fn remote_workflow_create_file_command(
     absolute: &str,
     required_parent: Option<&str>,
     allow_existing: bool,
+    unique_id: Option<(&str, &str)>,
 ) -> String {
     match shell {
         RemoteShell::Posix => {
@@ -863,8 +1229,15 @@ fn remote_workflow_create_file_command(
             } else {
                 "[ ! -e \"$p\" ] || { printf 'workflow path already exists: %s\\n' \"$p\" >&2; exit 1; }; ".to_string()
             };
+            let unique = unique_id
+                .map(|(parent, id)| {
+                    let parent = posix_quote_str(parent);
+                    let id = posix_quote_str(id);
+                    format!("u={parent}; i={id}; for q in \"$u/$i\".*; do [ ! -e \"$q\" ] || {{ printf 'workflow id already exists: %s\\n' \"$i\" >&2; exit 1; }}; done; ")
+                })
+                .unwrap_or_default();
             format!(
-                "umask 077; {required}p={path}; {existing}[ ! -e \"$p\" ] || {{ printf 'workflow path is not a file: %s\\n' \"$p\" >&2; exit 1; }}; d=${{p%/*}}; mkdir -p \"$d\"; t=\"$p.gsdv-$$\"; : >\"$t\" && mv -- \"$t\" \"$p\""
+                "umask 077; {required}p={path}; {existing}{unique}[ ! -e \"$p\" ] || {{ printf 'workflow path is not a file: %s\\n' \"$p\" >&2; exit 1; }}; d=${{p%/*}}; mkdir -p \"$d\"; t=\"$p.gsdv-$$\"; : >\"$t\" && mv -- \"$t\" \"$p\""
             )
         }
         RemoteShell::PowerShell | RemoteShell::Cmd => {
@@ -880,12 +1253,29 @@ fn remote_workflow_create_file_command(
             } else {
                 "if([IO.File]::Exists($p) -or [IO.Directory]::Exists($p)){throw ('workflow path already exists: '+$p)};".to_string()
             };
+            let unique = unique_id
+                .map(|(parent, id)| {
+                    let parent = powershell_quote(parent);
+                    let id = powershell_quote(id);
+                    format!("$u={parent};$i={id};if([IO.Directory]::Exists($u) -and [IO.Directory]::GetFileSystemEntries($u,$i+'.*').Length -gt 0){{throw ('workflow id already exists: '+$i)}};")
+                })
+                .unwrap_or_default();
             let script = format!(
-                "{required}$p={path};{existing}if([IO.Directory]::Exists($p)){{throw ('workflow path is not a file: '+$p)}};$d=[IO.Path]::GetDirectoryName($p);[IO.Directory]::CreateDirectory($d)|Out-Null;$t=$p+'.gsdv-'+$PID;[IO.File]::WriteAllBytes($t,[byte[]]@());Move-Item -LiteralPath $t -Destination $p"
+                "{required}$p={path};{existing}{unique}if([IO.Directory]::Exists($p)){{throw ('workflow path is not a file: '+$p)}};$d=[IO.Path]::GetDirectoryName($p);[IO.Directory]::CreateDirectory($d)|Out-Null;$t=$p+'.gsdv-'+$PID;[IO.File]::WriteAllBytes($t,[byte[]]@());Move-Item -LiteralPath $t -Destination $p"
             );
             wrap_powershell_command(shell, script)
         }
     }
+}
+
+/// 判断远端创建失败是否只是随机 ID 冲突。
+///
+/// 适用场景：短 ID 分配重试；认证、网络与父目录错误必须立即返回。例：`id already exists -> true`。
+fn workflow_create_id_collision(result: &Result<(), String>) -> bool {
+    result.as_ref().is_err_and(|error| {
+        error.contains("workflow id already exists")
+            || error.contains("workflow path already exists")
+    })
 }
 
 /// 构造远端 workflow 路径重命名命令。

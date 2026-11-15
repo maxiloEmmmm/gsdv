@@ -97,6 +97,7 @@ pub(super) fn agent_slots_for_workspace(workspace: &WorkspaceViewData) -> Vec<Ag
             workspace
                 .subagents
                 .iter()
+                .filter(|subagent| subagent.workflow_target.is_none())
                 .map(|subagent| AgentSlotId::Subagent(subagent.id.clone())),
         )
         .collect()
@@ -181,6 +182,7 @@ pub(super) fn agent_slot_context_menu(
     current_agent_name: Option<&str>,
     current_session_id: Option<&str>,
     spotlight_level: Option<u8>,
+    allow_spotlight: bool,
     action: &mut Option<AgentTabAction>,
     language: AppLanguage,
 ) {
@@ -199,37 +201,39 @@ pub(super) fn agent_slot_context_menu(
         *action = Some(process_action.1);
         ui.close_menu();
     }
-    ui.menu_button(i18n::text(language, "Spotlight registration"), |ui| {
-        if spotlight_level.is_some() {
-            if ui
-                .button(i18n::text(language, "Remove spotlight registration"))
-                .clicked()
-            {
-                *action = Some(AgentTabAction::RemoveSpotlight(slot.clone()));
-                ui.close_menu();
+    if allow_spotlight {
+        ui.menu_button(i18n::text(language, "Spotlight registration"), |ui| {
+            if spotlight_level.is_some() {
+                if ui
+                    .button(i18n::text(language, "Remove spotlight registration"))
+                    .clicked()
+                {
+                    *action = Some(AgentTabAction::RemoveSpotlight(slot.clone()));
+                    ui.close_menu();
+                }
+                ui.separator();
             }
-            ui.separator();
-        }
-        for level in 1..=3 {
-            if ui
-                .selectable_label(
-                    spotlight_level == Some(level),
-                    i18n::text(
-                        language,
-                        match level {
-                            1 => "Spotlight level 1",
-                            2 => "Spotlight level 2",
-                            _ => "Spotlight level 3",
-                        },
-                    ),
-                )
-                .clicked()
-            {
-                *action = Some(AgentTabAction::SetSpotlightLevel(slot.clone(), level));
-                ui.close_menu();
+            for level in 1..=3 {
+                if ui
+                    .selectable_label(
+                        spotlight_level == Some(level),
+                        i18n::text(
+                            language,
+                            match level {
+                                1 => "Spotlight level 1",
+                                2 => "Spotlight level 2",
+                                _ => "Spotlight level 3",
+                            },
+                        ),
+                    )
+                    .clicked()
+                {
+                    *action = Some(AgentTabAction::SetSpotlightLevel(slot.clone(), level));
+                    ui.close_menu();
+                }
             }
-        }
-    });
+        });
+    }
     ui.separator();
     if let Some(session_id) = current_session_id {
         if ui.button(i18n::text(language, "Copy session ID")).clicked() {

@@ -223,9 +223,60 @@ pub struct SubagentViewData {
     pub agent_id: String,
     /// Runtime session id used for resume.
     pub session_id: Option<String>,
+    /// Workflow 层级关联；None 表示普通 Agent 网格 subagent。
+    #[serde(skip, default)]
+    pub workflow_target: Option<WorkflowAgentTarget>,
+    /// Workflow sidecar 相对 workspace 的路径，仅供当前运行写回。
+    #[serde(skip, default)]
+    pub workflow_sidecar_path: Option<PathBuf>,
+    /// 新建后是否仍需发送一次固定引导提示词。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub bootstrap_pending: bool,
     /// Last known runtime activity from direct Agent hook events.
     #[serde(skip, default = "default_workspace_activity")]
     pub activity: WorkspaceActivity,
+}
+
+/// Workflow Agent 绑定的层级类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowAgentTargetKind {
+    /// Repo 根。
+    Repo,
+    /// Project 根。
+    Project,
+    /// Task 文档。
+    Task,
+    /// Task 内 Step。
+    Step,
+}
+
+/// Workflow Agent 的稳定层级身份。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+pub struct WorkflowAgentTarget {
+    /// 目标类型。
+    pub kind: WorkflowAgentTargetKind,
+    /// Repo 相对 workspace 的运行时作用域；sidecar 内不重复保存路径。
+    #[serde(skip, default)]
+    pub repo_path: PathBuf,
+    /// Repo 四位 ID。
+    pub repo_id: String,
+    /// Project 四位 ID；Repo 目标为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    /// Task 四位 ID；Repo/Project 目标为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// Step 六位 ID；仅 Step 目标存在。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_id: Option<String>,
+}
+
+/// 返回布尔值是否为 false，供 serde 省略默认字段。
+///
+/// 适用场景：旧 sidecar 不需要写出 bootstrap_pending。例：`false -> true`。
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone)]
@@ -1413,7 +1464,12 @@ pub fn save_workspace_subagents(workspace: &WorkspaceViewData) {
         let _ = fs::create_dir_all(parent);
     }
     let file = SubagentFile {
-        subagents: workspace.subagents.clone(),
+        subagents: workspace
+            .subagents
+            .iter()
+            .filter(|subagent| subagent.workflow_target.is_none())
+            .cloned()
+            .collect(),
         columns: Vec::new(),
         rows: workspace.agent_rows.clone(),
         focus: workspace.agent_focus,
@@ -1556,6 +1612,9 @@ pub fn new_subagent(
         agent_work_dir: normalize_stored_agent_work_dir(agent_work_dir),
         helix_work_dir: normalize_stored_helix_work_dir(helix_work_dir),
         session_id,
+        workflow_target: None,
+        workflow_sidecar_path: None,
+        bootstrap_pending: false,
         activity: WorkspaceActivity::Unknown,
     }
 }
@@ -1636,6 +1695,7 @@ fn default_agent_rows(subagents: &[SubagentViewData]) -> Vec<AgentRowViewData> {
     tabs.extend(
         subagents
             .iter()
+            .filter(|subagent| subagent.workflow_target.is_none())
             .map(|subagent| AgentColumnSlot::Subagent(subagent.id.clone())),
     );
     vec![AgentRowViewData {
@@ -1667,6 +1727,7 @@ pub fn normalize_agent_rows(
 ) -> (Vec<AgentRowViewData>, Option<AgentFocusViewData>) {
     let valid_subagents = subagents
         .iter()
+        .filter(|subagent| subagent.workflow_target.is_none())
         .map(|subagent| subagent.id.as_str())
         .collect::<BTreeSet<_>>();
     let mut seen_column_ids = BTreeSet::new();
@@ -1715,7 +1776,10 @@ pub fn normalize_agent_rows(
             .flat_map(|column| column.tabs.iter().cloned())
             .collect();
     }
-    for subagent in subagents {
+    for subagent in subagents
+        .iter()
+        .filter(|subagent| subagent.workflow_target.is_none())
+    {
         let slot = AgentColumnSlot::Subagent(subagent.id.clone());
         if seen_slots.insert(slot.clone()) {
             normalized_rows[0].columns[0].tabs.push(slot);
