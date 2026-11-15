@@ -1,127 +1,118 @@
 # gsdv
 
-`gsdv` is a native desktop workspace for agent-centered development.
+`gsdv` is a terminal-first workspace for agent-centered development.
 
-<p align="center">
-  <img src="assets/examples/ig_023f35ae25010aa7016a1cf1395a608191b1eecb31267809ca.png" alt="gsdv agent workspace" />
-</p>
-
-<p align="center">
-  <strong>Agent-first workspace shell</strong><br />
-  Keep the active agent, subagents, project notes, and review context in one persistent desktop surface.
-</p>
-
-| Work-flow keeps project intent editable | Reviewer keeps implementation changes inspectable |
-| --- | --- |
-| ![gsdv work-flow task view](assets/examples/ig_03fac067c40a3437016a1cf9ab82a08191b8c6cf2bf5bce090.png) | ![gsdv reviewer diff view](assets/examples/ig_03fac067c40a3437016a1cfa2c3f888191b77212ab30a26699.png) |
-
-## Showcase
-
-![gsdv remote web demo](assets/showcase/remote-web-demo.gif)
-
-| Fullscreen agent workspace | Row and column agent split |
-| --- | --- |
-| ![gsdv fullscreen agent workspace](assets/showcase/fullscreen-agent-workspace.png) | ![gsdv row and column agent split](assets/showcase/agent-row-column-split.png) |
-
-It keeps the coding agent, project notes, implementation workflow, repository review, and workspace shell inside one focused app window. The goal is not to become a general IDE. The goal is to keep the operational context around an AI-assisted project visible, editable, and reviewable while work is happening.
-
-The current integration focus is Codex. Claude-compatible paths still exist where they are useful, but the most actively shaped workflows, defaults, and hook integrations are optimized around Codex sessions.
+It keeps coding agents, project notes, workflow plans, a workspace shell, and Helix inside one persistent process. The recommended interface is the native TUI: it runs in your existing terminal, uses real PTYs, supports mouse input, and does not depend on tmux.
 
 ```text
-workspace rail | outline / work-flow | active workspace surface
+workspace rail | agent grid
+---------------+----------------------------------------
+               | Codex / Claude terminals
+               | resizable rows, columns, and agent tabs
+---------------+----------------------------------------
+ [Dir] [Workflow] [Terminal] [Helix]              [Ctrl+Q]
 ```
 
-## Product Position
+The desktop GUI is still available, but the TUI is the primary experience.
 
-Modern agent work creates a coordination problem. The useful context is split across the agent terminal, Markdown notes, task plans, git history, review artifacts, shell commands, and small local scripts. `gsdv` treats those as one workspace instead of separate windows.
+## Quick Start
 
-The app is built around three ideas:
+Requirements:
 
-- the workspace is the unit of isolation
-- the agent is the primary working surface
-- project knowledge and review state should stay close to the agent
+- Rust toolchain
+- `pnpm` for the initial embedded web asset build
+- Codex or Claude Code
+- Helix for the embedded editor view
 
-This makes `gsdv` closer to a project cockpit than an editor. It is dense, stateful, and meant to stay open for long sessions.
+From a fresh checkout:
 
-## Workspace Model
+```sh
+make web-build
+make run-tui fps=60
+```
 
-Each workspace owns a complete context bundle:
+After the first web build, start the TUI directly with:
 
-- one primary agent session
-- one persistent workspace terminal
-- one Markdown outline and active document state
-- one `gsdv-spec` workflow tree
-- one reviewer state for GSD and Git inspection
-- its own dialogs, notifications, recent files, favorites, and runtime state
+```sh
+make run-tui fps=60
+```
 
-Switching workspaces swaps the entire bundle. A terminal, agent session, selected Markdown file, workflow selection, and reviewer position belong to their workspace, not to the global window.
+An installed binary uses the same entrypoint:
 
-## Primary Workflows
+```sh
+gsdv tui --fps 60
+```
 
-### Run The Agent
+`--fps` is a maximum render rate, not a permanent redraw loop. The TUI redraws when terminal output or UI state changes. The default is `4`; `60` gives the smoothest interactive experience.
 
-The agent surface embeds a real terminal backend and launches the selected coding agent from the workspace root by default. It supports resumable sessions, subagents, translated input drafts, quick replies, status hooks, and activity-aware UI state.
+## Why The TUI
 
-Agent sessions can be arranged as a visible grid. A workspace starts as one row with one column, and additional rows or columns can be added from the Agent surface context menu. Each column owns its own agent tabs and add-tab control. Rows and columns can be resized with splitters, folded, restored, or closed, and the focused cell receives keyboard input. `Ctrl+Arrow` moves focus across visible columns and rows without sending the arrow key into the agent terminal.
+Agent work already happens in a terminal. `gsdv` keeps that environment intact while adding the coordination layer that a single agent process does not provide:
 
-Each agent tab can carry its own optional launch settings, including model, Codex model provider, effort, fast mode where supported, and work directory. Work directory overrides are agent-scoped and persisted with the workspace. They can be typed directly or filled from a folder picker, and an empty value falls back to the workspace root. The child process is launched in that directory instead of passing a directory flag through the agent CLI, so Codex and Claude use the same behavior.
+- multiple visible agent sessions in resizable rows and columns
+- workspace isolation for agents, terminals, documents, and workflow state
+- clickable agent output for URLs, paths, and `file:line` references
+- hover feedback for recognized output targets
+- an embedded Helix surface with keyboard, wheel, click, and drag input
+- Markdown directory browsing, editing, and preview
+- a `gsdv-spec` workflow browser beside the running agent
+- a persistent workspace shell
+- status hooks, notifications, and pomodoro focus state
 
-Codex status hooks feed the workspace activity state directly into the app through the local hook socket. This avoids polling the status file during active sessions while keeping the persisted file as a startup fallback.
+Terminal output is rendered from the emulator grid with damage-based updates. Hidden panes do not need to be scanned or repainted continuously, so idle workspaces stay idle.
 
-The agent surface is the workspace home. Other surfaces exist to feed context into it, inspect its results, or maintain the project plan around it.
+## TUI Workflow
 
-### Maintain Project Knowledge
+### Run Agents
 
-The Markdown outline gives fast access to workspace documentation, attached local directories, and supported home-root Markdown sources. The center surface can edit Markdown directly or render it as preview. Recent Markdown history and diff context help move information between notes and the agent without leaving the app.
+The Agent view is the home screen. Each workspace begins with one agent and can grow into a grid of rows and columns. Columns contain agent tabs; the focused pane receives keyboard input.
 
-Outline directory menus can attach another local directory beside the workspace root, remove an attached directory without deleting it, create Markdown files, and create folders. New folder dialogs focus the name field immediately and accept Enter to create, keeping the file-management path keyboard friendly.
+Each agent can have its own model, provider, effort, fast-mode setting, and working directory. Sessions can be stopped, restarted, and resumed without collapsing the rest of the workspace.
+
+Codex is the main integration target. Claude-compatible launch and hook paths remain available.
+
+Useful controls:
+
+| Input | Action |
+| --- | --- |
+| `F2` | Toggle spotlight mode |
+| `Alt+Up` / `Alt+Down` | Cycle agents |
+| `Ctrl+Q` | Exit the TUI |
+| Left click | Focus panes, follow recognized output, or activate controls |
+| Right click | Open workspace, agent, and pane menus |
+| Mouse wheel | Scroll the pane under the pointer |
+
+### Follow Agent Output
+
+The TUI recognizes useful targets directly from the rendered agent output:
+
+- `https://...` opens in the browser
+- `path/to/file.rs:42` opens the file at the requested line
+- Markdown targets open in the directory/document view
+- directories and supported images are revealed with their native handler
+- other files open in the workspace Helix session
+
+Recognized targets are underlined on hover. Resolution uses the agent working directory, Helix working directory, and workspace root, so paths produced by agents with custom working directories still resolve correctly.
+
+### Edit With Helix
+
+Choose `[Helix]` in the bottom bar to open the workspace editor. It is the real Helix process running through the same PTY backend as the agent terminals, not a recreated editor widget.
+
+Keyboard input, paste, wheel scrolling, click-to-position, and mouse drag selection are forwarded to Helix. Opening a recognized `file:line` target reuses the workspace Helix session and jumps to that location.
+
+Inside Helix, `Alt+D` or `Cmd+D` can send the current `file:line` through the local hook socket and paste it into the active agent input.
+
+### Browse Project Knowledge
+
+Choose `[Dir]` for a column-based workspace browser. Markdown files can be opened as editable documents or rendered previews without leaving the TUI.
+
+Workspace notes belong to the workspace, along with recent documents, favorites, and the active document state.
 
 ### Drive Work From `gsdv-spec`
 
-The Work-flow tab reads `./gsdv-spec` and turns it into a project/task/step tree. It is intentionally lightweight: task files are Markdown, task descriptions are Markdown, and each step is a level-2 checkbox heading. Task files use the `task-*.md` convention so workflow content stays easy to identify in a normal repository tree.
+Choose `[Workflow]` to browse the repository's `./gsdv-spec` tree. Projects, tasks, steps, and their Markdown descriptions stay visible beside the implementation session.
 
-A task opens a focused task surface:
-
-```text
-task description editor
-steps list | selected step editor
-```
-
-This keeps intent and implementation notes in the same file. The UI edits the task description and selected step description together, then writes them back to the task Markdown.
-
-Workflow paths can be copied in a stable `project > task > step` form, and keyboard shortcuts can switch between the agent and the active workflow surface so implementation notes stay close to the running session.
-
-### Review What Changed
-
-Reviewer is a full route, not a side panel. It replaces the normal outline and center surface with a dense inspection view for GSD provenance and Git state.
-
-In Git mode, the reviewer is organized around repositories, commits, files, and diff/full-file content. In GSD mode, it is organized around change groups, repositories, files, and diff/full-file content. Reviewer rows can produce agent-ready prompt text so review observations can go back into the agent quickly.
-
-Reviewer targets can also open directly in the embedded Helix drawer, rooted in the target repository.
-
-### Navigate Code With Helix
-
-`gsdv` embeds Helix as a mature editor surface instead of trying to become a code editor itself. Agent output that contains `file:line` or `file:line-line` can open Helix at the target file and line. Reviewer selections can open Helix in the matching repository, and general workspace Helix opens reuse the active workspace root.
-
-Agent file-line opens are tracked in a short in-memory recent list. The list keeps the latest targets first, deduplicates by workdir, file, and line, and can be reopened from a centered modal.
-
-Inside the embedded Helix surface, `Alt+D` and `Cmd+D` can send the current `file:line` back through the app hook socket. The app copies that location and pastes it into the active agent input, leaving it ready for the next prompt.
-
-### Keep A Workspace Shell
-
-Each workspace has a persistent terminal separate from the agent. It stays rooted in the workspace and can be left and resumed like any other workspace surface.
-
-`F11` toggles an app fullscreen mode that hides the workspace rail, outline, and top mode bar while keeping the active center surface and bottom status bar visible.
-
-### Attach Local Tools
-
-Small shell scripts can be surfaced as extra tools. They can live globally or in a workspace, expose card or switch style controls, take input, and route output into the app notification stream.
-
-Reviewer scripts are context-aware actions for the reviewer surface. They are useful for local repo checks, branch-specific scripts, or project-specific review automation.
-
-## `gsdv-spec`
-
-`gsdv-spec` is the project workflow convention used by the Work-flow tab and the bundled `gsdv-wf` skill.
+The format is intentionally plain Markdown:
 
 ```text
 gsdv-spec/
@@ -132,7 +123,7 @@ gsdv-spec/
       task-*.md
 ```
 
-`gsdv-spec/root.md` describes the whole spec. Each project directory has its own `root.md`. Task files are plain Markdown:
+A task file looks like this:
 
 ```md
 Task-level description before the first step.
@@ -147,64 +138,118 @@ Step description.
 Rules:
 
 - content before the first valid step heading is the task description
-- a valid step heading is `## [ ] title`, `## [x] title`, or `## [X] title`
-- step titles are one line and may contain spaces or non-English text
-- step descriptions continue until the next valid step heading
-- there are no nested workflow steps in the current format
+- a step heading is `## [ ] title`, `## [x] title`, or `## [X] title`
+- a step description continues until the next valid step heading
+- task files use the `task-*.md` convention
 - logical paths copy as `project > task > step`
 
-The format is deliberately plain Markdown so it remains readable without `gsdv`.
+The bundled `gsdv-wf` skill lets Codex and Claude work with the same structure.
 
-## Integration Model
+### Use The Workspace Shell
 
-`gsdv` installs local integration assets for the current user:
+Choose `[Terminal]` for a shell rooted in the current workspace. It is separate from the agent and remains attached to that workspace when you switch views.
 
-- an agent status hook under `~/.gsdv/hooks`
-- the bundled `gsdv-wf` skill for Codex and Claude skill directories
-- a process-local hook endpoint used by Codex status hooks and embedded Helix actions
+## Workspace Model
 
-The app stores runtime state under `~/.gsdv`: workspace metadata, recent documents, favorites, settings, agent status, notifications, reviewer scripts, and extra tools.
+A workspace is the unit of isolation. Each one owns:
 
-Network proxy settings can be applied to newly launched agents, terminals, Helix, and scripts. The proxy page keeps saved values separate from the enable switch, so a proxy can be turned off without clearing the URL and `no_proxy` fields.
+- its agent grid and per-agent launch settings
+- its workspace terminal and Helix process
+- its Markdown outline and open documents
+- its `gsdv-spec` workflow state
+- its reviewer state
+- its dialogs, notifications, recent files, and runtime state
 
-The hook endpoint is a Unix domain socket on Linux and macOS, and a named pipe on Windows. Messages use a small length-prefixed frame with a `key:data` payload so the same channel can carry agent status updates, Helix cursor-location actions, and future local integrations.
+Switching workspaces swaps the complete context bundle. Agent sessions and editor state never become accidental global state.
 
-## Operating Model
+## Desktop GUI
 
-`gsdv` is a single-process `egui` / `eframe` desktop app.
+Run the desktop interface when you want the larger visual reviewer, native Markdown preview, or desktop-oriented layout:
 
-The important product consequence is that terminal output, file watching, reviewer refresh, document saves, screenshots, script output, and UI input all stay coordinated through one app state model. Visible UI state changes flow through a single `AppEvent` queue. Slow work is pushed out of the UI event drain and returns through events.
+```sh
+make run
+```
 
-Terminal surfaces use direct `alacritty_terminal` integration. The app does not rely on tmux, Ratatui panes, terminal screenshots, or legacy TUI compatibility layers to compose the product.
+The GUI uses the same workspace model, PTY hosts, hooks, persistence, and event queue as the TUI.
 
-Terminal repaint is gated so hidden or inactive terminal surfaces do not create repaint storms. Modern TUI keyboard protocols are forwarded where possible, which lets embedded Helix and Codex receive modified keys such as Alt and Cmd combinations instead of having the app swallow them.
+| Agent workspace | Work-flow and reviewer |
+| --- | --- |
+| ![gsdv agent workspace](assets/examples/ig_023f35ae25010aa7016a1cf1395a608191b1eecb31267809ca.png) | ![gsdv reviewer](assets/examples/ig_03fac067c40a3437016a1cfa2c3f888191b77212ab30a26699.png) |
 
-## Product Boundaries
+The reviewer provides repository, commit, file, diff, and provenance views. Review targets can be turned into agent-ready prompt text or opened in the shared Helix session.
 
-`gsdv` intentionally does not try to be:
+## Optional Web View
 
-- a general code editor
-- a replacement for a full IDE
-- a terminal multiplexer
-- a generic task manager
-- a project management SaaS surface
+`gsdv` also includes a browser client for viewing active agent sessions. It is an additional presentation surface, not a remote workspace runtime; agents and PTYs remain owned by the local `gsdv` process.
 
-It is designed for a narrower loop:
+![gsdv web view](assets/showcase/remote-web-demo.gif)
+
+## Integration And Storage
+
+On startup, `gsdv` installs local integration assets for the current user:
+
+- agent status hooks under `~/.gsdv/hooks`
+- the bundled `gsdv-wf` and `gsdv-image` skills
+- a local hook endpoint used by agent status and Helix actions
+
+Runtime state lives under `~/.gsdv`, including workspace metadata, settings, recent documents, favorites, notifications, reviewer scripts, and extra tools.
+
+The hook endpoint uses a Unix domain socket on Linux and macOS and a named pipe on Windows. It carries small framed messages for agent status, Helix locations, images, and other local integrations.
+
+## Architecture
+
+`gsdv` is one Rust application with two local frontends:
+
+```text
+native TUI (recommended) ─┐
+                         ├─ AppEvent queue ─ workspace state ─ PTY hosts
+desktop egui GUI ─────────┘
+```
+
+Important properties:
+
+- terminal processes are embedded directly with `alacritty_terminal`
+- the TUI uses `crossterm` for native input and ANSI output
+- the desktop frontend uses `egui` / `eframe`
+- visible state changes flow through one `AppEvent` queue
+- slow IO and CPU work stay outside the event drain
+- terminal rendering consumes emulator damage instead of parsing shell history every frame
+- no tmux, Ratatui pane layer, terminal screenshots, or legacy TUI bridge is used
+
+## Build Commands
+
+```sh
+# Build browser assets used by the binary.
+make web-build
+
+# Build the release binary.
+make build
+
+# Run the recommended TUI.
+make run-tui fps=60
+
+# Run the desktop GUI.
+make run
+```
+
+For direct Cargo checks:
+
+```sh
+cargo check --bin gsdv
+cargo fmt
+```
+
+## Product Boundary
+
+`gsdv` is not trying to become a general IDE, terminal multiplexer, or project-management service. It is a focused loop for agent-driven projects:
 
 ```text
 plan in Markdown
-run the agent
-inspect changes
+run one or more agents
+follow their output
+inspect and edit the result
 update intent
-review again
+repeat
 ```
 
-That loop is why the app keeps Agent, Markdown, Work-flow, Reviewer, Terminal, notifications, and local tools in one workspace shell.
-
-## Design Stance
-
-`gsdv` favors dense, quiet, repeatable desktop workflows. The center surface is intentionally dominant. The rail and outline keep workspace identity and project knowledge nearby without competing with the active work.
-
-The interface should be fast to scan, keyboard-friendly, explicit about state, and stable during long-running agent or review sessions.
-
-Optional pomodoro focus mode adds a visual gravity-lens rest effect around the workspace. It is designed as a break-state cue, not as a separate productivity dashboard.
+The TUI keeps that loop in the place where agent work already lives: your terminal.
