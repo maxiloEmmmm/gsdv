@@ -940,6 +940,38 @@ impl GsdvGuiApp {
                     workspace_index,
                     click,
                     helix_work_dir,
+                    origin: TerminalOutputClickOrigin::Gui,
+                });
+            }
+            repaint_controller.request_repaint(&repaint_ctx);
+        });
+    }
+
+    /// 后台解析并分类 TUI Agent 输出里的相对路径点击。
+    ///
+    /// 适用场景：TUI 点击 `src/main.rs:12`。示例：Agent 根目录 -> 绝对文件目标。
+    pub(super) fn spawn_tui_terminal_output_path_classify_task(
+        &self,
+        ctx: &egui::Context,
+        workspace_index: usize,
+        click: TerminalFileLineClick,
+        helix_work_dir: Option<PathBuf>,
+        workspace: TerminalWorkspaceMetadata,
+    ) {
+        let tx = self.app_event_tx.clone();
+        let repaint_ctx = ctx.clone();
+        let repaint_controller = self.repaint_controller.clone();
+        self.background_runtime.spawn(async move {
+            let click = tokio::task::spawn_blocking(move || {
+                classify_tui_terminal_output_path_click(click, workspace)
+            })
+            .await;
+            if let Ok(Some(click)) = click {
+                let _ = tx.send(AppEvent::TerminalOutputPathClassified {
+                    workspace_index,
+                    click,
+                    helix_work_dir,
+                    origin: TerminalOutputClickOrigin::Tui,
                 });
             }
             repaint_controller.request_repaint(&repaint_ctx);

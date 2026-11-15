@@ -201,6 +201,7 @@ pub(super) fn draw_terminal_tui_frame(
     frame: &mut [RenderLine],
     rect: TuiRect,
     terminal: &TerminalTuiFrame,
+    underline: Option<(usize, usize, usize)>,
 ) {
     for (offset, ansi) in terminal
         .rows
@@ -210,9 +211,81 @@ pub(super) fn draw_terminal_tui_frame(
     {
         let y = rect.y.saturating_add(offset as u16);
         if let Some(line) = frame.get_mut(usize::from(y)) {
-            line.overlays.push((rect.x, ansi.clone()));
+            let ansi = match underline {
+                Some((row, start, end)) if row == offset => {
+                    underline_ansi_columns(ansi, start, end)
+                }
+                _ => ansi.clone(),
+            };
+            line.overlays.push((rect.x, ansi));
         }
     }
+}
+
+/// 给 ANSI 行指定字符列注入下划线，同时保留原有颜色和样式切换。
+///
+/// 适用场景：Agent 输出 hover。示例：列 3..8 -> 只给路径 token 加下划线。
+fn underline_ansi_columns(ansi: &str, start: usize, end: usize) -> String {
+    if start >= end {
+        return ansi.to_string();
+    }
+    /// ANSI 扫描状态。
+    #[derive(Clone, Copy)]
+    enum EscapeState {
+        /// 可见字符。
+        Text,
+        /// 已读取 ESC。
+        Escape,
+        /// 正在读取 CSI。
+        Csi,
+    }
+
+    let mut output = String::with_capacity(ansi.len() + 16);
+    let mut state = EscapeState::Text;
+    let mut column = 0_usize;
+    let mut underlined = false;
+    for ch in ansi.chars() {
+        match state {
+            EscapeState::Text if ch == '\u{1b}' => {
+                output.push(ch);
+                state = EscapeState::Escape;
+            }
+            EscapeState::Text => {
+                if !underlined && (start..end).contains(&column) {
+                    output.push_str("\x1b[4m");
+                    underlined = true;
+                }
+                output.push(ch);
+                column = column.saturating_add(ch.width().unwrap_or(1));
+                if underlined && column >= end {
+                    output.push_str("\x1b[24m");
+                    underlined = false;
+                }
+            }
+            EscapeState::Escape => {
+                output.push(ch);
+                state = if ch == '[' {
+                    EscapeState::Csi
+                } else {
+                    EscapeState::Text
+                };
+            }
+            EscapeState::Csi => {
+                output.push(ch);
+                if ('@'..='~').contains(&ch) {
+                    state = EscapeState::Text;
+                    if ch == 'm' && (start..end).contains(&column) {
+                        output.push_str("\x1b[4m");
+                        underlined = true;
+                    }
+                }
+            }
+        }
+    }
+    if underlined {
+        output.push_str("\x1b[24m");
+    }
+    output
 }
 
 /// 把本机 terminal viewport 光标映射到完整 TUI 坐标。

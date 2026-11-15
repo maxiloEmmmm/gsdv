@@ -224,6 +224,32 @@ pub enum TerminalOutputClick {
     Url(String),
 }
 
+/// TUI 终端输出命中目标及其字符列范围。
+///
+/// 适用场景：点击与 hover 共用一次语法识别。示例：`a.rs:2` -> 列 4..10。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalTuiOutputMatch {
+    /// URL、文件或路径点击目标。
+    pub click: TerminalOutputClick,
+    /// token 起始字符列，包含。
+    pub start_column: usize,
+    /// token 结束字符列，不包含。
+    pub end_column: usize,
+}
+
+/// 本机 TUI 转发给全屏 terminal 程序的主鼠标动作。
+///
+/// 适用场景：Helix 接收字符坐标鼠标事件。示例：`Press` -> 光标跳到点击位置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalTuiMouseKind {
+    /// 主键按下。
+    Press,
+    /// 主键按住并移动。
+    Drag,
+    /// 主键松开。
+    Release,
+}
+
 /// Terminal surface 一帧 UI 输出。
 pub struct TerminalHostUiOutput {
     /// 实际 terminal widget 的交互响应。
@@ -849,6 +875,34 @@ impl TerminalTuiOutputSource {
         )
     }
 
+    /// 解析 TUI viewport 指定字符位置的 URL 或文件引用。
+    ///
+    /// 适用场景：用户点击 Agent 输出。示例：`src/main.rs:12` -> 路径候选。
+    pub fn output_match_in_row(
+        &self,
+        ansi_row: &str,
+        column: usize,
+    ) -> Option<TerminalTuiOutputMatch> {
+        let line = terminal_tui_plain_row_text(ansi_row);
+        if let Some(matched) = url_match_at_column(&line, column, 0) {
+            return Some(TerminalTuiOutputMatch {
+                click: TerminalOutputClick::Url(matched.url),
+                start_column: matched.start_column,
+                end_column: matched.end_column,
+            });
+        }
+        let matched = terminal_output_match_at_column(&line, column, 0)?;
+        Some(TerminalTuiOutputMatch {
+            click: TerminalOutputClick::PathCandidate(TerminalFileLineClick {
+                path: matched.path,
+                line: matched.line,
+                end_line: matched.end_line,
+            }),
+            start_column: matched.start_column,
+            end_column: matched.end_column,
+        })
+    }
+
     /// 消费 emulator damage，只转换真正变化的 viewport 行。
     ///
     /// 适用场景：Codex 动画、光标移动和普通输出。示例：一行 damage -> 一行 ANSI。
@@ -1299,6 +1353,38 @@ impl TerminalBackend {
         for _ in 0..delta.unsigned_abs() {
             terminal_mouse_report_at_cell(&mut bytes, event_code, col, line, mode);
         }
+        self.write_bytes(bytes);
+    }
+
+    /// 把本机 TUI 的主鼠标动作编码给接管鼠标的全屏程序。
+    ///
+    /// 适用场景：Helix 鼠标定位与拖选。示例：第 5 列按下 -> SGR mouse press。
+    fn send_tui_primary_mouse(&mut self, kind: TerminalTuiMouseKind, column: u16, row: u16) {
+        let mode = *self.term.lock().mode();
+        if !mode.intersects(TermMode::MOUSE_MODE) {
+            return;
+        }
+        let event_code = match kind {
+            TerminalTuiMouseKind::Press => 0,
+            TerminalTuiMouseKind::Drag
+                if mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) =>
+            {
+                32
+            }
+            TerminalTuiMouseKind::Drag => return,
+            TerminalTuiMouseKind::Release => 3,
+        };
+        // 触发条件：crossterm 给出零基字符坐标，终端鼠标协议要求一基坐标。
+        // 不能直接复用 egui 像素换算：本机 TUI 没有像素 rect。
+        // 防止回归：点击首行首列被错误夹到其他位置，或越过 PTY grid。
+        let col = usize::from(column)
+            .saturating_add(1)
+            .min(usize::from(self.size.cols).max(1));
+        let line = usize::from(row)
+            .saturating_add(1)
+            .min(usize::from(self.size.lines).max(1));
+        let mut bytes = Vec::new();
+        terminal_mouse_report_at_cell(&mut bytes, event_code, col, line, mode);
         self.write_bytes(bytes);
     }
 }
@@ -1761,6 +1847,18 @@ impl GuiTerminalHost {
             self.tui_output_tx
                 .send_modify(|sequence| *sequence = sequence.wrapping_add(1));
         }
+    }
+
+    /// 在同进程 TUI 中把主鼠标动作发给 terminal，不要求 WebSocket 所有权。
+    ///
+    /// 适用场景：Helix 点击定位与拖选。示例：`Press, 4, 2` -> PTY 鼠标报告。
+    pub fn send_tui_primary_mouse_direct(
+        &mut self,
+        kind: TerminalTuiMouseKind,
+        column: u16,
+        row: u16,
+    ) {
+        self.backend.send_tui_primary_mouse(kind, column, row);
     }
 
     /// Sends one whitelisted key from the currently owning Web session.
@@ -3613,6 +3711,18 @@ pub(super) fn classify_terminal_output_path_click(
         .then_some(TerminalOutputClick::FileLine(click))
 }
 
+/// 在后台按 Agent、Helix、workspace 根目录解析并分类 TUI 路径点击。
+///
+/// 适用场景：TUI 点击相对路径。示例：`src/main.rs:12` -> 绝对文件目标。
+pub(super) fn classify_tui_terminal_output_path_click(
+    mut click: TerminalFileLineClick,
+    workspace: TerminalWorkspaceMetadata,
+) -> Option<TerminalOutputClick> {
+    let roots = terminal_output_search_roots(&workspace);
+    click.path = resolve_terminal_file_path_from_roots(&workspace.path, &click.path, &roots);
+    classify_terminal_output_path_click(click)
+}
+
 /// Paints an underline over hovered clickable Agent output.
 fn paint_terminal_click_hover(
     ui: &Ui,
@@ -3982,6 +4092,42 @@ fn terminal_tui_frame_from_term(
         terminal_scroll: terminal_owns_scroll(term),
         max_scroll_offset,
     }
+}
+
+/// 从 TUI 已绘制行剥离 ANSI，并保持字符占用的 terminal 列宽。
+///
+/// 适用场景：点击当前 cache 行。示例：彩色 `src/main.rs:1` -> 等列宽纯文本。
+fn terminal_tui_plain_row_text(ansi_row: &str) -> String {
+    /// ANSI 行扫描状态。
+    #[derive(Clone, Copy)]
+    enum EscapeState {
+        /// 普通可见文本。
+        Text,
+        /// 已读取 ESC。
+        Escape,
+        /// 正在读取 CSI。
+        Csi,
+    }
+
+    let mut state = EscapeState::Text;
+    let mut text = String::new();
+    for ch in ansi_row.chars() {
+        match state {
+            EscapeState::Text if ch == '\u{1b}' => state = EscapeState::Escape,
+            EscapeState::Text => {
+                text.push(ch);
+                for _ in 1..ch.width().unwrap_or(1) {
+                    text.push(' ');
+                }
+            }
+            EscapeState::Escape if ch == '[' => state = EscapeState::Csi,
+            EscapeState::Escape => state = EscapeState::Text,
+            EscapeState::Csi if ('@'..='~').contains(&ch) => state = EscapeState::Text,
+            EscapeState::Csi => {}
+        }
+    }
+    trim_trailing_spaces(&mut text);
+    text
 }
 
 /// 返回当前 viewport 内的 terminal 光标位置。
@@ -4626,10 +4772,20 @@ fn terminal_file_match_at_pos(
         return None;
     }
     let line = terminal_visible_line_text(backend, visible_line)?;
-    if let Some(matched) = file_line_match_at_column(&line, column, visible_line) {
-        return Some(matched);
-    }
-    file_path_match_at_column(&line, column, visible_line, workspace_root)
+    let _ = workspace_root;
+    terminal_output_match_at_column(&line, column, visible_line)
+}
+
+/// 从一行 terminal 纯文本中识别文件行或裸路径。
+///
+/// 适用场景：egui 与 TUI 共用相同语法。示例：点击 `./README.md` -> 路径匹配。
+fn terminal_output_match_at_column(
+    line: &str,
+    column: usize,
+    visible_line: i32,
+) -> Option<TerminalFileLineMatch> {
+    file_line_match_at_column(line, column, visible_line)
+        .or_else(|| file_path_match_at_column(line, column, visible_line))
 }
 
 /// Finds a bare file or directory path token and returns it as a line-one target.
@@ -4637,7 +4793,6 @@ fn file_path_match_at_column(
     line: &str,
     column: usize,
     visible_line: i32,
-    workspace_root: &Path,
 ) -> Option<TerminalFileLineMatch> {
     let mut index = 0usize;
     while let Some((raw_start, raw_end)) = next_file_path_token_span(line, index) {

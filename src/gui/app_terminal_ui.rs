@@ -524,6 +524,41 @@ impl GsdvGuiApp {
         }
     }
 
+    /// 应用 TUI 后台分类后的终端输出点击，并请求对应字符视图导航。
+    ///
+    /// 适用场景：TUI 点击文件引用。示例：`.md` -> Dir，`.rs` -> Helix。
+    pub(super) fn apply_classified_tui_terminal_output_click(
+        &mut self,
+        ctx: &egui::Context,
+        click: TerminalOutputClick,
+        helix_work_dir: Option<PathBuf>,
+    ) {
+        match click {
+            TerminalOutputClick::FileLine(click) => {
+                let Some((file, target)) = self.terminal_file_line_click_target(&click) else {
+                    return;
+                };
+                if terminal_file_line_is_markdown(&file) {
+                    let path = self.workspace_relative_or_absolute(&file);
+                    self.open_terminal_markdown_file(file);
+                    self.pending_tui_navigation =
+                        Some(tui_runtime::TuiNavigationRequest::Markdown {
+                            workspace_index: self.active_workspace,
+                            path,
+                        });
+                    return;
+                }
+                self.open_terminal_file_line_in_helix(ctx, click, file, target, helix_work_dir);
+                self.pending_tui_navigation = Some(tui_runtime::TuiNavigationRequest::Helix {
+                    workspace_index: self.active_workspace,
+                });
+            }
+            TerminalOutputClick::RevealPath(path) => self.spawn_reveal_path_task(ctx, path),
+            TerminalOutputClick::Url(url) => self.open_terminal_url_in_browser(&url),
+            TerminalOutputClick::PathCandidate(_) => {}
+        }
+    }
+
     /// Translates the visible active Agent input draft in a helper popup.
     pub(super) fn translate_active_agent_input(&mut self, ctx: &egui::Context) {
         let workspace_index = self.active_workspace;

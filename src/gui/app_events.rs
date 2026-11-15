@@ -939,9 +939,21 @@ impl GsdvGuiApp {
                 workspace_index,
                 click,
                 helix_work_dir,
+                origin,
             } => {
                 if workspace_index == self.active_workspace {
-                    self.apply_classified_terminal_output_click(ctx, click, helix_work_dir);
+                    match origin {
+                        TerminalOutputClickOrigin::Gui => {
+                            self.apply_classified_terminal_output_click(ctx, click, helix_work_dir);
+                        }
+                        TerminalOutputClickOrigin::Tui => {
+                            self.apply_classified_tui_terminal_output_click(
+                                ctx,
+                                click,
+                                helix_work_dir,
+                            );
+                        }
+                    }
                 }
             }
             AppEvent::HelixBinaryChecked { available } => {

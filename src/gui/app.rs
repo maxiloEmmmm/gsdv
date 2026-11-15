@@ -26,7 +26,7 @@ use crate::gui::terminal_host::{
     TerminalRuntimeEventKind, TerminalRuntimeEventSink, TerminalSessionMetadata,
     TerminalSessionSource, TerminalSurfaceKind, TerminalWorkspaceMetadata,
     agent_input_bytes_from_events_with_kitty_protocol, classify_terminal_output_path_click,
-    terminal_agent_input_submit_bytes,
+    classify_tui_terminal_output_path_click, terminal_agent_input_submit_bytes,
 };
 use crate::gui::theme;
 use crate::gui::workflow::{
@@ -570,6 +570,8 @@ struct GsdvGuiApp {
     helix_binary_check_in_flight: bool,
     /// 等待 Helix binary 可用性结果的打开请求。
     pending_helix_open_request: Option<HelixOpenRequest>,
+    /// 后台输出分类完成后等待 TUI 消费的视图导航。
+    pending_tui_navigation: Option<tui_runtime::TuiNavigationRequest>,
     /// render 或 input route 请求加载的 reviewer adapter。
     pending_reviewer_loads: BTreeSet<usize>,
     /// 当前正在后台构建的 reviewer adapter。
@@ -1054,6 +1056,7 @@ impl GsdvGuiApp {
             pending_outline_refreshes: BTreeSet::new(),
             helix_binary_check_in_flight: false,
             pending_helix_open_request: None,
+            pending_tui_navigation: None,
             pending_reviewer_loads: BTreeSet::new(),
             reviewer_loads_in_flight: BTreeSet::new(),
             reviewer_adapter_tasks_in_flight: BTreeSet::new(),
@@ -1927,9 +1930,14 @@ enum AppEvent {
     },
     /// 终端路径点击的文件系统分类完成。
     TerminalOutputPathClassified {
+        /// 目标 workspace。
         workspace_index: usize,
+        /// 后台分类后的输出目标。
         click: TerminalOutputClick,
+        /// 可选 Helix 工作目录覆盖。
         helix_work_dir: Option<PathBuf>,
+        /// 发起点击的前端。
+        origin: TerminalOutputClickOrigin,
     },
     /// Helix 可执行文件可用性检查完成。
     HelixBinaryChecked { available: bool },
@@ -2252,6 +2260,17 @@ enum HelixOpenRequest {
     WorkspaceRoot,
     /// Open Helix for a terminal-detected file target.
     TerminalFile(HelixLaunchSpec),
+}
+
+/// 终端输出点击来自哪个前端，用于选择完成后的导航方式。
+///
+/// 适用场景：同一后台路径分类服务 GUI 与 TUI。示例：TUI 文件 -> Helix 主视图。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalOutputClickOrigin {
+    /// egui terminal surface。
+    Gui,
+    /// 原生字符 TUI。
+    Tui,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

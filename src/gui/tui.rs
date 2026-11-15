@@ -5,7 +5,8 @@
 
 use super::*;
 use crate::gui::terminal_host::{
-    TerminalTuiFrame, TerminalTuiOutputSource, TerminalTuiOutputState, TerminalTuiUpdate,
+    TerminalTuiFrame, TerminalTuiMouseKind, TerminalTuiOutputMatch, TerminalTuiOutputSource,
+    TerminalTuiOutputState, TerminalTuiUpdate,
 };
 use anyhow::{Context, Result};
 use base64::Engine as _;
@@ -114,6 +115,17 @@ pub(super) enum TuiAppAction {
     ExpandOutlineDirectory { index: usize, key: PathBuf },
     /// 在共享 DocumentState 中打开 Markdown。
     OpenMarkdown { index: usize, path: PathBuf },
+    /// 打开 Agent 输出里识别出的 URL 或路径。
+    OpenTerminalOutput {
+        /// workspace 索引。
+        index: usize,
+        /// 输出所属 Agent 槽位。
+        slot: AgentSlotId,
+        /// 只做语法识别、尚未分类的点击目标。
+        click: TerminalOutputClick,
+    },
+    /// 在当前 Agent 工作目录打开 Helix。
+    OpenWorkspaceHelix { index: usize },
     /// 保存普通 Markdown 文档。
     SaveMarkdown {
         index: usize,
@@ -349,6 +361,26 @@ pub(super) enum TuiAppAction {
         /// terminal 内字符坐标。
         pointer_cell: Option<(u16, u16)>,
     },
+    /// 使用现有 terminal mode 处理 Helix 鼠标滚轮。
+    ScrollHelix {
+        /// workspace 索引。
+        index: usize,
+        /// 正数向上、负数向下。
+        delta: i32,
+        /// Helix 内字符坐标。
+        pointer_cell: Option<(u16, u16)>,
+    },
+    /// 把主鼠标动作转发给 Helix terminal。
+    HelixMouse {
+        /// workspace 索引。
+        index: usize,
+        /// 按下、拖动或松开。
+        kind: TerminalTuiMouseKind,
+        /// Helix terminal 内零基字符列。
+        column: u16,
+        /// Helix terminal 内零基字符行。
+        row: u16,
+    },
     /// 开关持久化番茄钟功能。
     SetPomodoroEnabled(bool),
     /// 开关专注等级模式。
@@ -365,6 +397,25 @@ pub(super) enum TuiAppAction {
         rest_minutes: u16,
         /// 剩余时间告警百分比。
         warning_remaining_percent: u8,
+    },
+}
+
+/// AppEvent 完成后台分类后交给 TUI 的一次视图导航。
+///
+/// 适用场景：点击 Agent 输出。示例：Rust 文件 -> Helix，Markdown -> Dir。
+#[derive(Debug, Clone)]
+pub(super) enum TuiNavigationRequest {
+    /// 在目录工作台打开 Markdown。
+    Markdown {
+        /// 目标 workspace。
+        workspace_index: usize,
+        /// workspace 相对或绝对文档路径。
+        path: PathBuf,
+    },
+    /// 切换到 workspace 的 Helix host。
+    Helix {
+        /// 目标 workspace。
+        workspace_index: usize,
     },
 }
 
@@ -420,6 +471,36 @@ impl GsdvGuiApp {
             TuiAppAction::OpenMarkdown { index, path } => {
                 self.switch_workspace(index);
                 self.open_file_now(path);
+            }
+            TuiAppAction::OpenTerminalOutput { index, slot, click } => {
+                if index != self.active_workspace {
+                    // 触发条件：Spotlight pane 指向非当前 workspace 的 Agent。
+                    // 不能丢弃点击：pane 已可见且用户明确点击了它的输出。
+                    // 先复用跨 workspace 定位，防止分类结果因 active 不同被忽略。
+                    self.prepare_spotlight_workspace(index, slot.clone());
+                }
+                match click {
+                    TerminalOutputClick::PathCandidate(click) => {
+                        let Some(workspace) = self.agent_metadata_for_slot(index, &slot) else {
+                            return;
+                        };
+                        let helix_work_dir = self.agent_slot_helix_work_dir(index, &slot);
+                        self.spawn_tui_terminal_output_path_classify_task(
+                            ctx,
+                            index,
+                            click,
+                            helix_work_dir,
+                            workspace,
+                        );
+                    }
+                    click => {
+                        self.apply_classified_tui_terminal_output_click(ctx, click, None);
+                    }
+                }
+            }
+            TuiAppAction::OpenWorkspaceHelix { index } => {
+                self.switch_workspace(index);
+                self.open_workspace_helix_drawer(ctx);
             }
             TuiAppAction::SaveMarkdown { index, path, text } => {
                 self.switch_workspace(index);
@@ -660,6 +741,33 @@ impl GsdvGuiApp {
                     .and_then(|hosts| hosts.workspace.as_mut())
                 {
                     host.scroll_direct(delta, pointer_cell);
+                }
+            }
+            TuiAppAction::ScrollHelix {
+                index,
+                delta,
+                pointer_cell,
+            } => {
+                if let Some(host) = self
+                    .terminal_hosts
+                    .get_mut(index)
+                    .and_then(|hosts| hosts.helix.as_mut())
+                {
+                    host.scroll_direct(delta, pointer_cell);
+                }
+            }
+            TuiAppAction::HelixMouse {
+                index,
+                kind,
+                column,
+                row,
+            } => {
+                if let Some(host) = self
+                    .terminal_hosts
+                    .get_mut(index)
+                    .and_then(|hosts| hosts.helix.as_mut())
+                {
+                    host.send_tui_primary_mouse_direct(kind, column, row);
                 }
             }
             TuiAppAction::SetPomodoroEnabled(enabled) => {
@@ -1099,6 +1207,21 @@ struct PaneCache {
     scroll_offset: usize,
 }
 
+/// 当前鼠标悬停的 Agent 输出 token。
+///
+/// 适用场景：绘制 GUI 同款链接下划线。示例：pane 第 4 行路径列 8..20。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentOutputHover {
+    /// token 所属 Agent。
+    target: AgentTarget,
+    /// pane terminal viewport 内行号。
+    row: usize,
+    /// token 起始字符列。
+    start_column: usize,
+    /// token 结束字符列。
+    end_column: usize,
+}
+
 /// TUI 当前占据主区域的一级视图。
 ///
 /// 适用场景：底栏在 Agent、Workflow 与 workspace terminal 间切换。
@@ -1113,6 +1236,8 @@ enum TuiMainView {
     Directory,
     /// 当前 workspace 的交互式 terminal。
     Terminal,
+    /// 当前 workspace 的嵌入式 Helix。
+    Helix,
 }
 
 /// 当前 workspace terminal 的差量渲染缓存。
@@ -1197,6 +1322,8 @@ enum HitAction {
     OpenDirectory,
     /// 打开当前 workspace terminal。
     OpenWorkspaceTerminal,
+    /// 打开当前 workspace Helix。
+    OpenWorkspaceHelix,
     /// 返回 Agent 主视图。
     ExitAuxiliaryView,
     /// 选择 Workflow 预览目标。
@@ -1496,10 +1623,16 @@ struct TuiState {
     last_pomodoro_minute: Option<u64>,
     /// 当前键盘输入目标。
     focused_target: Option<AgentTarget>,
+    /// 当前 Agent 输出 hover token。
+    output_hover: Option<AgentOutputHover>,
     /// 每个已见 pane 的 terminal diff cache。
     panes: BTreeMap<AgentTarget, PaneCache>,
     /// 当前 workspace terminal 的差量 cache。
     workspace_terminal: Option<WorkspaceTerminalCache>,
+    /// 当前 workspace Helix 的差量 cache。
+    helix_terminal: Option<WorkspaceTerminalCache>,
+    /// Helix terminal 是否已接收本轮主键按下，用于限定拖动和松开转发。
+    helix_primary_mouse_down: bool,
     /// TUI Workflow 浏览状态。
     workflow_browser: WorkflowBrowser,
     /// TUI Column View 目录浏览状态。
@@ -1553,8 +1686,11 @@ impl TuiState {
             busy_frame: 0,
             last_pomodoro_minute: None,
             focused_target: None,
+            output_hover: None,
             panes: BTreeMap::new(),
             workspace_terminal: None,
+            helix_terminal: None,
+            helix_primary_mouse_down: false,
             workflow_browser: WorkflowBrowser::default(),
             directory_browser: DirectoryBrowser::default(),
             markdown_workbenches: MarkdownWorkbenches::default(),
@@ -1588,6 +1724,7 @@ impl TuiState {
         loop {
             app.enqueue_update_events(ctx);
             app.drain_app_events(ctx, Instant::now(), Duration::from_millis(8));
+            self.apply_pending_tui_navigation(app);
             self.sync_spotlight_rank_target(app);
             self.sync_pomodoro_layer(app);
             self.sync_image_gallery_layer(app);
@@ -1633,6 +1770,36 @@ impl TuiState {
     fn frame_due(&self) -> bool {
         self.last_frame_at
             .is_none_or(|last| last.elapsed() >= self.frame_interval)
+    }
+
+    /// 消费后台输出分类产生的 TUI 视图导航。
+    ///
+    /// 适用场景：点击 Agent 文件引用。示例：Markdown -> Dir，Rust -> Helix。
+    fn apply_pending_tui_navigation(&mut self, app: &mut GsdvGuiApp) {
+        let Some(request) = app.pending_tui_navigation.take() else {
+            return;
+        };
+        match request {
+            TuiNavigationRequest::Markdown {
+                workspace_index,
+                path,
+            } => {
+                if workspace_index != app.active_workspace {
+                    app.switch_workspace(workspace_index);
+                }
+                self.main_view = TuiMainView::Directory;
+                self.directory_browser.workspace_index = Some(workspace_index);
+                self.directory_browser.selected_file = Some(path);
+                self.directory_browser.content_scroll = 0;
+            }
+            TuiNavigationRequest::Helix { workspace_index } => {
+                if workspace_index != app.active_workspace {
+                    app.switch_workspace(workspace_index);
+                }
+                self.main_view = TuiMainView::Helix;
+            }
+        }
+        self.dirty = true;
     }
 
     /// 等级模式只在最高优先级停止 Agent 变化时切换 TUI 目标。
@@ -1750,6 +1917,14 @@ impl TuiState {
                 self.sync_workspace_terminal(app, ctx);
                 return;
             }
+            TuiMainView::Helix => {
+                if !self.visible_panes.is_empty() {
+                    self.visible_panes.clear();
+                    self.dirty = true;
+                }
+                self.sync_helix_terminal(app);
+                return;
+            }
             TuiMainView::Agents => {}
         }
         let next = self.compute_pane_layout(app);
@@ -1843,7 +2018,7 @@ impl TuiState {
                 app.documents.get(app.active_workspace),
                 &mut self.markdown_workbenches,
             ),
-            TuiMainView::Agents | TuiMainView::Terminal => {}
+            TuiMainView::Agents | TuiMainView::Terminal | TuiMainView::Helix => {}
         }
     }
 
@@ -1900,6 +2075,51 @@ impl TuiState {
             return;
         }
         if let Some(cache) = self.workspace_terminal.as_mut()
+            && cache.grid_size != grid_size
+        {
+            host.resize_remote_grid(terminal_cols, terminal_lines);
+            cache.grid_size = grid_size;
+            self.dirty = true;
+        }
+    }
+
+    /// 创建或同步当前 workspace Helix 的输出 cache 与字符尺寸。
+    ///
+    /// 适用场景：底栏打开 Helix 或文件点击完成。示例：120x40 -> Helix 120x39。
+    fn sync_helix_terminal(&mut self, app: &mut GsdvGuiApp) {
+        let index = app.active_workspace;
+        let terminal_cols = self.size.0.max(1);
+        let terminal_lines = self.size.1.saturating_sub(1).max(1);
+        let Some(host) = app
+            .terminal_hosts
+            .get_mut(index)
+            .and_then(|hosts| hosts.helix.as_mut())
+        else {
+            return;
+        };
+        let host_id = host.id();
+        let grid_size = (terminal_cols, terminal_lines);
+        let replace = self
+            .helix_terminal
+            .as_ref()
+            .is_none_or(|cache| cache.workspace_index != index || cache.host_id != host_id);
+        if replace {
+            let source = host.tui_output_source();
+            let (frame, output_state) = source.frame(0);
+            self.helix_terminal = Some(WorkspaceTerminalCache {
+                workspace_index: index,
+                host_id,
+                source,
+                output_state,
+                frame,
+                grid_size,
+                scroll_offset: 0,
+            });
+            host.resize_remote_grid(terminal_cols, terminal_lines);
+            self.dirty = true;
+            return;
+        }
+        if let Some(cache) = self.helix_terminal.as_mut()
             && cache.grid_size != grid_size
         {
             host.resize_remote_grid(terminal_cols, terminal_lines);
@@ -2039,8 +2259,13 @@ impl TuiState {
     ///
     /// 适用场景：PTY 输出变化。示例：Rows 只替换 cache 对应行。
     fn refresh_terminal_updates(&mut self) {
-        if self.main_view == TuiMainView::Terminal {
-            if let Some(cache) = self.workspace_terminal.as_mut() {
+        if matches!(self.main_view, TuiMainView::Terminal | TuiMainView::Helix) {
+            let cache = match self.main_view {
+                TuiMainView::Terminal => self.workspace_terminal.as_mut(),
+                TuiMainView::Helix => self.helix_terminal.as_mut(),
+                TuiMainView::Agents | TuiMainView::Workflow | TuiMainView::Directory => None,
+            };
+            if let Some(cache) = cache {
                 if apply_terminal_tui_update(
                     &mut cache.frame,
                     cache
@@ -2071,6 +2296,7 @@ impl TuiState {
             // 不能再按 FPS 独立推进：Busy 会让静止画面持续整屏重绘。
             // 防止回归：`--fps 60` 不再等价于常驻 60 FPS CPU 占用。
             self.busy_frame = self.busy_frame.wrapping_add(1);
+            self.output_hover = None;
             self.dirty = true;
         }
     }
@@ -2252,6 +2478,12 @@ impl TuiState {
                         self.queue_workspace_terminal_bytes(app, vec![b'\r']);
                     } else if let Some(bytes) = terminal_bytes_for_key(key) {
                         self.queue_workspace_terminal_bytes(app, bytes);
+                    }
+                } else if self.main_view == TuiMainView::Helix {
+                    if key.code == KeyCode::Enter {
+                        self.queue_helix_terminal_bytes(app, vec![b'\r']);
+                    } else if let Some(bytes) = terminal_bytes_for_key(key) {
+                        self.queue_helix_terminal_bytes(app, bytes);
                     }
                 } else if key.code == KeyCode::Enter {
                     self.queue_terminal_key(app, TerminalRemoteKey::Enter);
@@ -2531,6 +2763,22 @@ impl TuiState {
         });
     }
 
+    /// 把普通按键字节投递给当前 workspace 的 Helix。
+    ///
+    /// 适用场景：Helix 主视图。示例：输入 `i` -> 进入插入模式。
+    fn queue_helix_terminal_bytes(&mut self, app: &GsdvGuiApp, bytes: Vec<u8>) {
+        if let Some(cache) = self.helix_terminal.as_mut() {
+            cache.scroll_offset = 0;
+            cache.frame = cache.source.view(0);
+        }
+        app.queue_app_event(AppEvent::InputTerminalBytes {
+            workspace_index: app.active_workspace,
+            target: TerminalSurfaceKind::Helix,
+            agent_slot: AgentSlotId::Main,
+            bytes,
+        });
+    }
+
     /// 把 Enter 等特殊键投递到现有 terminal 协议编码路径。
     ///
     /// 适用场景：Codex 开启 kitty keyboard protocol。示例：Enter -> CSI 13u。
@@ -2577,6 +2825,10 @@ impl TuiState {
             self.queue_workspace_terminal_bytes(app, text.into_bytes());
             return;
         }
+        if self.main_view == TuiMainView::Helix {
+            self.queue_helix_terminal_bytes(app, text.into_bytes());
+            return;
+        }
         self.queue_terminal_bytes(app, text.into_bytes());
         app.queue_app_event(AppEvent::PomodoroInputDetected);
     }
@@ -2585,6 +2837,15 @@ impl TuiState {
     ///
     /// 适用场景：EnableMouseCapture 后。示例：右键 tab -> Agent menu。
     fn handle_mouse(&mut self, event: MouseEvent, app: &GsdvGuiApp) {
+        if event.kind == MouseEventKind::Moved {
+            if self.layer.is_none()
+                && matches!(self.main_view, TuiMainView::Agents | TuiMainView::Workflow)
+            {
+                self.update_agent_output_hover(event.column, event.row);
+            } else if self.output_hover.take().is_some() {
+                self.dirty = true;
+            }
+        }
         if matches!(
             self.layer,
             Some(TuiLayer::Form(_) | TuiLayer::Confirm { .. } | TuiLayer::MarkdownUnsaved { .. })
@@ -2645,6 +2906,10 @@ impl TuiState {
             self.handle_workspace_terminal_mouse(event, app);
             return;
         }
+        if self.main_view == TuiMainView::Helix {
+            self.handle_helix_terminal_mouse(event, app);
+            return;
+        }
         if matches!(event.kind, MouseEventKind::Drag(MouseButton::Left))
             && self.splitter_drag.is_some()
         {
@@ -2678,6 +2943,11 @@ impl TuiState {
         }
         match event.kind {
             MouseEventKind::Down(button) => {
+                if button == MouseButton::Left
+                    && self.open_agent_output_at(event.column, event.row, app)
+                {
+                    return;
+                }
                 let action = self.hit_regions.iter().rev().find_map(|region| {
                     region
                         .rect
@@ -2748,6 +3018,11 @@ impl TuiState {
     /// 适用场景：主 tree、task、step tree 和 step Markdown 分别滚动。
     fn handle_column_view_mouse(&mut self, event: MouseEvent, app: &GsdvGuiApp) {
         if let MouseEventKind::Down(button) = event.kind {
+            if button == MouseButton::Left
+                && self.open_agent_output_at(event.column, event.row, app)
+            {
+                return;
+            }
             let action = self.hit_regions.iter().rev().find_map(|region| {
                 region
                     .rect
@@ -2885,6 +3160,153 @@ impl TuiState {
             cache.frame = cache.source.view(cache.scroll_offset);
             self.dirty = true;
         }
+    }
+
+    /// 处理 Helix 的底栏按钮、鼠标动作和滚轮。
+    ///
+    /// 适用场景：Helix 鼠标模式。示例：左键点击第 8 行 -> 光标定位到第 8 行。
+    fn handle_helix_terminal_mouse(&mut self, event: MouseEvent, app: &GsdvGuiApp) {
+        if let MouseEventKind::Down(button) = event.kind {
+            let action = self.hit_regions.iter().rev().find_map(|region| {
+                region
+                    .rect
+                    .contains(event.column, event.row)
+                    .then(|| match button {
+                        MouseButton::Left => region.left.clone(),
+                        MouseButton::Right => region.right.clone(),
+                        _ => None,
+                    })?
+            });
+            if let Some(action) = action {
+                self.apply_hit_action(action, event.column, event.row, app);
+                self.helix_primary_mouse_down = false;
+                return;
+            }
+            if button == MouseButton::Left && event.row < self.size.1.saturating_sub(1) {
+                self.helix_primary_mouse_down = true;
+                app.queue_app_event(AppEvent::TuiAction(TuiAppAction::HelixMouse {
+                    index: app.active_workspace,
+                    kind: TerminalTuiMouseKind::Press,
+                    column: event.column,
+                    row: event.row,
+                }));
+            }
+            return;
+        }
+        let mouse_kind = match event.kind {
+            MouseEventKind::Drag(MouseButton::Left) if self.helix_primary_mouse_down => {
+                Some(TerminalTuiMouseKind::Drag)
+            }
+            MouseEventKind::Up(MouseButton::Left) if self.helix_primary_mouse_down => {
+                self.helix_primary_mouse_down = false;
+                Some(TerminalTuiMouseKind::Release)
+            }
+            _ => None,
+        };
+        if let Some(kind) = mouse_kind {
+            // 触发条件：按下始于 Helix，但拖动或松开落到底栏。
+            // 不能丢弃松开事件：Helix 会继续认为主键处于按下状态。
+            // 防止回归：底栏仍由外层处理，同时 PTY 鼠标状态不会卡住。
+            let row = event.row.min(self.size.1.saturating_sub(2));
+            app.queue_app_event(AppEvent::TuiAction(TuiAppAction::HelixMouse {
+                index: app.active_workspace,
+                kind,
+                column: event.column,
+                row,
+            }));
+            return;
+        }
+        let delta = match event.kind {
+            MouseEventKind::ScrollUp => 3,
+            MouseEventKind::ScrollDown => -3,
+            _ => return,
+        };
+        let terminal_owns_scroll = self
+            .helix_terminal
+            .as_ref()
+            .is_some_and(|cache| cache.frame.terminal_scroll);
+        if terminal_owns_scroll {
+            app.queue_app_event(AppEvent::TuiAction(TuiAppAction::ScrollHelix {
+                index: app.active_workspace,
+                delta,
+                pointer_cell: Some((event.column, event.row)),
+            }));
+        } else if let Some(cache) = self.helix_terminal.as_mut() {
+            cache.scroll_offset = if delta > 0 {
+                cache.scroll_offset.saturating_add(delta as usize)
+            } else {
+                cache
+                    .scroll_offset
+                    .saturating_sub(delta.unsigned_abs() as usize)
+            }
+            .min(cache.frame.max_scroll_offset);
+            cache.frame = cache.source.view(cache.scroll_offset);
+            self.dirty = true;
+        }
+    }
+
+    /// 解析 Agent pane 字符坐标并投递输出点击动作。
+    ///
+    /// 适用场景：左键点击 URL 或路径。示例：`README.md:8` -> 后台分类。
+    fn open_agent_output_at(&self, column: u16, row: u16, app: &GsdvGuiApp) -> bool {
+        let Some((target, _, matched)) = self.agent_output_match_at(column, row) else {
+            return false;
+        };
+        app.queue_app_event(AppEvent::TuiAction(TuiAppAction::OpenTerminalOutput {
+            index: target.workspace_index,
+            slot: target.slot,
+            click: matched.click,
+        }));
+        true
+    }
+
+    /// 更新 Agent 输出 hover token；无命中时立即移除下划线。
+    ///
+    /// 适用场景：Mouse Moved。示例：路径 -> underline，空白 -> None。
+    fn update_agent_output_hover(&mut self, column: u16, row: u16) {
+        let next = self
+            .agent_output_match_at(column, row)
+            .map(|(target, row, matched)| AgentOutputHover {
+                target,
+                row,
+                start_column: matched.start_column,
+                end_column: matched.end_column,
+            });
+        if next != self.output_hover {
+            self.output_hover = next;
+            self.dirty = true;
+        }
+    }
+
+    /// 返回屏幕字符位置对应的 Agent 输出目标及 token 范围。
+    ///
+    /// 适用场景：hover 与 click 共用。示例：pane 路径行 -> target + match。
+    fn agent_output_match_at(
+        &self,
+        column: u16,
+        row: u16,
+    ) -> Option<(AgentTarget, usize, TerminalTuiOutputMatch)> {
+        let Some(pane) = self
+            .visible_panes
+            .iter()
+            .find(|pane| pane_body_rect(pane).contains(column, row))
+        else {
+            return None;
+        };
+        let Some(line) = self.previous_frame.get(usize::from(row)) else {
+            return None;
+        };
+        let local_column = usize::from(column.saturating_sub(pane.rect.x));
+        let local_row = usize::from(row.saturating_sub(pane.rect.y.saturating_add(1)));
+        let Some((_, ansi_row)) = line.overlays.iter().rev().find(|(x, _)| *x == pane.rect.x)
+        else {
+            return None;
+        };
+        let Some(cache) = self.panes.get(&pane.target) else {
+            return None;
+        };
+        let matched = cache.source.output_match_in_row(ansi_row, local_column)?;
+        Some((pane.target.clone(), local_row, matched))
     }
 
     /// 把一次 splitter 鼠标拖动转换成布局权重 AppEvent。
@@ -3055,6 +3477,7 @@ impl TuiState {
                 | HitAction::OpenWorkflow
                 | HitAction::OpenDirectory
                 | HitAction::OpenWorkspaceTerminal
+                | HitAction::OpenWorkspaceHelix
         ) && self
             .markdown_workbenches
             .items
@@ -3134,6 +3557,13 @@ impl TuiState {
             }
             HitAction::OpenWorkspaceTerminal => {
                 self.main_view = TuiMainView::Terminal;
+                self.dirty = true;
+            }
+            HitAction::OpenWorkspaceHelix => {
+                self.main_view = TuiMainView::Helix;
+                app.queue_app_event(AppEvent::TuiAction(TuiAppAction::OpenWorkspaceHelix {
+                    index: app.active_workspace,
+                }));
                 self.dirty = true;
             }
             HitAction::ExitAuxiliaryView => {
@@ -4096,6 +4526,10 @@ impl TuiState {
                     self.draw_workspace_terminal(&mut frame);
                     self.draw_auxiliary_bottom(&mut frame, app);
                 }
+                TuiMainView::Helix => {
+                    self.draw_helix_terminal(&mut frame);
+                    self.draw_auxiliary_bottom(&mut frame, app);
+                }
             }
             self.draw_layer(&mut frame, app);
         }
@@ -4291,6 +4725,7 @@ impl TuiState {
 
         let bottom = height.saturating_sub(1);
         let mut new_x = 0;
+        let compact_bottom = width < 96;
         if !self.sidebar_collapsed {
             styled_overlay_text(
                 frame,
@@ -4314,7 +4749,7 @@ impl TuiState {
             new_x = 4;
         }
         if !self.spotlight_mode {
-            let focus_label = if width < 64 { "[F2]" } else { "[F2 Focus]" };
+            let focus_label = if compact_bottom { "[F2]" } else { "[F2 Focus]" };
             let focus_width = u16::try_from(focus_label.len()).unwrap_or(10);
             styled_overlay_text(
                 frame,
@@ -4337,7 +4772,11 @@ impl TuiState {
             });
             new_x = new_x.saturating_add(focus_width).saturating_add(1);
         }
-        let workspace_label = if width < 64 { "[+]" } else { "[+ Workspace]" };
+        let workspace_label = if compact_bottom {
+            "[+]"
+        } else {
+            "[+ Workspace]"
+        };
         let workspace_width = u16::try_from(workspace_label.len()).unwrap_or(13);
         set_base_text(frame, bottom, new_x, workspace_label, workspace_width);
         styled_overlay_text(
@@ -4360,7 +4799,7 @@ impl TuiState {
             right: None,
         });
         new_x = new_x.saturating_add(workspace_width).saturating_add(1);
-        let directory_label = if width < 64 { "[D]" } else { "[Dir]" };
+        let directory_label = if compact_bottom { "[D]" } else { "[Dir]" };
         let directory_width = u16::try_from(directory_label.len()).unwrap_or(5);
         styled_overlay_text(
             frame,
@@ -4382,7 +4821,7 @@ impl TuiState {
             right: None,
         });
         new_x = new_x.saturating_add(directory_width).saturating_add(1);
-        let workflow_label = if width < 64 { "[WF]" } else { "[Workflow]" };
+        let workflow_label = if compact_bottom { "[WF]" } else { "[Workflow]" };
         let workflow_width = u16::try_from(workflow_label.len()).unwrap_or(10);
         styled_overlay_text(
             frame,
@@ -4404,7 +4843,7 @@ impl TuiState {
             right: None,
         });
         new_x = new_x.saturating_add(workflow_width).saturating_add(1);
-        let terminal_label = if width < 64 { "[T]" } else { "[Terminal]" };
+        let terminal_label = if compact_bottom { "[T]" } else { "[Terminal]" };
         let terminal_width = u16::try_from(terminal_label.len()).unwrap_or(10);
         styled_overlay_text(
             frame,
@@ -4423,6 +4862,28 @@ impl TuiState {
                 height: 1,
             },
             left: Some(HitAction::OpenWorkspaceTerminal),
+            right: None,
+        });
+        new_x = new_x.saturating_add(terminal_width).saturating_add(1);
+        let helix_label = if compact_bottom { "[H]" } else { "[Helix]" };
+        let helix_width = u16::try_from(helix_label.len()).unwrap_or(7);
+        styled_overlay_text(
+            frame,
+            bottom,
+            new_x,
+            helix_label,
+            (192, 132, 252),
+            (11, 16, 22),
+            true,
+        );
+        self.hit_regions.push(HitRegion {
+            rect: TuiRect {
+                x: new_x,
+                y: bottom,
+                width: helix_width,
+                height: 1,
+            },
+            left: Some(HitAction::OpenWorkspaceHelix),
             right: None,
         });
         let pomodoro = pomodoro_status(app);
@@ -4472,6 +4933,7 @@ impl TuiState {
     /// 适用场景：辅助视图返回或互相切换。示例：Workflow -> Terminal。
     fn draw_auxiliary_bottom(&mut self, frame: &mut [RenderLine], app: &GsdvGuiApp) {
         let bottom = self.size.1.saturating_sub(1);
+        let compact_bottom = self.size.0 < 72;
         let buttons = [
             (
                 "[Exit]",
@@ -4480,22 +4942,28 @@ impl TuiState {
                 false,
             ),
             (
-                "[Dir]",
+                if compact_bottom { "[D]" } else { "[Dir]" },
                 HitAction::OpenDirectory,
                 (244, 114, 182),
                 self.main_view == TuiMainView::Directory,
             ),
             (
-                "[Workflow]",
+                if compact_bottom { "[WF]" } else { "[Workflow]" },
                 HitAction::OpenWorkflow,
                 (96, 165, 250),
                 self.main_view == TuiMainView::Workflow,
             ),
             (
-                "[Terminal]",
+                if compact_bottom { "[T]" } else { "[Terminal]" },
                 HitAction::OpenWorkspaceTerminal,
                 (45, 212, 191),
                 self.main_view == TuiMainView::Terminal,
+            ),
+            (
+                if compact_bottom { "[H]" } else { "[Helix]" },
+                HitAction::OpenWorkspaceHelix,
+                (192, 132, 252),
+                self.main_view == TuiMainView::Helix,
             ),
         ];
         let mut x = 0_u16;
@@ -4559,7 +5027,30 @@ impl TuiState {
             cache.scroll_offset = scroll_offset;
             cache.frame = cache.source.view(scroll_offset);
         }
-        draw_terminal_tui_frame(frame, rect, &cache.frame);
+        draw_terminal_tui_frame(frame, rect, &cache.frame, None);
+        self.cursor_position = terminal_tui_cursor_position(rect, &cache.frame);
+    }
+
+    /// 绘制当前 workspace Helix 的完整字符视口。
+    ///
+    /// 适用场景：Helix 一级视图。示例：编辑器占满底栏以上区域。
+    fn draw_helix_terminal(&mut self, frame: &mut [RenderLine]) {
+        let rect = TuiRect {
+            x: 0,
+            y: 0,
+            width: self.size.0,
+            height: self.size.1.saturating_sub(1),
+        };
+        let Some(cache) = self.helix_terminal.as_mut() else {
+            set_base_text(frame, 0, 0, "Starting Helix...", rect.width);
+            return;
+        };
+        let scroll_offset = cache.scroll_offset.min(cache.frame.max_scroll_offset);
+        if scroll_offset != cache.scroll_offset {
+            cache.scroll_offset = scroll_offset;
+            cache.frame = cache.source.view(scroll_offset);
+        }
+        draw_terminal_tui_frame(frame, rect, &cache.frame, None);
         self.cursor_position = terminal_tui_cursor_position(rect, &cache.frame);
     }
 
@@ -4684,6 +5175,11 @@ impl TuiState {
                 });
             }
             let body = pane_body_rect(&pane);
+            let underline = self
+                .output_hover
+                .as_ref()
+                .filter(|hover| hover.target == pane.target)
+                .map(|hover| (hover.row, hover.start_column, hover.end_column));
             self.hit_regions.push(HitRegion {
                 rect: body,
                 left: Some(HitAction::SelectAgent {
@@ -4732,7 +5228,7 @@ impl TuiState {
                 cache.scroll_offset = scroll_offset;
                 cache.frame = cache.source.view(scroll_offset);
             }
-            draw_terminal_tui_frame(frame, body, &cache.frame);
+            draw_terminal_tui_frame(frame, body, &cache.frame, underline);
             if focused {
                 self.cursor_position = terminal_tui_cursor_position(body, &cache.frame);
             }
