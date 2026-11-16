@@ -374,12 +374,23 @@ pub struct TerminalTuiOutputSource {
 pub struct TerminalTuiFrame {
     /// 当前 viewport 的 ANSI 行。
     pub rows: Vec<String>,
-    /// 当前 viewport 内的光标列、行；滚到历史时为空。
-    pub cursor: Option<(usize, usize)>,
+    /// 当前 viewport 内的输入锚点；滚到历史时为空。
+    pub cursor: Option<TerminalTuiCursor>,
     /// 全屏程序是否接管滚轮。
     pub terminal_scroll: bool,
     /// emulator 当前允许向上滚动的最大行数。
     pub max_scroll_offset: usize,
+}
+
+/// 本机字符界面使用的 terminal cursor 状态。
+///
+/// 适用场景：子 Agent 隐藏视觉 cursor，但宿主仍需保留输入法锚点。示例：Busy Hidden -> 坐标保留、visible=false。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalTuiCursor {
+    /// cursor 在当前 viewport 内的列、行。
+    pub position: (usize, usize),
+    /// 子 terminal 是否请求绘制 cursor。
+    pub visible: bool,
 }
 
 /// 本机字符界面一次 terminal 增量更新。
@@ -393,8 +404,8 @@ pub enum TerminalTuiUpdate {
     Rows {
         /// 变化行的 viewport 下标和完整 ANSI 内容。
         rows: Vec<(usize, String)>,
-        /// 最新光标位置。
-        cursor: Option<(usize, usize)>,
+        /// 最新输入锚点与子 terminal 可见性。
+        cursor: Option<TerminalTuiCursor>,
         /// 全屏程序是否接管滚轮。
         terminal_scroll: bool,
         /// 最新最大滚动偏移。
@@ -4130,20 +4141,23 @@ fn terminal_tui_plain_row_text(ansi_row: &str) -> String {
     text
 }
 
-/// 返回当前 viewport 内的 terminal 光标位置。
+/// 返回当前 viewport 内的 terminal 输入锚点与视觉状态。
 ///
-/// 适用场景：本机字符界面绘制光标。示例：查看历史 -> None。
+/// 适用场景：本机字符界面定位输入法。示例：Busy Hidden -> 保留坐标。
 fn terminal_tui_cursor(
     content: &term::RenderableContent<'_>,
     scroll_offset: usize,
-) -> Option<(usize, usize)> {
-    if scroll_offset > 0 || content.cursor.shape == CursorShape::Hidden {
+) -> Option<TerminalTuiCursor> {
+    if scroll_offset > 0 {
         return None;
     }
-    Some((
-        content.cursor.point.column.0,
-        usize::try_from(content.cursor.point.line.0).ok()?,
-    ))
+    Some(TerminalTuiCursor {
+        position: (
+            content.cursor.point.column.0,
+            usize::try_from(content.cursor.point.line.0).ok()?,
+        ),
+        visible: content.cursor.shape != CursorShape::Hidden,
+    })
 }
 
 /// 判断当前全屏程序是否接管鼠标滚轮。

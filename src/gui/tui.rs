@@ -55,6 +55,9 @@ const TUI_COMPACT_SIDEBAR_WIDTH: u16 = 19;
 const TUI_SPLITTER_SIZE: u16 = 1;
 const TUI_MIN_PANE_WIDTH: u16 = 12;
 const TUI_MIN_PANE_HEIGHT: u16 = 4;
+const TUI_COLLAPSED_ROW_HEIGHT: u16 = 1;
+const TUI_COLLAPSED_COLUMN_WIDTH: u16 = 3;
+const TUI_BUSY_ANIMATION_INTERVAL: Duration = Duration::from_millis(250);
 
 /// TUI 表单提交时创建新 Agent 的字段。
 ///
@@ -1283,6 +1286,51 @@ struct PaneLayout {
     tabs: Vec<AgentSlotId>,
 }
 
+/// Agent grid 中一个可点击的折叠恢复区。
+///
+/// 适用场景：折叠 row/column 后保留返回入口。示例：点击 `[>]` -> 展开 column 2。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LayoutRestoreRegion {
+    /// 恢复区占用的字符矩形。
+    rect: TuiRect,
+    /// 点击后恢复的布局项。
+    target: LayoutRestoreTarget,
+}
+
+/// 折叠恢复区对应的持久化布局项。
+///
+/// 适用场景：将 TUI 点击转成现有 `TuiAppAction`。示例：Row 1 -> `SetRowCollapsed(false)`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LayoutRestoreTarget {
+    /// 恢复一个 Agent row。
+    Row {
+        /// workspace 索引。
+        workspace_index: usize,
+        /// row 索引。
+        row_index: usize,
+    },
+    /// 恢复一个 Agent column。
+    Column {
+        /// workspace 索引。
+        workspace_index: usize,
+        /// row 索引。
+        row_index: usize,
+        /// column 索引。
+        column_index: usize,
+    },
+}
+
+/// Agent grid 的可见 pane 与折叠恢复区。
+///
+/// 适用场景：一次布局计算同时供 PTY resize 和恢复控件使用。示例：1 pane + 2 collapsed columns。
+#[derive(Debug, Default)]
+struct AgentPaneLayout {
+    /// 需要渲染并启动 terminal 的 pane。
+    panes: Vec<PaneLayout>,
+    /// 不启动 terminal 的折叠恢复区。
+    restore_regions: Vec<LayoutRestoreRegion>,
+}
+
 /// 可拖动 row/column 分隔线的业务目标。
 ///
 /// 适用场景：绘制阶段生成命中区，鼠标按下后转为拖动状态。
@@ -1453,6 +1501,22 @@ enum HitAction {
     AgentMenu(AgentMenuContext),
     /// 打开 pane 结构菜单。
     PaneMenu(PaneMenuContext),
+    /// 展开折叠的 Agent row。
+    ExpandAgentRow {
+        /// workspace 索引。
+        workspace_index: usize,
+        /// row 索引。
+        row_index: usize,
+    },
+    /// 展开折叠的 Agent column。
+    ExpandAgentColumn {
+        /// workspace 索引。
+        workspace_index: usize,
+        /// row 索引。
+        row_index: usize,
+        /// column 索引。
+        column_index: usize,
+    },
     /// 切换专注模式。
     ToggleSpotlight,
     /// 切换专注等级模式。
@@ -1764,8 +1828,10 @@ struct TuiState {
     spotlight_rank_leader_agent_id: Option<String>,
     /// workspace rail 是否折叠为最小宽度。
     sidebar_collapsed: bool,
-    /// 随可见 PTY damage 推进的 Busy 状态帧。
+    /// 可见 Busy 状态的旋转与颜色帧。
     busy_frame: usize,
+    /// 上次推进 Busy 动画的时间；无可见 Busy 时为空。
+    last_busy_frame_at: Option<Instant>,
     /// 上次绘制的番茄剩余分钟数，用于避免常驻 TUI 每秒输出。
     last_pomodoro_minute: Option<u64>,
     /// 当前键盘输入目标。
@@ -1794,6 +1860,8 @@ struct TuiState {
     workflow_fingerprint: String,
     /// 当前布局中的可见 panes。
     visible_panes: Vec<PaneLayout>,
+    /// 当前布局中的 row/column 折叠恢复区。
+    layout_restore_regions: Vec<LayoutRestoreRegion>,
     /// 上次实际写出的 frame。
     previous_frame: Vec<RenderLine>,
     /// 上次实际写出时间。
@@ -1835,6 +1903,7 @@ impl TuiState {
             spotlight_rank_leader_agent_id: None,
             sidebar_collapsed: false,
             busy_frame: 0,
+            last_busy_frame_at: None,
             last_pomodoro_minute: None,
             focused_target: None,
             output_hover: None,
@@ -1849,6 +1918,7 @@ impl TuiState {
             image_gallery_fingerprint: None,
             workflow_fingerprint: String::new(),
             visible_panes: Vec::new(),
+            layout_restore_regions: Vec::new(),
             previous_frame: Vec::new(),
             last_frame_at: None,
             dirty: true,
@@ -1889,6 +1959,7 @@ impl TuiState {
             self.refresh_state_fingerprint(app);
             self.refresh_pomodoro_countdown(app);
             self.refresh_terminal_updates();
+            self.refresh_busy_animation(app);
 
             if self.dirty && self.frame_due() {
                 self.draw(stdout, app)?;
@@ -1991,6 +2062,10 @@ impl TuiState {
     ///
     /// 适用场景：每轮轻量同步。示例：切 tab -> 新 target 建 source。
     fn sync_layout_and_terminals(&mut self, app: &mut GsdvGuiApp, ctx: &egui::Context) {
+        if self.main_view != TuiMainView::Agents && !self.layout_restore_regions.is_empty() {
+            self.layout_restore_regions.clear();
+            self.dirty = true;
+        }
         match self.main_view {
             TuiMainView::Workflow => {
                 let index = app.active_workspace;
@@ -2081,8 +2156,11 @@ impl TuiState {
             TuiMainView::Agents => {}
         }
         let next = self.compute_pane_layout(app);
-        if pane_layout_fingerprint(&next) != pane_layout_fingerprint(&self.visible_panes) {
-            self.visible_panes = next;
+        if pane_layout_fingerprint(&next.panes) != pane_layout_fingerprint(&self.visible_panes)
+            || next.restore_regions != self.layout_restore_regions
+        {
+            self.visible_panes = next.panes;
+            self.layout_restore_regions = next.restore_regions;
             self.dirty = true;
         }
         if self
@@ -2102,8 +2180,9 @@ impl TuiState {
     fn sync_visible_agent_terminals(&mut self, app: &mut GsdvGuiApp, ctx: &egui::Context) {
         for pane in &self.visible_panes {
             app.ensure_agent_terminal_host(ctx, pane.target.workspace_index, &pane.target.slot);
-            let terminal_lines = pane.rect.height.saturating_sub(1).max(1);
-            let terminal_cols = pane.rect.width.max(1);
+            let body = pane_body_rect(pane);
+            let terminal_lines = body.height.max(1);
+            let terminal_cols = body.width.max(1);
             let Some(host) = app
                 .terminal_hosts
                 .get_mut(pane.target.workspace_index)
@@ -2146,6 +2225,40 @@ impl TuiState {
             } else if let Some(cache) = self.panes.get_mut(&pane.target) {
                 cache.grid_size = grid_size;
             }
+        }
+    }
+
+    /// 判断 pane 是否是 workspace 记录的唯一输入焦点。
+    ///
+    /// 适用场景：同一 Agent 可出现在多个 pane，不能用 AgentTarget 猜焦点。示例：重复 target -> 仅 row/column 匹配项为 true。
+    fn pane_is_focused(&self, app: &GsdvGuiApp, pane: &PaneLayout) -> bool {
+        if self.spotlight_mode || self.main_view == TuiMainView::Workflow {
+            return self.focused_target.as_ref() == Some(&pane.target);
+        }
+        app.workspaces
+            .get(pane.target.workspace_index)
+            .and_then(|workspace| workspace.agent_focus)
+            .is_some_and(|focus| {
+                focus.row_index == pane.row_index && focus.column_index == pane.column_index
+            })
+    }
+
+    /// 返回当前 focused pane 的边界色，Busy 时随状态帧交替。
+    ///
+    /// 适用场景：顶部、外沿和共享 splitter 必须同步闪烁。示例：Busy -> 绿/青交替，Idle -> 青色。
+    fn focused_pane_border_color(&self, app: &GsdvGuiApp) -> (u8, u8, u8) {
+        let busy = self
+            .visible_panes
+            .iter()
+            .find(|pane| self.pane_is_focused(app, pane))
+            .is_some_and(|pane| {
+                app.agent_slot_activity(pane.target.workspace_index, &pane.target.slot)
+                    == WorkspaceActivity::Busy
+            });
+        if busy {
+            busy_animation_color(self.busy_frame)
+        } else {
+            (34, 211, 238)
         }
     }
 
@@ -2284,10 +2397,10 @@ impl TuiState {
     /// 计算当前模式的可见 pane 字符矩形。
     ///
     /// 适用场景：resize、workspace 布局变化。示例：两列 -> 各占可用宽度一半。
-    fn compute_pane_layout(&self, app: &GsdvGuiApp) -> Vec<PaneLayout> {
+    fn compute_pane_layout(&self, app: &GsdvGuiApp) -> AgentPaneLayout {
         let (width, height) = self.size;
         if width < TUI_MIN_WIDTH || height < TUI_MIN_HEIGHT {
-            return Vec::new();
+            return AgentPaneLayout::default();
         }
         let sidebar = sidebar_width(width, self.sidebar_collapsed);
         let sidebar_separator = u16::from(sidebar > 0);
@@ -2313,20 +2426,23 @@ impl TuiState {
                         slot: entry.slot.clone(),
                     })
                 });
-            return target
-                .map(|target| PaneLayout {
-                    rect: body,
-                    target,
-                    row_index: 0,
-                    column_index: 0,
-                    column_id: "spotlight".to_string(),
-                    tabs: Vec::new(),
-                })
-                .into_iter()
-                .collect();
+            return AgentPaneLayout {
+                panes: target
+                    .map(|target| PaneLayout {
+                        rect: body,
+                        target,
+                        row_index: 0,
+                        column_index: 0,
+                        column_id: "spotlight".to_string(),
+                        tabs: Vec::new(),
+                    })
+                    .into_iter()
+                    .collect(),
+                restore_regions: Vec::new(),
+            };
         }
         let Some(workspace) = app.workspaces.get(app.active_workspace) else {
-            return Vec::new();
+            return AgentPaneLayout::default();
         };
         let visible_rows = workspace
             .agent_rows
@@ -2334,13 +2450,28 @@ impl TuiState {
             .enumerate()
             .filter(|(_, row)| !row.collapsed)
             .collect::<Vec<_>>();
-        if visible_rows.is_empty() {
-            return Vec::new();
-        }
-        let row_splitters = u16::try_from(visible_rows.len().saturating_sub(1))
-            .unwrap_or(u16::MAX)
-            .saturating_mul(TUI_SPLITTER_SIZE);
-        let row_content_height = body.height.saturating_sub(row_splitters);
+        let collapsed_row_height = u16::try_from(
+            workspace
+                .agent_rows
+                .iter()
+                .filter(|row| row.collapsed)
+                .count(),
+        )
+        .unwrap_or(u16::MAX)
+        .saturating_mul(TUI_COLLAPSED_ROW_HEIGHT);
+        let row_splitters = u16::try_from(
+            workspace
+                .agent_rows
+                .windows(2)
+                .filter(|pair| !pair[0].collapsed && !pair[1].collapsed)
+                .count(),
+        )
+        .unwrap_or(u16::MAX)
+        .saturating_mul(TUI_SPLITTER_SIZE);
+        let row_content_height = body
+            .height
+            .saturating_sub(collapsed_row_height)
+            .saturating_sub(row_splitters);
         let row_heights = weighted_lengths(
             row_content_height,
             &visible_rows
@@ -2349,33 +2480,85 @@ impl TuiState {
                 .collect::<Vec<_>>(),
         );
         let mut panes = Vec::new();
+        let mut restore_regions = Vec::new();
+        let mut row_heights = row_heights.into_iter();
         let mut y = body.y;
-        for ((row_index, row), row_height) in visible_rows.into_iter().zip(row_heights) {
-            let columns = row
+        let body_bottom = body.y.saturating_add(body.height);
+        for (row_index, row) in workspace.agent_rows.iter().enumerate() {
+            if row.collapsed {
+                let row_height = TUI_COLLAPSED_ROW_HEIGHT.min(body_bottom.saturating_sub(y));
+                if row_height > 0 {
+                    restore_regions.push(LayoutRestoreRegion {
+                        rect: TuiRect {
+                            x: body.x,
+                            y,
+                            width: body.width,
+                            height: row_height,
+                        },
+                        target: LayoutRestoreTarget::Row {
+                            workspace_index: app.active_workspace,
+                            row_index,
+                        },
+                    });
+                }
+                y = y.saturating_add(row_height);
+                continue;
+            }
+            let row_height = row_heights.next().unwrap_or_default();
+            let visible_columns = row
                 .columns
                 .iter()
                 .enumerate()
                 .filter(|(_, column)| !column.collapsed)
                 .collect::<Vec<_>>();
-            if columns.is_empty() {
-                y = y
-                    .saturating_add(row_height)
-                    .saturating_add(TUI_SPLITTER_SIZE);
-                continue;
-            }
-            let column_splitters = u16::try_from(columns.len().saturating_sub(1))
-                .unwrap_or(u16::MAX)
-                .saturating_mul(TUI_SPLITTER_SIZE);
-            let column_content_width = body.width.saturating_sub(column_splitters);
+            let collapsed_column_width =
+                u16::try_from(row.columns.iter().filter(|column| column.collapsed).count())
+                    .unwrap_or(u16::MAX)
+                    .saturating_mul(TUI_COLLAPSED_COLUMN_WIDTH);
+            let column_splitters = u16::try_from(
+                row.columns
+                    .windows(2)
+                    .filter(|pair| !pair[0].collapsed && !pair[1].collapsed)
+                    .count(),
+            )
+            .unwrap_or(u16::MAX)
+            .saturating_mul(TUI_SPLITTER_SIZE);
+            let column_content_width = body
+                .width
+                .saturating_sub(collapsed_column_width)
+                .saturating_sub(column_splitters);
             let widths = weighted_lengths(
                 column_content_width,
-                &columns
+                &visible_columns
                     .iter()
                     .map(|(_, column)| column.width_weight)
                     .collect::<Vec<_>>(),
             );
+            let mut widths = widths.into_iter();
             let mut x = body.x;
-            for ((column_index, column), column_width) in columns.into_iter().zip(widths) {
+            let body_right = body.x.saturating_add(body.width);
+            for (column_index, column) in row.columns.iter().enumerate() {
+                if column.collapsed {
+                    let column_width = TUI_COLLAPSED_COLUMN_WIDTH.min(body_right.saturating_sub(x));
+                    if column_width > 0 && row_height > 0 {
+                        restore_regions.push(LayoutRestoreRegion {
+                            rect: TuiRect {
+                                x,
+                                y,
+                                width: column_width,
+                                height: row_height,
+                            },
+                            target: LayoutRestoreTarget::Column {
+                                workspace_index: app.active_workspace,
+                                row_index,
+                                column_index,
+                            },
+                        });
+                    }
+                    x = x.saturating_add(column_width);
+                    continue;
+                }
+                let column_width = widths.next().unwrap_or_default();
                 let slot = AgentSlotId::from_column_slot(&column.active_slot);
                 let tabs = column
                     .tabs
@@ -2398,15 +2581,28 @@ impl TuiState {
                     column_id: column.id.clone(),
                     tabs,
                 });
-                x = x
-                    .saturating_add(column_width)
-                    .saturating_add(TUI_SPLITTER_SIZE);
+                x = x.saturating_add(column_width);
+                if row
+                    .columns
+                    .get(column_index + 1)
+                    .is_some_and(|next| !next.collapsed)
+                {
+                    x = x.saturating_add(TUI_SPLITTER_SIZE);
+                }
             }
-            y = y
-                .saturating_add(row_height)
-                .saturating_add(TUI_SPLITTER_SIZE);
+            y = y.saturating_add(row_height);
+            if workspace
+                .agent_rows
+                .get(row_index + 1)
+                .is_some_and(|next| !next.collapsed)
+            {
+                y = y.saturating_add(TUI_SPLITTER_SIZE);
+            }
         }
-        panes
+        AgentPaneLayout {
+            panes,
+            restore_regions,
+        }
     }
 
     /// 消费所有可见 terminal source 的最小更新。
@@ -2446,13 +2642,59 @@ impl TuiState {
             }
         }
         if changed {
-            // 触发条件：可见 Agent terminal 确有 damage。
-            // 不能再按 FPS 独立推进：Busy 会让静止画面持续整屏重绘。
-            // 防止回归：`--fps 60` 不再等价于常驻 60 FPS CPU 占用。
-            self.busy_frame = self.busy_frame.wrapping_add(1);
             self.output_hover = None;
             self.dirty = true;
         }
+    }
+
+    /// 仅在屏幕存在 Busy Agent 时低频推进状态动画。
+    ///
+    /// 适用场景：后台 Busy tab 没有 PTY damage。示例：切到 Idle tab -> Busy tab 仍旋转变色。
+    fn refresh_busy_animation(&mut self, app: &GsdvGuiApp) {
+        if !self.has_visible_busy_agent(app) {
+            self.last_busy_frame_at = None;
+            return;
+        }
+        let now = Instant::now();
+        if self
+            .last_busy_frame_at
+            .is_some_and(|last| now.saturating_duration_since(last) < TUI_BUSY_ANIMATION_INTERVAL)
+        {
+            return;
+        }
+        self.last_busy_frame_at = Some(now);
+        self.busy_frame = self.busy_frame.wrapping_add(1);
+        self.dirty = true;
+    }
+
+    /// 判断当前 TUI 画面是否包含需要动画的 Busy 状态。
+    ///
+    /// 适用场景：控制 Busy 动画生命周期。示例：同 column 的非活动 Busy tab -> true。
+    fn has_visible_busy_agent(&self, app: &GsdvGuiApp) -> bool {
+        let pane_busy = self.visible_panes.iter().any(|pane| {
+            let slots = if pane.tabs.is_empty() {
+                std::slice::from_ref(&pane.target.slot)
+            } else {
+                pane.tabs.as_slice()
+            };
+            slots.iter().any(|slot| {
+                app.agent_slot_activity(pane.target.workspace_index, slot)
+                    == WorkspaceActivity::Busy
+            })
+        });
+        if pane_busy || self.main_view != TuiMainView::Agents || self.sidebar_collapsed {
+            return pane_busy;
+        }
+        if self.spotlight_mode {
+            return app
+                .spotlight_agents()
+                .iter()
+                .any(|entry| entry.activity == WorkspaceActivity::Busy);
+        }
+        app.workspaces.iter().enumerate().any(|(index, workspace)| {
+            (!app.focus_filter_enabled || workspace.focused)
+                && app.agent_slot_activity(index, &AgentSlotId::Main) == WorkspaceActivity::Busy
+        })
     }
 
     /// 比较 Agent 状态、workspace 和番茄钟摘要，发现变化后标脏。
@@ -2851,6 +3093,31 @@ impl TuiState {
     ///
     /// 适用场景：Alt+Up/Down。示例：当前第二项 + Down -> 第三项。
     fn cycle_agent(&mut self, app: &GsdvGuiApp, forward: bool) {
+        if !self.spotlight_mode {
+            if self.visible_panes.is_empty() {
+                return;
+            }
+            let current = self
+                .visible_panes
+                .iter()
+                .position(|pane| self.pane_is_focused(app, pane))
+                .unwrap_or(0);
+            let next = if forward {
+                (current + 1) % self.visible_panes.len()
+            } else {
+                (current + self.visible_panes.len() - 1) % self.visible_panes.len()
+            };
+            let pane = self.visible_panes[next].clone();
+            self.focused_target = Some(pane.target.clone());
+            app.queue_app_event(AppEvent::TuiAction(TuiAppAction::SelectAgent {
+                workspace_index: pane.target.workspace_index,
+                row_index: pane.row_index,
+                column_index: pane.column_index,
+                slot: pane.target.slot,
+            }));
+            self.dirty = true;
+            return;
+        }
         let targets = if self.spotlight_mode {
             app.spotlight_agents()
                 .into_iter()
@@ -3141,9 +3408,10 @@ impl TuiState {
                 } else if let Some(pane) = self
                     .visible_panes
                     .iter()
-                    .find(|pane| pane.rect.contains(event.column, event.row))
+                    .find(|pane| pane_body_rect(pane).contains(event.column, event.row))
                     .cloned()
                 {
+                    let body = pane_body_rect(&pane);
                     let delta = if matches!(event.kind, MouseEventKind::ScrollUp) {
                         3
                     } else {
@@ -3159,8 +3427,8 @@ impl TuiState {
                             slot: pane.target.slot.clone(),
                             delta,
                             pointer_cell: Some((
-                                event.column.saturating_sub(pane.rect.x),
-                                event.row.saturating_sub(pane.rect.y.saturating_add(1)),
+                                event.column.saturating_sub(body.x),
+                                event.row.saturating_sub(body.y),
                             )),
                         }));
                     } else if let Some(cache) = self.panes.get_mut(&pane.target) {
@@ -3216,6 +3484,7 @@ impl TuiState {
             .iter()
             .find(|pane| pane_body_rect(pane).contains(event.column, event.row))
         {
+            let body = pane_body_rect(pane);
             let delta = if matches!(event.kind, MouseEventKind::ScrollUp) {
                 3
             } else {
@@ -3231,8 +3500,8 @@ impl TuiState {
                     slot: pane.target.slot.clone(),
                     delta,
                     pointer_cell: Some((
-                        event.column.saturating_sub(pane.rect.x),
-                        event.row.saturating_sub(pane.rect.y.saturating_add(1)),
+                        event.column.saturating_sub(body.x),
+                        event.row.saturating_sub(body.y),
                     )),
                 }));
             } else if let Some(cache) = self.panes.get_mut(&pane.target) {
@@ -3461,13 +3730,13 @@ impl TuiState {
         else {
             return None;
         };
+        let body = pane_body_rect(pane);
         let Some(line) = self.previous_frame.get(usize::from(row)) else {
             return None;
         };
-        let local_column = usize::from(column.saturating_sub(pane.rect.x));
-        let local_row = usize::from(row.saturating_sub(pane.rect.y.saturating_add(1)));
-        let Some((_, ansi_row)) = line.overlays.iter().rev().find(|(x, _)| *x == pane.rect.x)
-        else {
+        let local_column = usize::from(column.saturating_sub(body.x));
+        let local_row = usize::from(row.saturating_sub(body.y));
+        let Some((_, ansi_row)) = line.overlays.iter().rev().find(|(x, _)| *x == body.x) else {
             return None;
         };
         let Some(cache) = self.panes.get(&pane.target) else {
@@ -3690,6 +3959,30 @@ impl TuiState {
             HitAction::WorkspaceMenu(index) => self.open_workspace_menu(x, y, app, index),
             HitAction::AgentMenu(context) => self.open_agent_menu(x, y, app, context),
             HitAction::PaneMenu(context) => self.open_pane_menu(x, y, app, context),
+            HitAction::ExpandAgentRow {
+                workspace_index,
+                row_index,
+            } => {
+                app.queue_app_event(AppEvent::TuiAction(TuiAppAction::SetRowCollapsed {
+                    index: workspace_index,
+                    row_index,
+                    collapsed: false,
+                }));
+                self.dirty = true;
+            }
+            HitAction::ExpandAgentColumn {
+                workspace_index,
+                row_index,
+                column_index,
+            } => {
+                app.queue_app_event(AppEvent::TuiAction(TuiAppAction::SetColumnCollapsed {
+                    index: workspace_index,
+                    row_index,
+                    column_index,
+                    collapsed: false,
+                }));
+                self.dirty = true;
+            }
             HitAction::ToggleSpotlight => {
                 self.spotlight_mode = !self.spotlight_mode;
                 self.spotlight_rank_leader_agent_id = None;
@@ -4985,6 +5278,7 @@ impl TuiState {
                     entry.activity,
                     entry.manually_stopped,
                     selected,
+                    self.busy_frame,
                 );
                 let context = AgentMenuContext {
                     target: target.clone(),
@@ -5043,6 +5337,7 @@ impl TuiState {
                     activity,
                     false,
                     selected,
+                    self.busy_frame,
                 );
                 self.hit_regions.push(HitRegion {
                     rect: TuiRect {
@@ -5060,28 +5355,27 @@ impl TuiState {
         let bottom = height.saturating_sub(1);
         let mut new_x = 0;
         let compact_bottom = width < 96;
-        if !self.sidebar_collapsed {
-            styled_overlay_text(
-                frame,
-                bottom,
-                new_x,
-                "[<]",
-                (34, 211, 238),
-                (15, 23, 42),
-                true,
-            );
-            self.hit_regions.push(HitRegion {
-                rect: TuiRect {
-                    x: new_x,
-                    y: bottom,
-                    width: 3,
-                    height: 1,
-                },
-                left: Some(HitAction::ToggleSidebar),
-                right: None,
-            });
-            new_x = 4;
-        }
+        let sidebar_toggle = if self.sidebar_collapsed { "[>]" } else { "[<]" };
+        styled_overlay_text(
+            frame,
+            bottom,
+            new_x,
+            sidebar_toggle,
+            (34, 211, 238),
+            (15, 23, 42),
+            true,
+        );
+        self.hit_regions.push(HitRegion {
+            rect: TuiRect {
+                x: new_x,
+                y: bottom,
+                width: 3,
+                height: 1,
+            },
+            left: Some(HitAction::ToggleSidebar),
+            right: None,
+        });
+        new_x = 4;
         if !self.spotlight_mode {
             let focus_label = if compact_bottom { "[F2]" } else { "[F2 Focus]" };
             let focus_width = u16::try_from(focus_label.len()).unwrap_or(10);
@@ -5388,15 +5682,79 @@ impl TuiState {
         self.cursor_position = terminal_tui_cursor_position(rect, &cache.frame);
     }
 
+    /// 绘制折叠 row/column 的固定恢复入口。
+    ///
+    /// 适用场景：Layout 菜单折叠布局项后仍可单独展开。示例：点击 `[v]` -> 展开对应 row。
+    fn draw_layout_restore_regions(&mut self, frame: &mut [RenderLine]) {
+        for region in self.layout_restore_regions.clone() {
+            let label = match region.target {
+                LayoutRestoreTarget::Row { .. } => "[v]",
+                LayoutRestoreTarget::Column { .. } => "[>]",
+            };
+            for y in region.rect.y..region.rect.y.saturating_add(region.rect.height) {
+                styled_overlay_text(
+                    frame,
+                    y,
+                    region.rect.x,
+                    &" ".repeat(usize::from(region.rect.width)),
+                    (34, 211, 238),
+                    (15, 23, 42),
+                    false,
+                );
+            }
+            styled_overlay_text(
+                frame,
+                region.rect.y,
+                region.rect.x,
+                &clip_text(label, region.rect.width),
+                (34, 211, 238),
+                (15, 23, 42),
+                true,
+            );
+            let action = match region.target {
+                LayoutRestoreTarget::Row {
+                    workspace_index,
+                    row_index,
+                } => HitAction::ExpandAgentRow {
+                    workspace_index,
+                    row_index,
+                },
+                LayoutRestoreTarget::Column {
+                    workspace_index,
+                    row_index,
+                    column_index,
+                } => HitAction::ExpandAgentColumn {
+                    workspace_index,
+                    row_index,
+                    column_index,
+                },
+            };
+            self.hit_regions.push(HitRegion {
+                rect: region.rect,
+                left: Some(action),
+                right: None,
+            });
+        }
+    }
+
     /// 绘制所有可见 row/col pane、tab header 和 terminal 内容。
     ///
     /// 适用场景：普通多 Agent 或专注单 Agent。示例：两个 columns 同时显示。
     fn draw_panes(&mut self, frame: &mut [RenderLine], app: &GsdvGuiApp) {
+        self.draw_layout_restore_regions(frame);
+        let focused_color = self.focused_pane_border_color(app);
+        let sidebar = sidebar_width(self.size.0, self.sidebar_collapsed);
+        let content_x = sidebar.saturating_add(u16::from(sidebar > 0));
         for pane in self.visible_panes.clone() {
             if pane.rect.width == 0 || pane.rect.height == 0 {
                 continue;
             }
-            let focused = self.focused_target.as_ref() == Some(&pane.target);
+            let focused = self.pane_is_focused(app, &pane);
+            if focused && sidebar > 0 && pane.rect.x == content_x {
+                for y in pane.rect.y..pane.rect.y.saturating_add(pane.rect.height) {
+                    styled_overlay_text(frame, y, sidebar, "│", focused_color, (11, 16, 22), true);
+                }
+            }
             let header = pane.rect.y;
             let mut x = pane.rect.x;
             let tabs = if pane.tabs.is_empty() {
@@ -5415,7 +5773,8 @@ impl TuiState {
                 let activity = app.agent_slot_activity(target.workspace_index, &target.slot);
                 let star = app
                     .spotlight_agent_level(target.workspace_index, &target.slot)
-                    .map(|level| format!("★{level}"))
+                    .is_some()
+                    .then_some("★")
                     .unwrap_or_default();
                 let text = format!(
                     " {} {}{} ",
@@ -5432,7 +5791,15 @@ impl TuiState {
                     break;
                 }
                 draw_agent_tab(
-                    frame, header, x, tab_width, &text, activity, stopped, active,
+                    frame,
+                    header,
+                    x,
+                    tab_width,
+                    &text,
+                    activity,
+                    stopped,
+                    active,
+                    self.busy_frame,
                 );
                 let context = AgentMenuContext {
                     target: target.clone(),
@@ -5458,27 +5825,6 @@ impl TuiState {
             }
             let header_end = pane.rect.x.saturating_add(pane.rect.width);
             if x < header_end {
-                let activity =
-                    app.agent_slot_activity(pane.target.workspace_index, &pane.target.slot);
-                let marker = if activity == WorkspaceActivity::Busy {
-                    "─ BUSY ─"
-                } else if focused {
-                    "─ FOCUSED ─"
-                } else {
-                    "───────────"
-                };
-                set_base_text(frame, header, x, marker, header_end.saturating_sub(x));
-                if activity == WorkspaceActivity::Busy {
-                    styled_overlay_text(
-                        frame,
-                        header,
-                        x,
-                        marker,
-                        (74, 222, 128),
-                        (11, 16, 22),
-                        true,
-                    );
-                }
                 self.hit_regions.push(HitRegion {
                     rect: TuiRect {
                         x,
@@ -5567,16 +5913,18 @@ impl TuiState {
                 self.cursor_position = terminal_tui_cursor_position(body, &cache.frame);
             }
         }
-        self.draw_splitters(frame, app.active_workspace);
+        self.draw_splitters(frame, app);
     }
 
     /// 绘制 row/column splitter，并生成高优先级鼠标拖动命中区。
     ///
     /// 适用场景：普通多 pane 布局。示例：两列之间显示青色竖线并可左右拖动。
-    fn draw_splitters(&mut self, frame: &mut [RenderLine], workspace_index: usize) {
+    fn draw_splitters(&mut self, frame: &mut [RenderLine], app: &GsdvGuiApp) {
         if self.spotlight_mode || self.visible_panes.len() < 2 {
             return;
         }
+        let workspace_index = app.active_workspace;
+        let focused_color = self.focused_pane_border_color(app);
         let mut rows = BTreeMap::<usize, Vec<PaneLayout>>::new();
         for pane in self.visible_panes.clone() {
             rows.entry(pane.row_index).or_default().push(pane);
@@ -5589,6 +5937,9 @@ impl TuiState {
                 let left = &pair[0];
                 let right = &pair[1];
                 let x = left.rect.x.saturating_add(left.rect.width);
+                if right.rect.x != x.saturating_add(TUI_SPLITTER_SIZE) {
+                    continue;
+                }
                 let target = SplitterTarget::Columns {
                     workspace_index,
                     row_index: left.row_index,
@@ -5601,6 +5952,8 @@ impl TuiState {
                         .splitter_drag
                         .as_ref()
                         .is_some_and(|drag| drag.target == target);
+                let focus_touches =
+                    self.pane_is_focused(app, left) || self.pane_is_focused(app, right);
                 for y in left.rect.y..left.rect.y.saturating_add(left.rect.height) {
                     let pointer = self.splitter_hover.as_ref() == Some(&target)
                         && self
@@ -5619,8 +5972,10 @@ impl TuiState {
                         },
                         if highlighted {
                             (147, 197, 253)
+                        } else if focus_touches {
+                            focused_color
                         } else {
-                            (34, 211, 238)
+                            (51, 65, 85)
                         },
                         if highlighted {
                             (23, 44, 74)
@@ -5665,8 +6020,11 @@ impl TuiState {
             .unwrap_or(body_x);
         for pair in row_bounds.windows(2) {
             let (top_index, top_y, top_height) = pair[0];
-            let (bottom_index, _, _) = pair[1];
+            let (bottom_index, bottom_y, _) = pair[1];
             let y = top_y.saturating_add(top_height);
+            if bottom_y != y.saturating_add(TUI_SPLITTER_SIZE) {
+                continue;
+            }
             let width = body_right.saturating_sub(body_x);
             let target = SplitterTarget::Rows {
                 workspace_index,
@@ -5679,33 +6037,55 @@ impl TuiState {
                     .splitter_drag
                     .as_ref()
                     .is_some_and(|drag| drag.target == target);
-            let mut line = if highlighted { "━" } else { "─" }.repeat(usize::from(width));
-            if self.splitter_hover.as_ref() == Some(&target)
-                && let Some((hover_x, hover_y)) = self.splitter_hover_position
-                && hover_y == y
-                && hover_x >= body_x
-                && hover_x < body_right
-            {
-                let offset = usize::from(hover_x.saturating_sub(body_x)) * "━".len();
-                line.replace_range(offset..offset + "━".len(), "↕");
+            let top_panes = rows.get(&top_index).cloned().unwrap_or_default();
+            let bottom_panes = rows.get(&bottom_index).cloned().unwrap_or_default();
+            for x in body_x..body_right {
+                let pointer = self.splitter_hover.as_ref() == Some(&target)
+                    && self
+                        .splitter_hover_position
+                        .is_some_and(|(hover_x, hover_y)| hover_x == x && hover_y == y);
+                let intersection =
+                    top_panes
+                        .windows(2)
+                        .chain(bottom_panes.windows(2))
+                        .any(|pair| {
+                            pair[0].rect.x.saturating_add(pair[0].rect.width) == x
+                                && pair[1].rect.x == x.saturating_add(TUI_SPLITTER_SIZE)
+                        });
+                // 横向共享边界必须按字符判断相邻 cell，避免不等宽 rows 把整条线误染成焦点色。
+                let focus_touches = top_panes.iter().chain(&bottom_panes).any(|pane| {
+                    self.pane_is_focused(app, pane)
+                        && x >= pane.rect.x
+                        && x < pane.rect.x.saturating_add(pane.rect.width)
+                });
+                styled_overlay_text(
+                    frame,
+                    y,
+                    x,
+                    if pointer {
+                        "↕"
+                    } else if highlighted {
+                        "━"
+                    } else if intersection {
+                        "┼"
+                    } else {
+                        "─"
+                    },
+                    if highlighted {
+                        (147, 197, 253)
+                    } else if focus_touches {
+                        focused_color
+                    } else {
+                        (51, 65, 85)
+                    },
+                    if highlighted {
+                        (23, 44, 74)
+                    } else {
+                        (11, 16, 22)
+                    },
+                    highlighted || focus_touches,
+                );
             }
-            styled_overlay_text(
-                frame,
-                y,
-                body_x,
-                &line,
-                if highlighted {
-                    (147, 197, 253)
-                } else {
-                    (34, 211, 238)
-                },
-                if highlighted {
-                    (23, 44, 74)
-                } else {
-                    (11, 16, 22)
-                },
-                highlighted,
-            );
             self.splitter_regions.push(SplitterRegion {
                 rect: TuiRect {
                     x: body_x,

@@ -100,6 +100,28 @@ pub(super) fn activity_color(activity: WorkspaceActivity, stopped: bool) -> (u8,
     }
 }
 
+/// 返回 Busy 动画当前帧的交替语义色。
+///
+/// 适用场景：Busy marker 与 pane header。示例：偶数帧绿色，奇数帧青色。
+pub(super) fn busy_animation_color(busy_frame: usize) -> (u8, u8, u8) {
+    if busy_frame % 2 == 0 {
+        (74, 222, 128)
+    } else {
+        (34, 211, 238)
+    }
+}
+
+/// 返回 current Busy 的高对比文字色。
+///
+/// 适用场景：蓝色 current 背景会吞掉绿/青状态色。示例：偶数帧亮黄，奇数帧白色。
+pub(super) fn current_busy_color(busy_frame: usize) -> (u8, u8, u8) {
+    if busy_frame % 2 == 0 {
+        (250, 204, 21)
+    } else {
+        (255, 255, 255)
+    }
+}
+
 /// 裁剪并补齐固定显示宽度，保证 ANSI 背景完整覆盖 hit region。
 ///
 /// 适用场景：彩色 rail 行和 tab。示例：`abc`, width 5 -> `abc  `。
@@ -120,25 +142,45 @@ pub(super) fn draw_navigation_row(
     activity: WorkspaceActivity,
     stopped: bool,
     selected: bool,
+    busy_frame: usize,
 ) {
+    let background = if selected {
+        (37, 99, 235)
+    } else {
+        (11, 16, 22)
+    };
     set_base_text(frame, y, 0, &" ".repeat(width as usize), width);
     styled_overlay_text(
         frame,
         y,
         0,
         &pad_display_text(text, width),
-        if selected {
+        if selected && !stopped && activity == WorkspaceActivity::Busy {
+            current_busy_color(busy_frame)
+        } else if selected {
             (255, 255, 255)
         } else {
             activity_color(activity, stopped)
         },
-        if selected {
-            (37, 99, 235)
-        } else {
-            (11, 16, 22)
-        },
+        background,
         selected || activity == WorkspaceActivity::Busy,
     );
+    if !stopped && activity == WorkspaceActivity::Busy && width > 1 {
+        let marker_color = busy_animation_color(busy_frame);
+        styled_overlay_text(
+            frame,
+            y,
+            1,
+            status_marker(activity, stopped, busy_frame),
+            if selected {
+                current_busy_color(busy_frame)
+            } else {
+                marker_color
+            },
+            background,
+            true,
+        );
+    }
 }
 
 /// 绘制具有稳定宽度、active 背景和 activity 颜色的 Agent tab。
@@ -153,27 +195,47 @@ pub(super) fn draw_agent_tab(
     activity: WorkspaceActivity,
     stopped: bool,
     active: bool,
+    busy_frame: usize,
 ) {
+    let background = if active {
+        (37, 99, 235)
+    } else if stopped {
+        (66, 49, 12)
+    } else {
+        (30, 41, 59)
+    };
     set_base_text(frame, y, x, &" ".repeat(width as usize), width);
     styled_overlay_text(
         frame,
         y,
         x,
         &pad_display_text(text, width),
-        if active {
+        if active && !stopped && activity == WorkspaceActivity::Busy {
+            current_busy_color(busy_frame)
+        } else if active {
             (255, 255, 255)
         } else {
             activity_color(activity, stopped)
         },
-        if active {
-            (37, 99, 235)
-        } else if stopped {
-            (66, 49, 12)
-        } else {
-            (30, 41, 59)
-        },
+        background,
         active || activity == WorkspaceActivity::Busy,
     );
+    if !stopped && activity == WorkspaceActivity::Busy && width > 1 {
+        let marker_color = busy_animation_color(busy_frame);
+        styled_overlay_text(
+            frame,
+            y,
+            x.saturating_add(1),
+            status_marker(activity, stopped, busy_frame),
+            if active {
+                current_busy_color(busy_frame)
+            } else {
+                marker_color
+            },
+            background,
+            true,
+        );
+    }
 }
 
 /// 返回 Agent 显示名。
@@ -295,7 +357,7 @@ pub(super) fn terminal_tui_cursor_position(
     rect: TuiRect,
     terminal: &TerminalTuiFrame,
 ) -> Option<(u16, u16)> {
-    let (col, row) = terminal.cursor?;
+    let (col, row) = terminal.cursor?.position;
     Some((
         rect.x.saturating_add(
             u16::try_from(col)
@@ -320,50 +382,66 @@ pub(super) fn write_frame_diff(
     size: (u16, u16),
     cursor: Option<(u16, u16)>,
 ) -> Result<()> {
-    if previous.is_empty() {
-        queue!(stdout, Hide, Clear(ClearType::All))?;
-    }
-    for (index, line) in next.iter().enumerate() {
-        let previous_line = previous.get(index);
-        if previous_line == Some(line) {
-            continue;
+    // 先在内存编译完整差量，减少 PTY 系统调用和可见撕裂。
+    let mut output = Vec::with_capacity(4096);
+    {
+        let mut cursor_hidden_for_diff = false;
+        if previous.is_empty() {
+            queue!(output, Hide, Clear(ClearType::All))?;
+            cursor_hidden_for_diff = true;
         }
-        if let Some(previous_line) = previous_line
-            && render_line_overlays_can_overwrite(previous_line, line)
-        {
-            if let Some(first_changed) = previous_line
-                .overlays
-                .iter()
-                .zip(&line.overlays)
-                .position(|((_, previous_overlay), (_, overlay))| previous_overlay != overlay)
-            {
-                // 触发条件：底层 terminal overlay 变化，上层 Modal 保持不变。
-                // 不能只重画变化项：整行 terminal 会覆盖后画的 Modal。
-                // 从首个变化层恢复后续层，防止 Modal 视觉消失但仍截获输入。
-                for (x, overlay) in line.overlays.iter().skip(first_changed) {
-                    queue!(stdout, MoveTo(*x, index as u16), Print(overlay))?;
-                }
+        for (index, line) in next.iter().enumerate() {
+            let previous_line = previous.get(index);
+            if previous_line == Some(line) {
+                continue;
             }
-            continue;
+            if let Some(previous_line) = previous_line
+                && render_line_overlays_can_overwrite(previous_line, line)
+            {
+                if let Some(first_changed) =
+                    previous_line.overlays.iter().zip(&line.overlays).position(
+                        |((_, previous_overlay), (_, overlay))| previous_overlay != overlay,
+                    )
+                {
+                    if !cursor_hidden_for_diff {
+                        // 差量写入期间隐藏光标，避免终端绘制移动中的瞬时位置。
+                        queue!(output, Hide)?;
+                        cursor_hidden_for_diff = true;
+                    }
+                    // 触发条件：底层 terminal overlay 变化，上层 Modal 保持不变。
+                    // 不能只重画变化项：整行 terminal 会覆盖后画的 Modal。
+                    // 从首个变化层恢复后续层，防止 Modal 视觉消失但仍截获输入。
+                    for (x, overlay) in line.overlays.iter().skip(first_changed) {
+                        queue!(output, MoveTo(*x, index as u16), Print(overlay))?;
+                    }
+                }
+                continue;
+            }
+            if !cursor_hidden_for_diff {
+                queue!(output, Hide)?;
+                cursor_hidden_for_diff = true;
+            }
+            queue!(
+                output,
+                MoveTo(0, index as u16),
+                Clear(ClearType::CurrentLine),
+                Print(&line.base)
+            )?;
+            for (x, overlay) in &line.overlays {
+                queue!(output, MoveTo(*x, index as u16), Print(overlay))?;
+            }
         }
-        queue!(
-            stdout,
-            MoveTo(0, index as u16),
-            Clear(ClearType::CurrentLine),
-            Print(&line.base)
-        )?;
-        for (x, overlay) in &line.overlays {
-            queue!(stdout, MoveTo(*x, index as u16), Print(overlay))?;
+        // 无论子 terminal 是否隐藏视觉 cursor，宿主都回到稳定输入锚点。
+        match cursor {
+            Some((x, y)) => queue!(output, MoveTo(x, y), Show)?,
+            None => queue!(
+                output,
+                MoveTo(size.0.saturating_sub(1), size.1.saturating_sub(1)),
+                Hide
+            )?,
         }
     }
-    match cursor {
-        Some((x, y)) => queue!(stdout, MoveTo(x, y), Show)?,
-        None => queue!(
-            stdout,
-            MoveTo(size.0.saturating_sub(1), size.1.saturating_sub(1)),
-            Hide
-        )?,
-    }
+    stdout.write_all(&output)?;
     stdout.flush()?;
     Ok(())
 }
