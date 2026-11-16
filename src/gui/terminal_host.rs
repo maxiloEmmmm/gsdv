@@ -4196,13 +4196,11 @@ fn terminal_tui_render_row(
 
 /// 写入一组 terminal cell 样式对应的 SGR 序列。
 ///
-/// 适用场景：相邻 cell 样式变化。示例：默认色 -> 红色粗体。
+/// 适用场景：相邻 cell 样式变化。示例：默认色 -> GUI 已解析的红色。
 fn terminal_tui_push_style(output: &mut String, style: TerminalRemoteRunStyle) {
-    let (fg, bg) = if style.inverse {
-        (style.bg, style.fg)
-    } else {
-        (style.fg, style.bg)
-    };
+    // terminal_cell_colors 已经生成 GUI 实际绘制的最终 RGB，其中包含 dim 和 inverse。
+    // 再输出对应 SGR 会让宿主终端重复调暗、反相或切换字重，导致 TUI 与 GUI 不一致。
+    let (fg, bg) = (style.fg, style.bg);
     let _ = write!(
         output,
         "\x1b[0m\x1b[38;2;{};{};{}m\x1b[48;2;{};{};{}m",
@@ -4213,15 +4211,6 @@ fn terminal_tui_push_style(output: &mut String, style: TerminalRemoteRunStyle) {
         bg.g(),
         bg.b()
     );
-    if style.bold {
-        output.push_str("\x1b[1m");
-    }
-    if style.dim {
-        output.push_str("\x1b[2m");
-    }
-    if style.italic {
-        output.push_str("\x1b[3m");
-    }
     if style.underline != "none" {
         output.push_str("\x1b[4m");
     }

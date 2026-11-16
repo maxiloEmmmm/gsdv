@@ -52,7 +52,6 @@ const TUI_MIN_WIDTH: u16 = 48;
 const TUI_MIN_HEIGHT: u16 = 12;
 const TUI_SIDEBAR_WIDTH: u16 = 27;
 const TUI_COMPACT_SIDEBAR_WIDTH: u16 = 19;
-const TUI_COLLAPSED_SIDEBAR_WIDTH: u16 = 3;
 const TUI_SPLITTER_SIZE: u16 = 1;
 const TUI_MIN_PANE_WIDTH: u16 = 12;
 const TUI_MIN_PANE_HEIGHT: u16 = 4;
@@ -298,10 +297,97 @@ pub(super) enum TuiAppAction {
         /// 新折叠状态。
         collapsed: bool,
     },
+    /// 仅保留当前 Agent column 展开。
+    CollapseOtherColumns {
+        /// workspace 索引。
+        index: usize,
+        /// Agent row 索引。
+        row_index: usize,
+        /// 保持展开的 column 索引。
+        column_index: usize,
+    },
+    /// 仅保留当前 Agent row 展开。
+    CollapseOtherRows {
+        /// workspace 索引。
+        index: usize,
+        /// 保持展开的 row 索引。
+        row_index: usize,
+    },
     /// 等宽当前 row 的 columns。
     EqualizeColumns { index: usize, row_index: usize },
     /// 等高所有 rows。
     EqualizeRows { index: usize },
+    /// 在当前 column 内把 subagent tab 左移一位。
+    MoveSubagentLeft {
+        /// workspace 索引。
+        index: usize,
+        /// column 稳定 id。
+        column_id: String,
+        /// subagent id。
+        id: String,
+    },
+    /// 在当前 column 内把 subagent tab 右移一位。
+    MoveSubagentRight {
+        /// workspace 索引。
+        index: usize,
+        /// column 稳定 id。
+        column_id: String,
+        /// subagent id。
+        id: String,
+    },
+    /// 把 subagent tab 移到当前 column 首部。
+    MoveSubagentToHead {
+        /// workspace 索引。
+        index: usize,
+        /// column 稳定 id。
+        column_id: String,
+        /// subagent id。
+        id: String,
+    },
+    /// 把 subagent tab 移到当前 column 尾部。
+    MoveSubagentToTail {
+        /// workspace 索引。
+        index: usize,
+        /// column 稳定 id。
+        column_id: String,
+        /// subagent id。
+        id: String,
+    },
+    /// 把 subagent 移到同一 row 的相邻 column。
+    MoveSubagentToAdjacentColumn {
+        /// workspace 索引。
+        index: usize,
+        /// 当前 row 索引。
+        row_index: usize,
+        /// 当前 column 索引。
+        column_index: usize,
+        /// subagent id。
+        id: String,
+        /// `-1` 表示左侧，`1` 表示右侧。
+        direction: isize,
+    },
+    /// 把 subagent 移到相邻 row 的第一列。
+    MoveSubagentToAdjacentRow {
+        /// workspace 索引。
+        index: usize,
+        /// 当前 row 索引。
+        row_index: usize,
+        /// 当前 column 索引。
+        column_index: usize,
+        /// subagent id。
+        id: String,
+        /// `-1` 表示上方，`1` 表示下方。
+        direction: isize,
+    },
+    /// 把 subagent 移到另一个 workspace。
+    MoveSubagentToWorkspace {
+        /// 来源 workspace 索引。
+        index: usize,
+        /// subagent id。
+        id: String,
+        /// 目标 workspace 索引。
+        target_index: usize,
+    },
     /// 拖动相邻可见 columns 的分隔线。
     ResizeColumns {
         /// workspace 索引。
@@ -665,10 +751,71 @@ impl GsdvGuiApp {
                 column_index,
                 collapsed,
             } => self.set_agent_column_collapsed(index, row_index, column_index, collapsed),
+            TuiAppAction::CollapseOtherColumns {
+                index,
+                row_index,
+                column_index,
+            } => self.collapse_other_agent_columns(index, row_index, column_index),
+            TuiAppAction::CollapseOtherRows { index, row_index } => {
+                self.collapse_other_agent_rows(index, row_index)
+            }
             TuiAppAction::EqualizeColumns { index, row_index } => {
                 self.equalize_agent_columns(index, row_index)
             }
             TuiAppAction::EqualizeRows { index } => self.equalize_agent_rows(index),
+            TuiAppAction::MoveSubagentLeft {
+                index,
+                column_id,
+                id,
+            } => self.move_subagent_left(ctx, index, &column_id, &id),
+            TuiAppAction::MoveSubagentRight {
+                index,
+                column_id,
+                id,
+            } => self.move_subagent_right(ctx, index, &column_id, &id),
+            TuiAppAction::MoveSubagentToHead {
+                index,
+                column_id,
+                id,
+            } => self.move_subagent_to_head(ctx, index, &column_id, &id),
+            TuiAppAction::MoveSubagentToTail {
+                index,
+                column_id,
+                id,
+            } => self.move_subagent_to_tail(ctx, index, &column_id, &id),
+            TuiAppAction::MoveSubagentToAdjacentColumn {
+                index,
+                row_index,
+                column_index,
+                id,
+                direction,
+            } => self.move_subagent_to_adjacent_column(
+                ctx,
+                index,
+                row_index,
+                column_index,
+                &id,
+                direction,
+            ),
+            TuiAppAction::MoveSubagentToAdjacentRow {
+                index,
+                row_index,
+                column_index,
+                id,
+                direction,
+            } => self.move_subagent_to_adjacent_row(
+                ctx,
+                index,
+                row_index,
+                column_index,
+                &id,
+                direction,
+            ),
+            TuiAppAction::MoveSubagentToWorkspace {
+                index,
+                id,
+                target_index,
+            } => self.move_subagent_to_workspace(ctx, index, &id, target_index),
             TuiAppAction::ResizeColumns {
                 index,
                 row_index,
@@ -1139,7 +1286,7 @@ struct PaneLayout {
 /// 可拖动 row/column 分隔线的业务目标。
 ///
 /// 适用场景：绘制阶段生成命中区，鼠标按下后转为拖动状态。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum SplitterTarget {
     /// 同一 row 内相邻可见 columns。
     Columns {
@@ -1661,6 +1808,10 @@ struct TuiState {
     splitter_regions: Vec<SplitterRegion>,
     /// 当前进行中的 splitter 拖动。
     splitter_drag: Option<SplitterDrag>,
+    /// 鼠标当前悬停的 splitter，用粗线提供终端内拖动反馈。
+    splitter_hover: Option<SplitterTarget>,
+    /// 鼠标悬停 splitter 时的 cell 坐标，用箭头标出可拖动方向。
+    splitter_hover_position: Option<(u16, u16)>,
     /// 当前唯一菜单、表单或番茄覆盖层。
     layer: Option<TuiLayer>,
     /// 左侧列表滚动偏移。
@@ -1705,6 +1856,8 @@ impl TuiState {
             hit_regions: Vec::new(),
             splitter_regions: Vec::new(),
             splitter_drag: None,
+            splitter_hover: None,
+            splitter_hover_position: None,
             layer: None,
             sidebar_scroll: 0,
             cursor_position: None,
@@ -2137,10 +2290,11 @@ impl TuiState {
             return Vec::new();
         }
         let sidebar = sidebar_width(width, self.sidebar_collapsed);
+        let sidebar_separator = u16::from(sidebar > 0);
         let body = TuiRect {
-            x: sidebar.saturating_add(1),
+            x: sidebar.saturating_add(sidebar_separator),
             y: 0,
-            width: width.saturating_sub(sidebar.saturating_add(1)),
+            width: width.saturating_sub(sidebar.saturating_add(sidebar_separator)),
             height: height.saturating_sub(1),
         };
         if self.spotlight_mode {
@@ -2909,6 +3063,20 @@ impl TuiState {
         if self.main_view == TuiMainView::Helix {
             self.handle_helix_terminal_mouse(event, app);
             return;
+        }
+        if matches!(event.kind, MouseEventKind::Moved) {
+            let hovered = self
+                .splitter_regions
+                .iter()
+                .rev()
+                .find(|region| region.rect.contains(event.column, event.row))
+                .map(|region| region.target.clone());
+            let hover_position = hovered.as_ref().map(|_| (event.column, event.row));
+            if self.splitter_hover != hovered || self.splitter_hover_position != hover_position {
+                self.splitter_hover = hovered;
+                self.splitter_hover_position = hover_position;
+                self.dirty = true;
+            }
         }
         if matches!(event.kind, MouseEventKind::Drag(MouseButton::Left))
             && self.splitter_drag.is_some()
@@ -4112,128 +4280,305 @@ impl TuiState {
             }
         }
         if workflow_target.is_none()
-            && let (Some(row_index), Some(column_index), Some(column_id)) =
-                (context.row_index, context.column_index, context.column_id)
+            && let (Some(row_index), Some(column_index), Some(column_id)) = (
+                context.row_index,
+                context.column_index,
+                context.column_id.as_deref(),
+            )
         {
             items.push(menu_separator());
-            items.push(menu_submenu(
-                "Layout",
-                vec![
-                    MenuItem {
-                        label: "Add agent tab...".to_string(),
-                        action: Some(MenuAction::Form(add_agent_form(
-                            target.workspace_index,
-                            AddAgentPlacement::ExistingColumn(column_id.clone()),
-                            app.default_agent_kind,
-                        ))),
-                    },
-                    MenuItem {
-                        label: "Add row + agent...".to_string(),
-                        action: Some(MenuAction::Form(add_agent_form(
-                            target.workspace_index,
-                            AddAgentPlacement::NewRow(row_index),
-                            app.default_agent_kind,
-                        ))),
-                    },
-                    MenuItem {
-                        label: "Add column + agent...".to_string(),
-                        action: Some(MenuAction::Form(add_agent_form(
-                            target.workspace_index,
-                            AddAgentPlacement::NewColumn(row_index),
-                            app.default_agent_kind,
-                        ))),
-                    },
-                    menu_queue(
-                        "Collapse column",
-                        TuiAppAction::SetColumnCollapsed {
-                            index: target.workspace_index,
-                            row_index,
-                            column_index,
-                            collapsed: true,
-                        },
-                    ),
-                ],
-            ));
+            let mut layout_items = Self::agent_layout_structure_items(
+                app,
+                target.workspace_index,
+                row_index,
+                column_index,
+                column_id,
+            );
+            if let AgentSlotId::Subagent(id) = &target.slot {
+                let move_items = Self::subagent_layout_move_items(app, &context, id);
+                if !move_items.is_empty() {
+                    layout_items.insert(3, menu_submenu("Move agent", move_items));
+                }
+            }
+            items.push(menu_submenu("Layout", layout_items));
         }
         self.open_menu(x, y, items);
     }
 
-    /// 打开 row/column 结构菜单。
+    /// 构造与 GUI 对齐的 Agent row/column 结构菜单。
     ///
-    /// 适用场景：pane header 空白处右键。示例：新增 row/col、等分和关闭。
-    fn open_pane_menu(&mut self, x: u16, y: u16, app: &GsdvGuiApp, context: PaneMenuContext) {
-        let items = vec![
+    /// 适用场景：Agent tab 和 pane 空白处右键。示例：两列 -> 折叠其他列、等分列。
+    fn agent_layout_structure_items(
+        app: &GsdvGuiApp,
+        workspace_index: usize,
+        row_index: usize,
+        column_index: usize,
+        column_id: &str,
+    ) -> Vec<MenuItem> {
+        let mut items = vec![
             MenuItem {
                 label: "Add agent tab...".to_string(),
                 action: Some(MenuAction::Form(add_agent_form(
-                    context.workspace_index,
-                    AddAgentPlacement::ExistingColumn(context.column_id.clone()),
+                    workspace_index,
+                    AddAgentPlacement::ExistingColumn(column_id.to_string()),
                     app.default_agent_kind,
                 ))),
             },
             MenuItem {
                 label: "Add row + agent...".to_string(),
                 action: Some(MenuAction::Form(add_agent_form(
-                    context.workspace_index,
-                    AddAgentPlacement::NewRow(context.row_index),
+                    workspace_index,
+                    AddAgentPlacement::NewRow(row_index),
                     app.default_agent_kind,
                 ))),
             },
             MenuItem {
                 label: "Add column + agent...".to_string(),
                 action: Some(MenuAction::Form(add_agent_form(
-                    context.workspace_index,
-                    AddAgentPlacement::NewColumn(context.row_index),
+                    workspace_index,
+                    AddAgentPlacement::NewColumn(row_index),
                     app.default_agent_kind,
                 ))),
             },
-            menu_queue(
-                "Equalize columns",
-                TuiAppAction::EqualizeColumns {
-                    index: context.workspace_index,
-                    row_index: context.row_index,
-                },
-            ),
-            menu_queue(
-                "Equalize rows",
-                TuiAppAction::EqualizeRows {
-                    index: context.workspace_index,
-                },
-            ),
+            menu_separator(),
             menu_queue(
                 "Collapse column",
                 TuiAppAction::SetColumnCollapsed {
-                    index: context.workspace_index,
-                    row_index: context.row_index,
-                    column_index: context.column_index,
+                    index: workspace_index,
+                    row_index,
+                    column_index,
                     collapsed: true,
-                },
-            ),
-            menu_queue(
-                "Collapse row",
-                TuiAppAction::SetRowCollapsed {
-                    index: context.workspace_index,
-                    row_index: context.row_index,
-                    collapsed: true,
-                },
-            ),
-            menu_confirm(
-                "Close column",
-                "Close this column and all subagents inside it?",
-                TuiAppAction::RemoveColumn {
-                    index: context.workspace_index,
-                    column_id: context.column_id.clone(),
-                },
-            ),
-            menu_confirm(
-                "Close row",
-                "Close this row and all subagents inside it?",
-                TuiAppAction::RemoveRow {
-                    index: context.workspace_index,
-                    row_index: context.row_index,
                 },
             ),
         ];
+        let Some(workspace) = app.workspaces.get(workspace_index) else {
+            return items;
+        };
+        let column_count = workspace
+            .agent_rows
+            .get(row_index)
+            .map(|row| row.columns.len())
+            .unwrap_or_default();
+        items.push(menu_queue(
+            "Collapse other columns",
+            TuiAppAction::CollapseOtherColumns {
+                index: workspace_index,
+                row_index,
+                column_index,
+            },
+        ));
+        items.push(menu_queue(
+            "Collapse row",
+            TuiAppAction::SetRowCollapsed {
+                index: workspace_index,
+                row_index,
+                collapsed: true,
+            },
+        ));
+        items.push(menu_queue(
+            "Collapse other rows",
+            TuiAppAction::CollapseOtherRows {
+                index: workspace_index,
+                row_index,
+            },
+        ));
+        if column_count > 1 {
+            items.push(menu_queue(
+                "Equalize columns",
+                TuiAppAction::EqualizeColumns {
+                    index: workspace_index,
+                    row_index,
+                },
+            ));
+        }
+        if workspace.agent_rows.len() > 1 {
+            items.push(menu_queue(
+                "Equalize rows",
+                TuiAppAction::EqualizeRows {
+                    index: workspace_index,
+                },
+            ));
+        }
+        if row_index > 0 || column_index > 0 {
+            items.push(menu_separator());
+        }
+        if row_index > 0 || column_index > 0 {
+            items.push(menu_confirm(
+                "Close column",
+                "Close this column and all subagents inside it?",
+                TuiAppAction::RemoveColumn {
+                    index: workspace_index,
+                    column_id: column_id.to_string(),
+                },
+            ));
+        }
+        if row_index > 0 {
+            items.push(menu_confirm(
+                "Close row",
+                "Close this row and all subagents inside it?",
+                TuiAppAction::RemoveRow {
+                    index: workspace_index,
+                    row_index,
+                },
+            ));
+        }
+        items
+    }
+
+    /// 构造 subagent 在现有 Agent grid 中可执行的移动菜单。
+    ///
+    /// 适用场景：subagent tab 的 Layout 子菜单。示例：中间 tab -> 左右和首尾均可移动。
+    fn subagent_layout_move_items(
+        app: &GsdvGuiApp,
+        context: &AgentMenuContext,
+        id: &str,
+    ) -> Vec<MenuItem> {
+        let (Some(row_index), Some(column_index), Some(column_id)) = (
+            context.row_index,
+            context.column_index,
+            context.column_id.as_deref(),
+        ) else {
+            return Vec::new();
+        };
+        let Some(workspace) = app.workspaces.get(context.target.workspace_index) else {
+            return Vec::new();
+        };
+        let Some(column) = workspace
+            .agent_rows
+            .get(row_index)
+            .and_then(|row| row.columns.get(column_index))
+        else {
+            return Vec::new();
+        };
+        let slot = data::AgentColumnSlot::Subagent(id.to_string());
+        let Some(tab_index) = column.tabs.iter().position(|tab| tab == &slot) else {
+            return Vec::new();
+        };
+        let index = context.target.workspace_index;
+        let first_movable = usize::from(row_index == 0 && column_index == 0);
+        let mut items = Vec::new();
+        if tab_index > first_movable {
+            items.push(menu_queue(
+                "Move tab left",
+                TuiAppAction::MoveSubagentLeft {
+                    index,
+                    column_id: column_id.to_string(),
+                    id: id.to_string(),
+                },
+            ));
+            items.push(menu_queue(
+                "Move tab to head",
+                TuiAppAction::MoveSubagentToHead {
+                    index,
+                    column_id: column_id.to_string(),
+                    id: id.to_string(),
+                },
+            ));
+        }
+        if tab_index + 1 < column.tabs.len() {
+            items.push(menu_queue(
+                "Move tab right",
+                TuiAppAction::MoveSubagentRight {
+                    index,
+                    column_id: column_id.to_string(),
+                    id: id.to_string(),
+                },
+            ));
+            items.push(menu_queue(
+                "Move tab to tail",
+                TuiAppAction::MoveSubagentToTail {
+                    index,
+                    column_id: column_id.to_string(),
+                    id: id.to_string(),
+                },
+            ));
+        }
+        let column_count = workspace
+            .agent_rows
+            .get(row_index)
+            .map(|row| row.columns.len())
+            .unwrap_or_default();
+        if column_index > 0 {
+            items.push(menu_queue(
+                "Move to left column",
+                TuiAppAction::MoveSubagentToAdjacentColumn {
+                    index,
+                    row_index,
+                    column_index,
+                    id: id.to_string(),
+                    direction: -1,
+                },
+            ));
+        }
+        if column_index + 1 < column_count {
+            items.push(menu_queue(
+                "Move to right column",
+                TuiAppAction::MoveSubagentToAdjacentColumn {
+                    index,
+                    row_index,
+                    column_index,
+                    id: id.to_string(),
+                    direction: 1,
+                },
+            ));
+        }
+        if row_index > 0 {
+            items.push(menu_queue(
+                "Move to upper row",
+                TuiAppAction::MoveSubagentToAdjacentRow {
+                    index,
+                    row_index,
+                    column_index,
+                    id: id.to_string(),
+                    direction: -1,
+                },
+            ));
+        }
+        if row_index + 1 < workspace.agent_rows.len() {
+            items.push(menu_queue(
+                "Move to lower row",
+                TuiAppAction::MoveSubagentToAdjacentRow {
+                    index,
+                    row_index,
+                    column_index,
+                    id: id.to_string(),
+                    direction: 1,
+                },
+            ));
+        }
+        let workspace_items = app
+            .workspaces
+            .iter()
+            .enumerate()
+            .filter(|(target_index, _)| *target_index != index)
+            .map(|(target_index, target)| {
+                menu_queue(
+                    &target.name,
+                    TuiAppAction::MoveSubagentToWorkspace {
+                        index,
+                        id: id.to_string(),
+                        target_index,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        if !workspace_items.is_empty() {
+            items.push(menu_submenu("Move to workspace", workspace_items));
+        }
+        items
+    }
+
+    /// 打开 row/column 结构菜单。
+    ///
+    /// 适用场景：pane header 空白处右键。示例：新增 row/col、等分和关闭。
+    fn open_pane_menu(&mut self, x: u16, y: u16, app: &GsdvGuiApp, context: PaneMenuContext) {
+        let items = Self::agent_layout_structure_items(
+            app,
+            context.workspace_index,
+            context.row_index,
+            context.column_index,
+            &context.column_id,
+        );
         self.open_menu(x, y, items);
     }
 
@@ -4554,20 +4899,7 @@ impl TuiState {
     fn draw_chrome(&mut self, frame: &mut [RenderLine], app: &GsdvGuiApp) {
         let (width, height) = self.size;
         let sidebar = sidebar_width(width, self.sidebar_collapsed);
-        if self.sidebar_collapsed {
-            set_base_text(frame, 0, 0, "[>]", sidebar);
-            styled_overlay_text(frame, 0, 0, "[>]", (34, 211, 238), (15, 23, 42), true);
-            self.hit_regions.push(HitRegion {
-                rect: TuiRect {
-                    x: 0,
-                    y: 0,
-                    width: 3,
-                    height: 1,
-                },
-                left: Some(HitAction::ToggleSidebar),
-                right: None,
-            });
-        } else if self.spotlight_mode {
+        if !self.sidebar_collapsed && self.spotlight_mode {
             let exit_label = "[Exit]";
             let rank_label = if app.spotlight_rank_mode {
                 "[x] Rank"
@@ -4613,8 +4945,10 @@ impl TuiState {
                 right: None,
             });
         }
-        for y in 0..height.saturating_sub(1) {
-            put_char(frame, y, sidebar, '│');
+        if sidebar > 0 {
+            for y in 0..height.saturating_sub(1) {
+                put_char(frame, y, sidebar, '│');
+            }
         }
 
         let list_start = u16::from(self.spotlight_mode && !self.sidebar_collapsed);
@@ -5255,8 +5589,46 @@ impl TuiState {
                 let left = &pair[0];
                 let right = &pair[1];
                 let x = left.rect.x.saturating_add(left.rect.width);
+                let target = SplitterTarget::Columns {
+                    workspace_index,
+                    row_index: left.row_index,
+                    left_index: left.column_index,
+                    right_index: right.column_index,
+                    content_width,
+                };
+                let highlighted = self.splitter_hover.as_ref() == Some(&target)
+                    || self
+                        .splitter_drag
+                        .as_ref()
+                        .is_some_and(|drag| drag.target == target);
                 for y in left.rect.y..left.rect.y.saturating_add(left.rect.height) {
-                    styled_overlay_text(frame, y, x, "│", (34, 211, 238), (11, 16, 22), false);
+                    let pointer = self.splitter_hover.as_ref() == Some(&target)
+                        && self
+                            .splitter_hover_position
+                            .is_some_and(|(hover_x, hover_y)| hover_x == x && hover_y == y);
+                    styled_overlay_text(
+                        frame,
+                        y,
+                        x,
+                        if pointer {
+                            "↔"
+                        } else if highlighted {
+                            "┃"
+                        } else {
+                            "│"
+                        },
+                        if highlighted {
+                            (147, 197, 253)
+                        } else {
+                            (34, 211, 238)
+                        },
+                        if highlighted {
+                            (23, 44, 74)
+                        } else {
+                            (11, 16, 22)
+                        },
+                        highlighted,
+                    );
                 }
                 self.splitter_regions.push(SplitterRegion {
                     rect: TuiRect {
@@ -5265,13 +5637,7 @@ impl TuiState {
                         width: TUI_SPLITTER_SIZE,
                         height: left.rect.height,
                     },
-                    target: SplitterTarget::Columns {
-                        workspace_index,
-                        row_index: left.row_index,
-                        left_index: left.column_index,
-                        right_index: right.column_index,
-                        content_width,
-                    },
+                    target,
                 });
             }
         }
@@ -5302,14 +5668,43 @@ impl TuiState {
             let (bottom_index, _, _) = pair[1];
             let y = top_y.saturating_add(top_height);
             let width = body_right.saturating_sub(body_x);
+            let target = SplitterTarget::Rows {
+                workspace_index,
+                top_index,
+                bottom_index,
+                content_height,
+            };
+            let highlighted = self.splitter_hover.as_ref() == Some(&target)
+                || self
+                    .splitter_drag
+                    .as_ref()
+                    .is_some_and(|drag| drag.target == target);
+            let mut line = if highlighted { "━" } else { "─" }.repeat(usize::from(width));
+            if self.splitter_hover.as_ref() == Some(&target)
+                && let Some((hover_x, hover_y)) = self.splitter_hover_position
+                && hover_y == y
+                && hover_x >= body_x
+                && hover_x < body_right
+            {
+                let offset = usize::from(hover_x.saturating_sub(body_x)) * "━".len();
+                line.replace_range(offset..offset + "━".len(), "↕");
+            }
             styled_overlay_text(
                 frame,
                 y,
                 body_x,
-                &"─".repeat(usize::from(width)),
-                (34, 211, 238),
-                (11, 16, 22),
-                false,
+                &line,
+                if highlighted {
+                    (147, 197, 253)
+                } else {
+                    (34, 211, 238)
+                },
+                if highlighted {
+                    (23, 44, 74)
+                } else {
+                    (11, 16, 22)
+                },
+                highlighted,
             );
             self.splitter_regions.push(SplitterRegion {
                 rect: TuiRect {
@@ -5318,12 +5713,7 @@ impl TuiState {
                     width,
                     height: TUI_SPLITTER_SIZE,
                 },
-                target: SplitterTarget::Rows {
-                    workspace_index,
-                    top_index,
-                    bottom_index,
-                    content_height,
-                },
+                target,
             });
         }
     }

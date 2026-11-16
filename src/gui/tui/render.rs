@@ -58,7 +58,7 @@ pub(super) fn pane_layout_fingerprint(panes: &[PaneLayout]) -> String {
 /// 适用场景：窄 SSH 终端。示例：80 cols -> 19。
 pub(super) fn sidebar_width(width: u16, collapsed: bool) -> u16 {
     if collapsed {
-        TUI_COLLAPSED_SIDEBAR_WIDTH
+        0
     } else if width < 100 {
         TUI_COMPACT_SIDEBAR_WIDTH
     } else {
