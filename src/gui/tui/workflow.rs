@@ -788,6 +788,7 @@ pub(super) fn draw_markdown_region(
     if rect.width == 0 || rect.height == 0 {
         return;
     }
+    let palette = tui_markdown_palette();
     let lines = markdown_lines(markdown, rect.width.max(1));
     *scroll = (*scroll).min(lines.len().saturating_sub(usize::from(rect.height)));
     if lines.is_empty() {
@@ -796,8 +797,8 @@ pub(super) fn draw_markdown_region(
             rect.y,
             rect.x,
             "(empty)",
-            (100, 116, 139),
-            (11, 16, 22),
+            palette.muted,
+            palette.background,
             false,
         );
         return;
@@ -808,14 +809,14 @@ pub(super) fn draw_markdown_region(
         .take(usize::from(rect.height))
         .enumerate()
     {
-        let (foreground, bold) = markdown_style(line.style);
+        let (foreground, bold) = markdown_style(line.style, palette);
         styled_overlay_text(
             frame,
             rect.y.saturating_add(screen_index as u16),
             rect.x,
             &clip_text(&line.text, rect.width),
             foreground,
-            (11, 16, 22),
+            palette.background,
             bold,
         );
     }
@@ -859,21 +860,21 @@ pub(super) fn scroll_region(
 
 /// 返回 Markdown 语义样式对应的 xterm RGB。
 ///
-/// 适用场景：右侧预览。示例：代码 -> 青色，引用 -> muted。
-fn markdown_style(style: MarkdownLineStyle) -> ((u8, u8, u8), bool) {
+/// 适用场景：右侧预览。示例：代码 -> 低亮蓝灰色，引用 -> muted。
+fn markdown_style(style: MarkdownLineStyle, palette: TuiMarkdownPalette) -> ((u8, u8, u8), bool) {
     match style {
         MarkdownLineStyle::Heading(level) => (
             if level <= 2 {
-                (96, 165, 250)
+                palette.heading
             } else {
-                (125, 211, 252)
+                palette.subheading
             },
             true,
         ),
-        MarkdownLineStyle::Quote => ((148, 163, 184), false),
-        MarkdownLineStyle::Code => ((45, 212, 191), false),
-        MarkdownLineStyle::Rule => ((71, 85, 105), false),
-        MarkdownLineStyle::Body => ((226, 232, 240), false),
+        MarkdownLineStyle::Quote => (palette.muted, false),
+        MarkdownLineStyle::Code => (palette.code, false),
+        MarkdownLineStyle::Rule => (palette.rule, false),
+        MarkdownLineStyle::Body => (palette.body, false),
     }
 }
 

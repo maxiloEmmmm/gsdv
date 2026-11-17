@@ -2,6 +2,69 @@
 
 use super::*;
 
+/// TUI Markdown 内容使用的低亮暗色色板。
+///
+/// 适用场景：Workflow、Dir 预览和 Markdown 编辑器共享颜色。示例：正文 -> GUI dark markdown text。
+#[derive(Debug, Clone, Copy)]
+pub(super) struct TuiMarkdownPalette {
+    /// Markdown 内容区域背景。
+    pub background: (u8, u8, u8),
+    /// 普通正文和编辑器原文。
+    pub body: (u8, u8, u8),
+    /// 一级、二级标题。
+    pub heading: (u8, u8, u8),
+    /// 三级及以下标题。
+    pub subheading: (u8, u8, u8),
+    /// 引用、空状态等次要内容。
+    pub muted: (u8, u8, u8),
+    /// 代码块文字。
+    pub code: (u8, u8, u8),
+    /// Markdown 分隔线。
+    pub rule: (u8, u8, u8),
+}
+
+/// 返回与 GUI dark Markdown 一致的终端色板。
+///
+/// 适用场景：TUI 固定深色表面。示例：body -> `#A3AEBB`。
+pub(super) fn tui_markdown_palette() -> TuiMarkdownPalette {
+    let mode = theme::ThemeMode::Dark;
+    let background = color32_rgb(theme::bg_for(mode));
+    let body = color32_rgb(theme::markdown_text_for(mode));
+    let heading = color32_rgb(theme::primary_for(mode));
+    let muted = color32_rgb(theme::muted_for(mode));
+    TuiMarkdownPalette {
+        background,
+        body,
+        heading,
+        subheading: mix_rgb(body, heading, 0.55),
+        muted,
+        code: mix_rgb(body, heading, 0.24),
+        rule: mix_rgb(background, muted, 0.32),
+    }
+}
+
+/// 把 egui RGB 颜色转换成终端 RGB 元组。
+///
+/// 适用场景：TUI 复用 GUI 色板。示例：`Color32(1,2,3)` -> `(1,2,3)`。
+fn color32_rgb(color: egui::Color32) -> (u8, u8, u8) {
+    (color.r(), color.g(), color.b())
+}
+
+/// 按比例混合两种终端 RGB 颜色。
+///
+/// 适用场景：从正文与 primary 派生代码色。示例：amount=0 -> from。
+fn mix_rgb(from: (u8, u8, u8), to: (u8, u8, u8), amount: f32) -> (u8, u8, u8) {
+    let amount = amount.clamp(0.0, 1.0);
+    let channel = |from: u8, to: u8| {
+        (f32::from(from) * (1.0 - amount) + f32::from(to) * amount).round() as u8
+    };
+    (
+        channel(from.0, to.0),
+        channel(from.1, to.1),
+        channel(from.2, to.2),
+    )
+}
+
 /// 按权重把总字符数分配给可见 row/column。
 ///
 /// 适用场景：TUI 复用 GUI 布局权重。示例：100 与 [1,1] -> [50,50]。

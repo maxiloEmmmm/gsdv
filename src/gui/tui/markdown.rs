@@ -565,6 +565,7 @@ fn collect_markdown_image_paths(markdown: &str, markdown_file: Option<&Path>) ->
 ///
 /// 适用场景：终端输入只修改本地草稿。示例：光标所在字符使用反色背景。
 fn draw_markdown_editor(item: &mut MarkdownWorkbench, frame: &mut [RenderLine], rect: TuiRect) {
+    let palette = tui_markdown_palette();
     let lines = item.text.split('\n').collect::<Vec<_>>();
     let cursor_line = item.text[..item.cursor]
         .bytes()
@@ -592,8 +593,8 @@ fn draw_markdown_editor(item: &mut MarkdownWorkbench, frame: &mut [RenderLine], 
             rect.y + screen as u16,
             rect.x,
             &clip_text(line, rect.width),
-            (226, 232, 240),
-            (11, 16, 22),
+            palette.body,
+            palette.background,
             false,
         );
     }
@@ -608,8 +609,8 @@ fn draw_markdown_editor(item: &mut MarkdownWorkbench, frame: &mut [RenderLine], 
             cursor_y,
             rect.x + cursor_column,
             " ",
-            (11, 16, 22),
-            (226, 232, 240),
+            palette.background,
+            palette.body,
             true,
         );
     }
