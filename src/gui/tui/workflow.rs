@@ -219,9 +219,8 @@ pub(super) fn workflow_rows(
     collapsed_projects: &BTreeSet<String>,
 ) -> Vec<WorkflowBrowserRow> {
     let mut rows = Vec::new();
-    append_tree_rows(&mut rows, tree, collapsed_projects, false);
-    for child in &tree.sub_workflows {
-        append_tree_rows(&mut rows, child, collapsed_projects, true);
+    for (index, current) in workflow_trees_for_display(tree).into_iter().enumerate() {
+        append_tree_rows(&mut rows, current, collapsed_projects, index != 0);
     }
     rows
 }
@@ -257,7 +256,7 @@ fn append_tree_rows(
         done: false,
         repo_header: false,
     });
-    for project in &tree.projects {
+    for project in workflow_projects_for_display(tree) {
         let project_key = workflow_project_state_key(tree, &project.key);
         let collapsed = collapsed_projects.contains(&project_key);
         rows.push(WorkflowBrowserRow {
@@ -280,7 +279,7 @@ fn append_tree_rows(
         if collapsed {
             continue;
         }
-        for task in &project.tasks {
+        for task in workflow_tasks_for_display(project) {
             let done = task_done(task);
             rows.push(WorkflowBrowserRow {
                 depth: 1,
@@ -371,7 +370,7 @@ fn append_step_rows(
     depth: usize,
     parent_copy_path: &str,
 ) {
-    for step in steps {
+    for step in workflow_steps_for_display(steps) {
         let copy_path = format!("{parent_copy_path} > {}", step.title);
         rows.push(WorkflowStepRow {
             depth,

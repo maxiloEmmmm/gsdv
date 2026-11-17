@@ -34,8 +34,9 @@ use crate::gui::workflow::{
     WorkflowSaveSuccess, WorkflowSelectionTarget, WorkflowStepEditor, WorkflowStepNode,
     WorkflowTaskEditor, WorkflowTaskNode, WorkflowTree, path_is_workflow_spec_path,
     workflow_project_state_key, workflow_project_state_key_from_path, workflow_projects,
-    workflow_root_missing_error, workflow_step_editor_from_node, workflow_task_editor_from_node,
-    workflow_tasks, workflow_trees,
+    workflow_projects_for_display, workflow_root_missing_error, workflow_step_editor_from_node,
+    workflow_steps_for_display, workflow_task_editor_from_node, workflow_tasks,
+    workflow_tasks_for_display, workflow_trees, workflow_trees_for_display,
 };
 use crate::reviewer::app::{GuiReviewerRowTone, ReviewerGitDataResult};
 use eframe::egui::text_edit::{TextEditOutput, TextEditState};

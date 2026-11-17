@@ -262,7 +262,7 @@ impl GsdvGuiApp {
         destroy_agent_target: &mut Option<WorkflowSelectionTarget>,
     ) {
         workflow_column_frame(ui, "Repo", |ui| {
-            for repo in workflow_trees(tree) {
+            for repo in workflow_trees_for_display(tree) {
                 let repo_target = WorkflowSelectionTarget::WorkspaceRoot {
                     root_path: repo.root_path.clone(),
                 };
@@ -343,7 +343,7 @@ impl GsdvGuiApp {
         destroy_agent_target: &mut Option<WorkflowSelectionTarget>,
     ) {
         workflow_column_frame(ui, "Project", |ui| {
-            for project in &tree.projects {
+            for project in workflow_projects_for_display(tree) {
                 let project_target = WorkflowSelectionTarget::Project {
                     root_path: project.root_path.clone(),
                 };
@@ -440,7 +440,7 @@ impl GsdvGuiApp {
                 workflow_column_empty(ui, "-");
                 return;
             };
-            for task in &project.tasks {
+            for task in workflow_tasks_for_display(project) {
                 let task_target = WorkflowSelectionTarget::Task {
                     task_path: task.path.clone(),
                 };
@@ -716,7 +716,7 @@ fn workflow_column_step_rows(
     open_agent_target: &mut Option<WorkflowSelectionTarget>,
     destroy_agent_target: &mut Option<WorkflowSelectionTarget>,
 ) {
-    for step in steps {
+    for step in workflow_steps_for_display(steps) {
         let step_target = WorkflowSelectionTarget::Step {
             task_path: task.path.clone(),
             step_path: step.path.clone(),

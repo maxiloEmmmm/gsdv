@@ -171,7 +171,8 @@ pub(super) fn draw_workflow_columns(
     let column_width = workflow_column_width(size.0);
     let mut x = 0_u16;
 
-    let repos = workflow_trees(tree)
+    let repos = workflow_trees_for_display(tree)
+        .into_iter()
         .map(|repo| {
             let label = if repo.repo_path.as_os_str().is_empty() {
                 "Root".to_string()
@@ -202,9 +203,8 @@ pub(super) fn draw_workflow_columns(
     );
     x = x.saturating_add(column_width).saturating_add(1);
 
-    let projects = selected_tree
-        .projects
-        .iter()
+    let projects = workflow_projects_for_display(selected_tree)
+        .into_iter()
         .map(|project| {
             (
                 project.label.clone(),
@@ -231,9 +231,8 @@ pub(super) fn draw_workflow_columns(
     x = x.saturating_add(column_width).saturating_add(1);
 
     if let Some(project) = selected_project {
-        let tasks = project
-            .tasks
-            .iter()
+        let tasks = workflow_tasks_for_display(project)
+            .into_iter()
             .map(|task| {
                 (
                     task.label.clone(),
@@ -409,7 +408,7 @@ fn draw_workflow_column(
         .enumerate()
     {
         let y = index as u16 + 1;
-        let is_selected = selected == Some(target);
+        let is_selected = workflow_column_row_selected(tree, target, selected);
         draw_progress_row(
             frame,
             y,
@@ -452,7 +451,7 @@ fn draw_step_column(
 ) {
     draw_column_chrome(frame, x, width, height, "Step");
     let mut rows = Vec::new();
-    append_step_rows(&mut rows, &task.path, &task.steps, &mut Vec::new(), 0);
+    append_step_rows(&mut rows, &task.path, &task.steps, 0);
     for (index, (label, target, checked, depth)) in rows
         .into_iter()
         .take(usize::from(height.saturating_sub(1)))
@@ -481,10 +480,10 @@ fn draw_step_column(
             } else {
                 (203, 213, 225)
             },
-            if checked {
-                (20, 83, 45)
-            } else if selected {
+            if selected {
                 (37, 99, 235)
+            } else if checked {
+                (20, 83, 45)
             } else {
                 (11, 16, 22)
             },
@@ -513,22 +512,19 @@ fn append_step_rows(
     rows: &mut Vec<(String, WorkflowSelectionTarget, bool, usize)>,
     task_path: &Path,
     steps: &[WorkflowStepNode],
-    prefix: &mut Vec<usize>,
     depth: usize,
 ) {
-    for (index, step) in steps.iter().enumerate() {
-        prefix.push(index);
+    for step in workflow_steps_for_display(steps) {
         rows.push((
             step.title.clone(),
             WorkflowSelectionTarget::Step {
                 task_path: task_path.to_path_buf(),
-                step_path: prefix.clone(),
+                step_path: step.path.clone(),
             },
             step.checked,
             depth,
         ));
-        append_step_rows(rows, task_path, &step.children, prefix, depth + 1);
-        prefix.pop();
+        append_step_rows(rows, task_path, &step.children, depth + 1);
     }
 }
 
@@ -764,7 +760,7 @@ fn draw_progress_row(
     } else {
         (progress.ratio() * f32::from(width)).round() as u16
     };
-    if progress_width > 0 {
+    if progress_width > 0 && !selected {
         let prefix = clip_text(&text, progress_width);
         styled_overlay_text(
             frame,
@@ -783,6 +779,28 @@ fn draw_progress_row(
             },
             true,
         );
+    }
+}
+
+/// 判断 Repo、Project 或 Task 行是否位于当前选择路径上。
+///
+/// 适用场景：选中 Step 时父级三列仍清晰高亮。示例：Step(a/0) -> Repo、Project、Task(a) 都选中。
+fn workflow_column_row_selected(
+    root: &WorkflowTree,
+    row: &WorkflowSelectionTarget,
+    selected: Option<&WorkflowSelectionTarget>,
+) -> bool {
+    match row {
+        WorkflowSelectionTarget::WorkspaceRoot { root_path } => {
+            selected_workflow_tree(root, selected).is_some_and(|tree| &tree.root_path == root_path)
+        }
+        WorkflowSelectionTarget::Project { root_path } => workflow_trees(root)
+            .find_map(|tree| selected_workflow_project(tree, selected))
+            .is_some_and(|project| &project.root_path == root_path),
+        WorkflowSelectionTarget::Task { task_path } => workflow_trees(root)
+            .find_map(|tree| selected_workflow_task(tree, selected))
+            .is_some_and(|task| &task.path == task_path),
+        WorkflowSelectionTarget::Step { .. } => selected == Some(row),
     }
 }
 

@@ -451,6 +451,60 @@ pub(super) fn workflow_trees(tree: &WorkflowTree) -> impl Iterator<Item = &Workf
     std::iter::once(tree).chain(tree.sub_workflows.iter())
 }
 
+/// 返回按可见路径排序的 Repo 列节点，并固定主 Repo 在首位。
+///
+/// 适用场景：GUI/TUI Workflow Repo 列共享顺序。例：`Root, z, a -> Root, a, z`。
+pub(super) fn workflow_trees_for_display(tree: &WorkflowTree) -> Vec<&WorkflowTree> {
+    let mut trees = workflow_trees(tree).collect::<Vec<_>>();
+    trees.sort_by(|left, right| {
+        let left_root = left.repo_path.as_os_str().is_empty();
+        let right_root = right.repo_path.as_os_str().is_empty();
+        right_root.cmp(&left_root).then_with(|| {
+            workflow_display_name_cmp(
+                &left.repo_path.to_string_lossy(),
+                &right.repo_path.to_string_lossy(),
+            )
+        })
+    });
+    trees
+}
+
+/// 返回按已去除稳定 ID 的可见名称排序的 Project 列节点。
+///
+/// 适用场景：磁盘目录以随机 ID 开头，但界面只按项目名排序。例：`z, a -> a, z`。
+pub(super) fn workflow_projects_for_display(tree: &WorkflowTree) -> Vec<&WorkflowProjectNode> {
+    let mut projects = tree.projects.iter().collect::<Vec<_>>();
+    projects.sort_by(|left, right| workflow_display_name_cmp(&left.label, &right.label));
+    projects
+}
+
+/// 返回按已去除稳定 ID 和 `task-` 的可见名称排序的 Task 列节点。
+///
+/// 适用场景：随机 task ID 不得影响用户看到的顺序。例：`02-b, 01-a -> 01-a, 02-b`。
+pub(super) fn workflow_tasks_for_display(project: &WorkflowProjectNode) -> Vec<&WorkflowTaskNode> {
+    let mut tasks = project.tasks.iter().collect::<Vec<_>>();
+    tasks.sort_by(|left, right| workflow_display_name_cmp(&left.label, &right.label));
+    tasks
+}
+
+/// 返回按已去除稳定 ID 的可见标题排序的同级 Step 节点。
+///
+/// 适用场景：仅改变列展示顺序，保留每个 step 的原始 path。例：`02-b, 01-a -> 01-a, 02-b`。
+pub(super) fn workflow_steps_for_display(steps: &[WorkflowStepNode]) -> Vec<&WorkflowStepNode> {
+    let mut steps = steps.iter().collect::<Vec<_>>();
+    steps.sort_by(|left, right| workflow_display_name_cmp(&left.title, &right.title));
+    steps
+}
+
+/// 比较两个 Workflow 可见名称，忽略大小写并用原文稳定破同序。
+///
+/// 适用场景：所有 Column View 使用相同排序语义。例：`Base, alpha -> alpha, Base`。
+fn workflow_display_name_cmp(left: &str, right: &str) -> std::cmp::Ordering {
+    left.to_lowercase()
+        .cmp(&right.to_lowercase())
+        .then_with(|| left.cmp(right))
+}
+
 /// 遍历主 workflow 与子 repo 中的全部项目。
 ///
 /// 适用场景：按 root/task 路径定位所属项目。

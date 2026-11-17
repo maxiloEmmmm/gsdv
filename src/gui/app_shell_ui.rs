@@ -3256,7 +3256,7 @@ fn workflow_task_step_tree_panel(
                 ui.label(muted(i18n::text(language, "No steps")));
                 return;
             }
-            for step in &task.steps {
+            for step in workflow_steps_for_display(&task.steps) {
                 app.render_workflow_step_node(
                     ui,
                     tree,
@@ -3304,8 +3304,9 @@ fn workflow_step_path_range(
     anchor: &[usize],
     clicked: &[usize],
 ) -> BTreeSet<Vec<usize>> {
-    let anchor_index = task.steps.iter().position(|step| step.path == anchor);
-    let clicked_index = task.steps.iter().position(|step| step.path == clicked);
+    let displayed_steps = workflow_steps_for_display(&task.steps);
+    let anchor_index = displayed_steps.iter().position(|step| step.path == anchor);
+    let clicked_index = displayed_steps.iter().position(|step| step.path == clicked);
     let (Some(anchor_index), Some(clicked_index)) = (anchor_index, clicked_index) else {
         return BTreeSet::from([clicked.to_vec()]);
     };
@@ -3314,7 +3315,7 @@ fn workflow_step_path_range(
     } else {
         (clicked_index, anchor_index)
     };
-    task.steps[start..=end]
+    displayed_steps[start..=end]
         .iter()
         .map(|step| step.path.clone())
         .collect()
