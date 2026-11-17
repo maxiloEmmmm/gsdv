@@ -5,8 +5,8 @@
 
 use super::*;
 use crate::gui::terminal_host::{
-    TerminalTuiFrame, TerminalTuiMouseKind, TerminalTuiOutputMatch, TerminalTuiOutputSource,
-    TerminalTuiOutputState, TerminalTuiUpdate,
+    TerminalTuiCursor, TerminalTuiFrame, TerminalTuiMouseKind, TerminalTuiOutputMatch,
+    TerminalTuiOutputSource, TerminalTuiOutputState, TerminalTuiUpdate,
 };
 use anyhow::{Context, Result};
 use base64::Engine as _;
@@ -18,8 +18,8 @@ use crossterm::event::{
 };
 use crossterm::style::Print;
 use crossterm::terminal::{
-    self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
-    enable_raw_mode,
+    self, BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate, EnterAlternateScreen,
+    LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use crossterm::{execute, queue};
 use std::collections::BTreeMap;
@@ -6360,6 +6360,7 @@ fn apply_terminal_tui_update(frame: &mut TerminalTuiFrame, update: TerminalTuiUp
                     changed = true;
                 }
             }
+            let cursor = stable_terminal_tui_cursor(frame.cursor, cursor);
             if frame.cursor != cursor {
                 frame.cursor = cursor;
                 changed = true;
@@ -6374,7 +6375,8 @@ fn apply_terminal_tui_update(frame: &mut TerminalTuiFrame, update: TerminalTuiUp
             }
             changed
         }
-        TerminalTuiUpdate::Frame(next) => {
+        TerminalTuiUpdate::Frame(mut next) => {
+            next.cursor = stable_terminal_tui_cursor(frame.cursor, next.cursor);
             if *frame == next {
                 return false;
             }
@@ -6382,6 +6384,25 @@ fn apply_terminal_tui_update(frame: &mut TerminalTuiFrame, update: TerminalTuiUp
             true
         }
     }
+}
+
+/// 合并子 terminal cursor，并在隐藏期间保留最后一个可见输入锚点。
+///
+/// 适用场景：Agent Busy 时隐藏 cursor 并在屏幕内移动。示例：visible (4,8) + hidden (20,1) -> hidden (4,8)。
+fn stable_terminal_tui_cursor(
+    current: Option<TerminalTuiCursor>,
+    next: Option<TerminalTuiCursor>,
+) -> Option<TerminalTuiCursor> {
+    let next = next?;
+    if next.visible {
+        return Some(next);
+    }
+    Some(TerminalTuiCursor {
+        position: current
+            .map(|cursor| cursor.position)
+            .unwrap_or(next.position),
+        visible: false,
+    })
 }
 
 /// 生成终端客户端剪贴板使用的 OSC 52 序列。

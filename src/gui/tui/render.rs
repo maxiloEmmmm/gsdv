@@ -385,6 +385,8 @@ pub(super) fn write_frame_diff(
     // 先在内存编译完整差量，减少 PTY 系统调用和可见撕裂。
     let mut output = Vec::with_capacity(4096);
     {
+        // 终端仍会处理内部 MoveTo，但只在最终输入锚点恢复后提交画面和 IME cursor。
+        queue!(output, BeginSynchronizedUpdate)?;
         let mut cursor_hidden_for_diff = false;
         if previous.is_empty() {
             queue!(output, Hide, Clear(ClearType::All))?;
@@ -440,6 +442,7 @@ pub(super) fn write_frame_diff(
                 Hide
             )?,
         }
+        queue!(output, EndSynchronizedUpdate)?;
     }
     stdout.write_all(&output)?;
     stdout.flush()?;
