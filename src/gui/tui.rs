@@ -37,6 +37,8 @@ mod menu;
 mod pomodoro;
 #[path = "tui/render.rs"]
 mod render;
+#[path = "tui/settings.rs"]
+mod settings;
 #[path = "tui/workflow.rs"]
 mod workflow;
 
@@ -45,6 +47,7 @@ use markdown::*;
 use menu::*;
 use pomodoro::*;
 use render::*;
+use settings::*;
 use workflow::*;
 
 const TUI_POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -486,6 +489,17 @@ pub(super) enum TuiAppAction {
         rest_minutes: u16,
         /// 剩余时间告警百分比。
         warning_remaining_percent: u8,
+    },
+    /// 更新网络代理配置，并让已打开的 PTY 重新读取环境变量。
+    UpdateNetworkSettings {
+        /// 是否向子进程注入代理环境变量。
+        proxy_enabled: bool,
+        /// HTTP、HTTPS 或 SOCKS 主代理 URL。
+        proxy: String,
+        /// 追加到内置规则后的 no_proxy 条目。
+        no_proxy: String,
+        /// 是否同时生成 HTTP(S) 与 SOCKS 代理环境变量。
+        mirror_proxy_protocol: bool,
     },
 }
 
@@ -954,6 +968,27 @@ impl GsdvGuiApp {
                         data::MAX_POMODORO_WARNING_REMAINING_PERCENT,
                     );
                 self.pending_runtime_settings_save = true;
+                self.request_app_repaint();
+            }
+            TuiAppAction::UpdateNetworkSettings {
+                proxy_enabled,
+                proxy,
+                no_proxy,
+                mirror_proxy_protocol,
+            } => {
+                let settings = NetworkSettings {
+                    proxy_enabled,
+                    proxy,
+                    no_proxy,
+                    mirror_proxy_protocol,
+                };
+                if self.network_settings == settings {
+                    return;
+                }
+                self.network_settings = settings;
+                self.pending_network_settings_save = true;
+                // 代理只在创建子进程时进入环境；重启已打开 host 才能立即生效。
+                self.restart_open_terminal_hosts_for_network_settings(ctx);
                 self.request_app_repaint();
             }
         }
@@ -1527,6 +1562,8 @@ enum HitAction {
     NewWorkspace,
     /// 打开番茄菜单。
     PomodoroMenu,
+    /// 打开全局设置表单。
+    OpenSettings,
     /// 打开只读 Workflow 浏览器。
     OpenWorkflow,
     /// 打开 Finder 风格目录浏览器。
@@ -1707,6 +1744,8 @@ enum FormSubmit {
     },
     /// 保存番茄钟三个持久化参数。
     PomodoroSettings,
+    /// 保存全局网络代理配置。
+    NetworkSettings,
     /// 新增 Workflow Project。
     WorkflowAddProject {
         /// 所属 workspace。
@@ -4007,6 +4046,10 @@ impl TuiState {
                 self.dirty = true;
             }
             HitAction::PomodoroMenu => self.open_pomodoro_menu(x, y, app),
+            HitAction::OpenSettings => {
+                self.layer = Some(TuiLayer::Form(network_settings_form(app)));
+                self.dirty = true;
+            }
             HitAction::OpenWorkflow => {
                 self.main_view = TuiMainView::Workflow;
                 self.workflow_browser.workspace_index = None;
@@ -5515,6 +5558,29 @@ impl TuiState {
             left: Some(HitAction::OpenWorkspaceHelix),
             right: None,
         });
+        new_x = new_x.saturating_add(helix_width).saturating_add(1);
+        let settings_label = if compact_bottom { "[S]" } else { "[Settings]" };
+        let settings_width = u16::try_from(settings_label.len()).unwrap_or(10);
+        styled_overlay_text(
+            frame,
+            bottom,
+            new_x,
+            settings_label,
+            (251, 146, 60),
+            (11, 16, 22),
+            true,
+        );
+        self.hit_regions.push(HitRegion {
+            rect: TuiRect {
+                x: new_x,
+                y: bottom,
+                width: settings_width,
+                height: 1,
+            },
+            left: Some(HitAction::OpenSettings),
+            right: None,
+        });
+        new_x = new_x.saturating_add(settings_width).saturating_add(1);
         let pomodoro = pomodoro_status(app);
         let pomodoro_width = display_width(&pomodoro).min(26) as u16;
         let pomodoro_x = width.saturating_sub(pomodoro_width.saturating_add(10));
@@ -5522,38 +5588,40 @@ impl TuiState {
             && app.pomodoro.phase == PomodoroPhase::Working
             && pomodoro_work_progress(&app.runtime_settings, &app.pomodoro)
                 >= pomodoro_warning_progress(&app.runtime_settings);
-        set_base_text(
-            frame,
-            bottom,
-            pomodoro_x,
-            &" ".repeat(pomodoro_width as usize),
-            pomodoro_width,
-        );
-        styled_overlay_text(
-            frame,
-            bottom,
-            pomodoro_x,
-            &pomodoro,
-            if pomodoro_warning {
-                (250, 204, 21)
-            } else if app.runtime_settings.pomodoro_enabled {
-                (45, 212, 191)
-            } else {
-                (148, 163, 184)
-            },
-            (11, 16, 22),
-            app.runtime_settings.pomodoro_enabled,
-        );
-        self.hit_regions.push(HitRegion {
-            rect: TuiRect {
-                x: pomodoro_x,
-                y: bottom,
-                width: pomodoro_width,
-                height: 1,
-            },
-            left: Some(HitAction::PomodoroMenu),
-            right: Some(HitAction::PomodoroMenu),
-        });
+        if new_x < pomodoro_x {
+            set_base_text(
+                frame,
+                bottom,
+                pomodoro_x,
+                &" ".repeat(pomodoro_width as usize),
+                pomodoro_width,
+            );
+            styled_overlay_text(
+                frame,
+                bottom,
+                pomodoro_x,
+                &pomodoro,
+                if pomodoro_warning {
+                    (250, 204, 21)
+                } else if app.runtime_settings.pomodoro_enabled {
+                    (45, 212, 191)
+                } else {
+                    (148, 163, 184)
+                },
+                (11, 16, 22),
+                app.runtime_settings.pomodoro_enabled,
+            );
+            self.hit_regions.push(HitRegion {
+                rect: TuiRect {
+                    x: pomodoro_x,
+                    y: bottom,
+                    width: pomodoro_width,
+                    height: 1,
+                },
+                left: Some(HitAction::PomodoroMenu),
+                right: Some(HitAction::PomodoroMenu),
+            });
+        }
         set_base_text(frame, bottom, width.saturating_sub(9), "[Ctrl+Q]", 8);
     }
 
@@ -5593,6 +5661,12 @@ impl TuiState {
                 HitAction::OpenWorkspaceHelix,
                 (192, 132, 252),
                 self.main_view == TuiMainView::Helix,
+            ),
+            (
+                if compact_bottom { "[S]" } else { "[Settings]" },
+                HitAction::OpenSettings,
+                (251, 146, 60),
+                false,
             ),
         ];
         let mut x = 0_u16;
@@ -6811,6 +6885,12 @@ fn submit_form(form: &FormDialog, app: &GsdvGuiApp) -> std::result::Result<TuiAp
                 warning_remaining_percent,
             })
         }
+        FormSubmit::NetworkSettings => Ok(TuiAppAction::UpdateNetworkSettings {
+            proxy_enabled: form_choice(form, 0) == 1,
+            proxy: form_text(form, 1),
+            mirror_proxy_protocol: form_choice(form, 2) == 1,
+            no_proxy: form_text(form, 3),
+        }),
         FormSubmit::WorkflowAddProject { index, spec_path } => {
             let request = WorkflowMutationRequest::AddProject {
                 spec_path: spec_path.clone(),
