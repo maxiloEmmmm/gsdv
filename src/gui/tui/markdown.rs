@@ -92,30 +92,39 @@ impl MarkdownWorkbenches {
         editable: bool,
         markdown_file: Option<PathBuf>,
         save_error: Option<&str>,
-    ) {
-        let item = self.items.entry(key).or_insert_with(|| MarkdownWorkbench {
-            target: target.clone(),
-            text: text.to_string(),
-            saved_text: saved_text.to_string(),
-            mode: MarkdownWorkbenchMode::Preview,
-            cursor: text.len(),
-            scroll: 0,
-            follow_cursor: true,
-            saving: false,
-            save_error: save_error.map(str::to_string),
-            editable,
-            markdown_file: markdown_file.clone(),
-            image_paths: collect_markdown_image_paths(text, markdown_file.as_deref()),
-        });
-        item.editable = editable;
-        item.save_error = save_error.map(str::to_string);
-        if item.markdown_file != markdown_file {
-            item.markdown_file = markdown_file.clone();
-            item.image_paths = collect_markdown_image_paths(&item.text, markdown_file.as_deref());
+    ) -> bool {
+        let Some(item) = self.items.get_mut(&key) else {
+            self.items.insert(
+                key,
+                MarkdownWorkbench {
+                    target,
+                    text: text.to_string(),
+                    saved_text: saved_text.to_string(),
+                    mode: MarkdownWorkbenchMode::Preview,
+                    cursor: text.len(),
+                    scroll: 0,
+                    follow_cursor: true,
+                    saving: false,
+                    save_error: save_error.map(str::to_string),
+                    editable,
+                    markdown_file: markdown_file.clone(),
+                    image_paths: collect_markdown_image_paths(text, markdown_file.as_deref()),
+                },
+            );
+            return true;
+        };
+        let mut changed = false;
+        if item.editable != editable {
+            item.editable = editable;
+            changed = true;
+        }
+        if item.save_error.as_deref() != save_error {
+            item.save_error = save_error.map(str::to_string);
+            changed = true;
         }
         if item.target != target {
             if item.dirty() {
-                return;
+                return changed;
             }
             item.target = target;
             item.text = text.to_string();
@@ -124,24 +133,61 @@ impl MarkdownWorkbenches {
             item.scroll = 0;
             item.follow_cursor = true;
             item.saving = false;
-            item.save_error = save_error.map(str::to_string);
+            item.markdown_file = markdown_file;
             item.image_paths =
                 collect_markdown_image_paths(&item.text, item.markdown_file.as_deref());
-            return;
+            return true;
+        }
+        let markdown_file_changed = item.markdown_file != markdown_file;
+        if markdown_file_changed {
+            item.markdown_file = markdown_file;
+            changed = true;
         }
         if item.saving && save_error.is_some() {
             item.saving = false;
-            return;
+            return true;
         }
         if !item.dirty() || (item.saving && item.text == saved_text) {
-            item.text = text.to_string();
-            item.saved_text = saved_text.to_string();
-            item.cursor = item.cursor.min(item.text.len());
+            let text_changed = item.text != text;
+            let saved_text_changed = item.saved_text != saved_text;
+            let saving_changed = item.saving;
+            if text_changed {
+                item.text = text.to_string();
+                item.cursor = item.cursor.min(item.text.len());
+            }
+            if saved_text_changed {
+                item.saved_text = saved_text.to_string();
+            }
             item.saving = false;
-            item.save_error = save_error.map(str::to_string);
-            item.image_paths =
-                collect_markdown_image_paths(&item.text, item.markdown_file.as_deref());
+            if text_changed || markdown_file_changed {
+                item.image_paths =
+                    collect_markdown_image_paths(&item.text, item.markdown_file.as_deref());
+            }
+            changed |= text_changed || saved_text_changed || saving_changed;
         }
+        changed
+    }
+
+    /// 移除已切走且没有草稿的工作台，避免加载期间继续显示旧文件。
+    ///
+    /// 适用场景：Dir 从 A 切到尚未加载的 B。示例：A 工作台 -> 空白等待 B。
+    pub(super) fn remove_clean_target(
+        &mut self,
+        key: &str,
+        target: &MarkdownWorkbenchTarget,
+    ) -> bool {
+        let should_remove = self
+            .items
+            .get(key)
+            .is_some_and(|item| &item.target != target && !item.dirty());
+        if !should_remove {
+            return false;
+        }
+        self.items.remove(key);
+        if self.focused.as_deref() == Some(key) {
+            self.focused = None;
+        }
+        true
     }
 
     /// 判断当前键盘目标是否处于编辑态。

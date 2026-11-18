@@ -2266,25 +2266,26 @@ impl TuiState {
     ///
     /// 适用场景：异步加载、保存或 watcher 刷新到达。示例：保存成功 -> dirty 清除。
     fn sync_markdown_workbenches(&mut self, app: &GsdvGuiApp) {
-        match self.main_view {
-            TuiMainView::Workflow => {
-                column_browser::sync_workflow_workbenches(
-                    &self.workflow_browser,
-                    app.workflow_states.get(app.active_workspace),
-                    &mut self.markdown_workbenches,
-                    true,
-                    app.workspaces
-                        .get(app.active_workspace)
-                        .map(|workspace| workspace.path.as_path())
-                        .unwrap_or_else(|| Path::new(".")),
-                );
-            }
+        let changed = match self.main_view {
+            TuiMainView::Workflow => column_browser::sync_workflow_workbenches(
+                &self.workflow_browser,
+                app.workflow_states.get(app.active_workspace),
+                &mut self.markdown_workbenches,
+                true,
+                app.workspaces
+                    .get(app.active_workspace)
+                    .map(|workspace| workspace.path.as_path())
+                    .unwrap_or_else(|| Path::new(".")),
+            ),
             TuiMainView::Directory => column_browser::sync_directory_workbench(
                 &self.directory_browser,
                 app.documents.get(app.active_workspace),
                 &mut self.markdown_workbenches,
             ),
-            TuiMainView::Agents | TuiMainView::Terminal | TuiMainView::Helix => {}
+            TuiMainView::Agents | TuiMainView::Terminal | TuiMainView::Helix => false,
+        };
+        if changed {
+            self.dirty = true;
         }
     }
 

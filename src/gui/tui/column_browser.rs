@@ -13,19 +13,20 @@ pub(super) fn sync_workflow_workbenches(
     workbenches: &mut MarkdownWorkbenches,
     editable: bool,
     workspace_root: &Path,
-) {
+) -> bool {
     let Some(tree) = state.and_then(|state| state.tree.as_ref()) else {
-        return;
+        return false;
     };
     let Some(target) = browser.selected.as_ref() else {
-        return;
+        return false;
     };
+    let mut changed = false;
     let selected_tree = selected_workflow_tree(tree, Some(target)).unwrap_or(tree);
     if let Some(task) = selected_workflow_task(selected_tree, Some(target)) {
         let task_editor = state
             .and_then(|state| state.task_editor.as_ref())
             .filter(|editor| editor.task_path == task.path);
-        workbenches.sync(
+        changed |= workbenches.sync(
             "workflow-task".to_string(),
             MarkdownWorkbenchTarget::Workflow(WorkflowSelectionTarget::Task {
                 task_path: task.path.clone(),
@@ -42,7 +43,7 @@ pub(super) fn sync_workflow_workbenches(
             let step_editor = state
                 .and_then(|state| state.editor.as_ref())
                 .filter(|editor| editor.task_path == task.path && editor.step_path == *step_path);
-            workbenches.sync(
+            changed |= workbenches.sync(
                 "workflow-step".to_string(),
                 MarkdownWorkbenchTarget::Workflow(target.clone()),
                 step_editor.map_or(step.desc.as_str(), |editor| editor.step_text.as_str()),
@@ -52,15 +53,17 @@ pub(super) fn sync_workflow_workbenches(
                 step_editor.and_then(|editor| editor.save_error.as_deref()),
             );
         }
-        return;
+        return changed;
     }
     let path = match target {
         WorkflowSelectionTarget::WorkspaceRoot { root_path }
         | WorkflowSelectionTarget::Project { root_path } => root_path.clone(),
-        WorkflowSelectionTarget::Task { .. } | WorkflowSelectionTarget::Step { .. } => return,
+        WorkflowSelectionTarget::Task { .. } | WorkflowSelectionTarget::Step { .. } => {
+            return changed;
+        }
     };
     let markdown = workflow::selected_markdown(tree, Some(target)).unwrap_or_default();
-    workbenches.sync(
+    changed |= workbenches.sync(
         "workflow-primary".to_string(),
         MarkdownWorkbenchTarget::Document(path.clone()),
         &markdown,
@@ -69,6 +72,7 @@ pub(super) fn sync_workflow_workbenches(
         Some(workspace_root.join(&path)),
         None,
     );
+    changed
 }
 
 /// 同步 Dir 当前文件的 Markdown 工作台。
@@ -78,22 +82,23 @@ pub(super) fn sync_directory_workbench(
     browser: &DirectoryBrowser,
     document: Option<&DocumentState>,
     workbenches: &mut MarkdownWorkbenches,
-) {
+) -> bool {
     let Some(path) = browser.selected_file.as_ref() else {
-        return;
+        return false;
     };
+    let target = MarkdownWorkbenchTarget::Document(path.clone());
     let Some(document) = document.filter(|document| document.path.as_ref() == Some(path)) else {
-        return;
+        return workbenches.remove_clean_target("directory", &target);
     };
     workbenches.sync(
         "directory".to_string(),
-        MarkdownWorkbenchTarget::Document(path.clone()),
+        target,
         &document.text,
         &document.saved_text,
         true,
         document.absolute_path.clone(),
         document.save_error.as_deref(),
-    );
+    )
 }
 
 /// 目录 Column View 的帧间状态。
