@@ -11,6 +11,7 @@ tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/gsdv-tui-dir-switch.XXXXXX")"
 test_home="$tmp_dir/home"
 workspace="$tmp_dir/workspace"
 store="$tmp_dir/store.json"
+raw_output="$tmp_dir/tui-output.bin"
 socket_name="gsdv-tui-dir-switch-$$"
 session_name="dir-switch"
 target="$session_name:0.0"
@@ -56,6 +57,7 @@ jq -n \
 
 tmux -L "$socket_name" new-session -d -x 120 -y 40 -s "$session_name" \
   "cd '$workspace' && exec env HOME='$test_home' GSDV_STORE_PATH='$store' PATH='$test_home/bin:$PATH' '$binary' tui --fps 60"
+tmux -L "$socket_name" pipe-pane -O -t "$target" "cat >'$raw_output'"
 
 for _ in $(seq 1 300); do
   if tmux -L "$socket_name" capture-pane -p -t "$target" | rg -F '[Dir]' >/dev/null; then
@@ -116,5 +118,10 @@ if rg -F 'OLD_FILE_MARKER' <<<"$pane" >/dev/null; then
   echo 'FAIL: previous Markdown remained visible after the new load' >&2
   exit 1
 fi
+tmux -L "$socket_name" pipe-pane -t "$target"
+LC_ALL=C rg -a -F 'Loading...' "$raw_output" >/dev/null || {
+  echo 'FAIL: delayed Markdown did not render a loading state' >&2
+  exit 1
+}
 
-printf 'PASS: Dir Markdown switches after one click across asynchronous loading\n'
+printf 'PASS: Dir Markdown shows loading and switches after one click\n'

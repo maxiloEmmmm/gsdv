@@ -388,6 +388,19 @@ pub(super) fn draw_directory_columns(
         hit_regions,
         images,
     );
+    // 切换期间旧工作台已主动移除；这里明确表达新文件仍在异步加载。
+    if browser.selected_file.is_some() && !workbenches.items.contains_key("directory") {
+        let palette = tui_markdown_palette();
+        styled_overlay_text(
+            frame,
+            1,
+            content_x.saturating_add(1),
+            "Loading...",
+            palette.muted,
+            palette.background,
+            false,
+        );
+    }
 }
 
 /// 绘制单个 Workflow 导航列。
