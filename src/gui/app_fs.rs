@@ -63,11 +63,17 @@ impl GsdvGuiApp {
             self.reload_clean_selected_documents(ctx, &dirty_workspaces);
             self.spawn_outline_refresh_tasks(ctx, dirty_workspaces);
             for index in workflow_dirty_workspaces {
-                let workflow_visible = self
+                let gui_workflow_visible = self
                     .outline_panel_tabs
                     .get(index)
                     .is_some_and(|tab| *tab == OutlinePanelTab::Workflow);
-                if workflow_visible {
+                let workflow_tree_loaded = self
+                    .workflow_states
+                    .get(index)
+                    .is_some_and(|state| state.tree.is_some());
+                // TUI 的 Workflow 视图不复用 GUI 左栏 tab，但会持有同一棵 tree。
+                // 已加载 tree 也必须响应文件变化，否则 Markdown 与 Step 列会展示不同快照。
+                if gui_workflow_visible || workflow_tree_loaded {
                     self.request_workflow_tree_refresh(ctx, index);
                 }
             }
