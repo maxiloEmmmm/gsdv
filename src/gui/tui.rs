@@ -1290,6 +1290,29 @@ struct TuiRect {
     height: u16,
 }
 
+/// 宿主终端原生文本选择期间的 TUI 画面提交状态。
+///
+/// 适用场景：Shift 绕过 mouse capture。示例：Holding 后未输入按键 -> Latched。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum NativeSelectionState {
+    /// 正常提交画面。
+    #[default]
+    Inactive,
+    /// Shift 仍按住；值表示期间是否输入过其他按键。
+    Holding { key_used: bool },
+    /// Shift 已松开，但原生选区需保留到下一次应用输入。
+    Latched,
+}
+
+impl NativeSelectionState {
+    /// 判断是否应暂停 stdout 画面提交。
+    ///
+    /// 适用场景：主绘制与 poll 闸门共用。示例：Latched -> true。
+    fn freezes_output(self) -> bool {
+        self != Self::Inactive
+    }
+}
+
 impl TuiRect {
     /// 判断字符坐标是否在矩形内。
     ///
@@ -1927,6 +1950,8 @@ struct TuiState {
     cursor_position: Option<(u16, u16)>,
     /// 下一帧写入客户端剪贴板的文本。
     pending_clipboard_text: Option<String>,
+    /// Shift 原生选择的按住或锁存状态。
+    native_selection: NativeSelectionState,
 }
 
 impl TuiState {
@@ -1971,6 +1996,7 @@ impl TuiState {
             sidebar_scroll: 0,
             cursor_position: None,
             pending_clipboard_text: None,
+            native_selection: NativeSelectionState::Inactive,
         }
     }
 
@@ -2000,7 +2026,7 @@ impl TuiState {
             self.refresh_terminal_updates();
             self.refresh_busy_animation(app);
 
-            if self.dirty && self.frame_due() {
+            if self.dirty && !self.native_selection.freezes_output() && self.frame_due() {
                 self.draw(stdout, app)?;
             }
 
@@ -2017,7 +2043,7 @@ impl TuiState {
     ///
     /// 适用场景：idle poll。示例：不 dirty -> 20ms。
     fn poll_timeout(&self) -> Duration {
-        if !self.dirty {
+        if !self.dirty || self.native_selection.freezes_output() {
             return TUI_POLL_INTERVAL;
         }
         let remaining = self
@@ -2862,6 +2888,21 @@ impl TuiState {
         app: &mut GsdvGuiApp,
         ctx: &egui::Context,
     ) -> Result<bool> {
+        if self.native_selection == NativeSelectionState::Latched
+            && !matches!(
+                event,
+                TerminalEvent::Key(KeyEvent {
+                    code: KeyCode::Modifier(
+                        ModifierKeyCode::LeftShift | ModifierKeyCode::RightShift
+                    ),
+                    ..
+                })
+            )
+        {
+            // 普通应用输入会让宿主终端撤销选区，此时再一次性提交缓存中的最新画面。
+            self.native_selection = NativeSelectionState::Inactive;
+            self.dirty = true;
+        }
         match event {
             TerminalEvent::Resize(width, height) => {
                 self.size = (width, height);
@@ -2870,7 +2911,33 @@ impl TuiState {
             }
             TerminalEvent::Mouse(event) => self.handle_mouse(event, app),
             TerminalEvent::Paste(text) => self.handle_paste(text, app),
+            TerminalEvent::Key(key) if is_shift_modifier_key(key.code) => {
+                match key.kind {
+                    KeyEventKind::Press => {
+                        self.native_selection = NativeSelectionState::Holding { key_used: false };
+                    }
+                    KeyEventKind::Repeat => {}
+                    KeyEventKind::Release => {
+                        let key_used = matches!(
+                            self.native_selection,
+                            NativeSelectionState::Holding { key_used: true }
+                        );
+                        self.native_selection = if key_used {
+                            NativeSelectionState::Inactive
+                        } else {
+                            NativeSelectionState::Latched
+                        };
+                        // Shift 用于键盘组合时没有原生选区，松开即可补绘。
+                        if key_used {
+                            self.dirty = true;
+                        }
+                    }
+                }
+            }
             TerminalEvent::Key(key) if key.kind != KeyEventKind::Release => {
+                if let NativeSelectionState::Holding { key_used } = &mut self.native_selection {
+                    *key_used = true;
+                }
                 if matches!(self.layer, Some(TuiLayer::Gallery)) {
                     self.handle_gallery_key(key, app);
                 } else if matches!(self.layer, Some(TuiLayer::Rest)) {
@@ -6937,6 +7004,16 @@ fn submit_form(form: &FormDialog, app: &GsdvGuiApp) -> std::result::Result<TuiAp
             })
         }
     }
+}
+
+/// 判断增强键盘事件是否是左右 Shift 本身。
+///
+/// 适用场景：宿主终端用 Shift 绕过 mouse capture 进行原生选择。示例：LeftShift Press -> true。
+fn is_shift_modifier_key(code: KeyCode) -> bool {
+    matches!(
+        code,
+        KeyCode::Modifier(ModifierKeyCode::LeftShift | ModifierKeyCode::RightShift)
+    )
 }
 
 /// 在已加载 outline 中递归展开目标目录。
