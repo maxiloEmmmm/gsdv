@@ -45,6 +45,10 @@ pub(super) struct MarkdownWorkbench {
     pub cursor: usize,
     /// 预览或编辑首个可见行。
     pub scroll: usize,
+    /// 编辑态首个可见显示列。
+    pub horizontal_scroll: usize,
+    /// 连续上下移动时保留的显示列；横向编辑后重新计算。
+    pub preferred_cursor_column: Option<usize>,
     /// 下一帧是否需要把编辑光标重新纳入可视区。
     pub follow_cursor: bool,
     /// 保存已发出、等待共享状态回显。
@@ -103,6 +107,8 @@ impl MarkdownWorkbenches {
                     mode: MarkdownWorkbenchMode::Preview,
                     cursor: text.len(),
                     scroll: 0,
+                    horizontal_scroll: 0,
+                    preferred_cursor_column: None,
                     follow_cursor: true,
                     saving: false,
                     save_error: save_error.map(str::to_string),
@@ -131,6 +137,8 @@ impl MarkdownWorkbenches {
             item.saved_text = saved_text.to_string();
             item.cursor = item.text.len();
             item.scroll = 0;
+            item.horizontal_scroll = 0;
+            item.preferred_cursor_column = None;
             item.follow_cursor = true;
             item.saving = false;
             item.markdown_file = markdown_file;
@@ -222,10 +230,12 @@ impl MarkdownWorkbenches {
             {
                 item.text.insert(item.cursor, character);
                 item.cursor += character.len_utf8();
+                item.preferred_cursor_column = None;
             }
             KeyCode::Enter => {
                 item.text.insert(item.cursor, '\n');
                 item.cursor += 1;
+                item.preferred_cursor_column = None;
             }
             KeyCode::Backspace => {
                 if item.cursor > 0 {
@@ -236,6 +246,7 @@ impl MarkdownWorkbenches {
                         .unwrap_or(0);
                     item.text.replace_range(previous..item.cursor, "");
                     item.cursor = previous;
+                    item.preferred_cursor_column = None;
                 }
             }
             KeyCode::Delete => {
@@ -246,6 +257,7 @@ impl MarkdownWorkbenches {
                         .map(|(index, _)| item.cursor + index)
                         .unwrap_or(item.text.len());
                     item.text.replace_range(item.cursor..next, "");
+                    item.preferred_cursor_column = None;
                 }
             }
             KeyCode::Left => {
@@ -254,6 +266,7 @@ impl MarkdownWorkbenches {
                     .next_back()
                     .map(|(index, _)| index)
                     .unwrap_or(0);
+                item.preferred_cursor_column = None;
             }
             KeyCode::Right => {
                 item.cursor = item.text[item.cursor..]
@@ -261,16 +274,25 @@ impl MarkdownWorkbenches {
                     .nth(1)
                     .map(|(index, _)| item.cursor + index)
                     .unwrap_or(item.text.len());
+                item.preferred_cursor_column = None;
+            }
+            KeyCode::Up => {
+                move_markdown_cursor_vertically(item, false);
+            }
+            KeyCode::Down => {
+                move_markdown_cursor_vertically(item, true);
             }
             KeyCode::Home => {
                 item.cursor = item.text[..item.cursor]
                     .rfind('\n')
                     .map_or(0, |index| index + 1);
+                item.preferred_cursor_column = None;
             }
             KeyCode::End => {
                 item.cursor = item.text[item.cursor..]
                     .find('\n')
                     .map_or(item.text.len(), |index| item.cursor + index);
+                item.preferred_cursor_column = None;
             }
             KeyCode::Esc => return true,
             _ => return false,
@@ -296,6 +318,7 @@ impl MarkdownWorkbenches {
         }
         item.text.insert_str(item.cursor, text);
         item.cursor += text.len();
+        item.preferred_cursor_column = None;
         item.image_paths = collect_markdown_image_paths(&item.text, item.markdown_file.as_deref());
         item.follow_cursor = true;
         true
@@ -316,12 +339,14 @@ impl MarkdownWorkbenches {
         let mut selected = None;
         for (line_index, line) in item.text.split('\n').enumerate() {
             if line_index == target_line {
-                selected = Some(line_start + byte_index_at_display_column(line, column));
+                selected =
+                    Some(line_start + byte_index_at_display_column(line, usize::from(column)));
                 break;
             }
             line_start = line_start.saturating_add(line.len()).saturating_add(1);
         }
         item.cursor = selected.unwrap_or(item.text.len());
+        item.preferred_cursor_column = None;
         item.follow_cursor = true;
         self.focused = Some(key.to_string());
         true
@@ -345,11 +370,42 @@ impl MarkdownWorkbenches {
     }
 }
 
+/// 按显示列把 Markdown 光标移动到相邻行。
+///
+/// 适用场景：编辑态 Up/Down。示例：第 8 列经过短行后继续向下 -> 回到下一行第 8 列。
+fn move_markdown_cursor_vertically(item: &mut MarkdownWorkbench, down: bool) {
+    let current_start = item.text[..item.cursor]
+        .rfind('\n')
+        .map_or(0, |index| index + 1);
+    let current_column = display_width(&item.text[current_start..item.cursor]);
+    let preferred_column = *item.preferred_cursor_column.get_or_insert(current_column);
+    let target = if down {
+        let current_end = item.text[item.cursor..]
+            .find('\n')
+            .map_or(item.text.len(), |index| item.cursor + index);
+        if current_end == item.text.len() {
+            return;
+        }
+        let start = current_end + 1;
+        let end = item.text[start..]
+            .find('\n')
+            .map_or(item.text.len(), |index| start + index);
+        start + byte_index_at_display_column(&item.text[start..end], preferred_column)
+    } else {
+        if current_start == 0 {
+            return;
+        }
+        let end = current_start - 1;
+        let start = item.text[..end].rfind('\n').map_or(0, |index| index + 1);
+        start + byte_index_at_display_column(&item.text[start..end], preferred_column)
+    };
+    item.cursor = target;
+}
+
 /// 返回显示列对应的 UTF-8 字节边界。
 ///
 /// 适用场景：终端宽字符不能按字节定位。示例：点击中文字符单元格 -> 字符起点。
-fn byte_index_at_display_column(line: &str, target_column: u16) -> usize {
-    let target_column = usize::from(target_column);
+fn byte_index_at_display_column(line: &str, target_column: usize) -> usize {
     let mut column = 0_usize;
     for (byte_index, character) in line.char_indices() {
         let width = UnicodeWidthChar::width(character).unwrap_or(0);
@@ -626,6 +682,16 @@ fn draw_markdown_editor(item: &mut MarkdownWorkbench, frame: &mut [RenderLine], 
         } else if cursor_line >= item.scroll + rect.height as usize {
             item.scroll = cursor_line.saturating_sub(rect.height as usize - 1);
         }
+        let line_start = item.text[..item.cursor]
+            .rfind('\n')
+            .map_or(0, |index| index + 1);
+        let cursor_column = display_width(&item.text[line_start..item.cursor]);
+        let visible_width = usize::from(rect.width.max(1));
+        if cursor_column < item.horizontal_scroll {
+            item.horizontal_scroll = cursor_column;
+        } else if cursor_column >= item.horizontal_scroll.saturating_add(visible_width) {
+            item.horizontal_scroll = cursor_column.saturating_sub(visible_width - 1);
+        }
         item.follow_cursor = false;
     }
     for (screen, line) in lines
@@ -638,7 +704,10 @@ fn draw_markdown_editor(item: &mut MarkdownWorkbench, frame: &mut [RenderLine], 
             frame,
             rect.y + screen as u16,
             rect.x,
-            &clip_text(line, rect.width),
+            &clip_text(
+                text_from_display_column(line, item.horizontal_scroll),
+                rect.width,
+            ),
             palette.body,
             palette.background,
             false,
@@ -647,17 +716,37 @@ fn draw_markdown_editor(item: &mut MarkdownWorkbench, frame: &mut [RenderLine], 
     let line_start = item.text[..item.cursor]
         .rfind('\n')
         .map_or(0, |index| index + 1);
-    let cursor_column = display_width(&item.text[line_start..item.cursor]) as u16;
+    let cursor_column = display_width(&item.text[line_start..item.cursor])
+        .saturating_sub(item.horizontal_scroll) as u16;
     let cursor_y = rect.y + cursor_line.saturating_sub(item.scroll) as u16;
     if cursor_y < rect.y.saturating_add(rect.height) && cursor_column < rect.width {
+        let cursor_text = item.text[item.cursor..]
+            .chars()
+            .next()
+            .filter(|character| *character != '\n')
+            .map_or_else(|| " ".to_string(), |character| character.to_string());
         styled_overlay_text(
             frame,
             cursor_y,
             rect.x + cursor_column,
-            " ",
+            &cursor_text,
             palette.background,
             palette.body,
             true,
         );
     }
+}
+
+/// 返回指定显示列开始的 UTF-8 文本切片。
+///
+/// 适用场景：编辑长行的水平视口。示例：跳过 4 个 ASCII 列 -> 从第 5 个字符绘制。
+fn text_from_display_column(text: &str, target_column: usize) -> &str {
+    let mut column = 0_usize;
+    for (byte_index, character) in text.char_indices() {
+        if column >= target_column {
+            return &text[byte_index..];
+        }
+        column = column.saturating_add(UnicodeWidthChar::width(character).unwrap_or(0).max(1));
+    }
+    ""
 }
