@@ -3941,7 +3941,7 @@ impl TuiState {
                 let field_end = field_start + form.fields.len() as u16;
                 if event.row >= field_start && event.row < field_end {
                     form.active = usize::from(event.row - field_start);
-                    adjust_form_choice(form, true);
+                    adjust_form_choice(form, app, true);
                 } else if event.row == y + height - 2 && event.column >= x + 2 {
                     if event.column < x + 13 {
                         match submit_form(form, app) {
@@ -4347,7 +4347,9 @@ impl TuiState {
                         .unwrap_or(app.default_agent_kind);
                     items.push(MenuItem {
                         label: "Agent...".to_string(),
-                        action: Some(MenuAction::Form(workflow_agent_form(index, binding, kind))),
+                        action: Some(MenuAction::Form(workflow_agent_form(
+                            index, binding, kind, app,
+                        ))),
                     });
                 }
             }
@@ -4583,7 +4585,35 @@ impl TuiState {
             AgentTextField::Model,
             app,
         ));
-        if current_kind.is_some_and(AgentKind::supports_model_provider) {
+        if current_kind == Some(AgentKind::Claude) {
+            let selected = app
+                .agent_metadata_for_slot(target.workspace_index, &target.slot)
+                .and_then(|metadata| metadata.agent_model_provider);
+            let providers = std::iter::once("")
+                .chain(app.claude_provider_names.iter().map(String::as_str))
+                .map(|provider| {
+                    let title = if provider.is_empty() {
+                        i18n::text(app.app_language, "None")
+                    } else {
+                        provider
+                    };
+                    let label = if selected.as_deref().unwrap_or_default() == provider {
+                        format!("● {title}")
+                    } else {
+                        title.to_owned()
+                    };
+                    menu_queue(
+                        &label,
+                        TuiAppAction::SetAgentModelProvider {
+                            index: target.workspace_index,
+                            slot: target.slot.clone(),
+                            value: provider.to_owned(),
+                        },
+                    )
+                })
+                .collect();
+            items.push(menu_submenu("Set model provider", providers));
+        } else if current_kind == Some(AgentKind::Codex) {
             items.push(agent_text_menu(
                 "Set model provider...",
                 target,
@@ -4726,6 +4756,7 @@ impl TuiState {
                     workspace_index,
                     AddAgentPlacement::ExistingColumn(column_id.to_string()),
                     app.default_agent_kind,
+                    app,
                 ))),
             },
             MenuItem {
@@ -4734,6 +4765,7 @@ impl TuiState {
                     workspace_index,
                     AddAgentPlacement::NewRow(row_index),
                     app.default_agent_kind,
+                    app,
                 ))),
             },
             MenuItem {
@@ -4742,6 +4774,7 @@ impl TuiState {
                     workspace_index,
                     AddAgentPlacement::NewColumn(row_index),
                     app.default_agent_kind,
+                    app,
                 ))),
             },
             menu_separator(),
@@ -5155,8 +5188,8 @@ impl TuiState {
                             form.active = (form.active + form.fields.len() - 1) % form.fields.len();
                         }
                     }
-                    KeyCode::Up | KeyCode::Left => adjust_form_choice(form, false),
-                    KeyCode::Down | KeyCode::Right => adjust_form_choice(form, true),
+                    KeyCode::Up | KeyCode::Left => adjust_form_choice(form, app, false),
+                    KeyCode::Down | KeyCode::Right => adjust_form_choice(form, app, true),
                     KeyCode::Backspace => {
                         if let Some(FormField::Text { value, .. }) =
                             form.fields.get_mut(form.active)
@@ -6608,7 +6641,12 @@ fn display_width(text: &str) -> usize {
 /// 构造新增 Agent 的全字段表单。
 ///
 /// 适用场景：Add tab/row/column。示例：默认 Agent 类型来自 settings。
-fn add_agent_form(index: usize, placement: AddAgentPlacement, kind: AgentKind) -> FormDialog {
+fn add_agent_form(
+    index: usize,
+    placement: AddAgentPlacement,
+    kind: AgentKind,
+    app: &GsdvGuiApp,
+) -> FormDialog {
     let kinds = AgentKind::all();
     let selected = kinds.iter().position(|item| *item == kind).unwrap_or(0);
     FormDialog {
@@ -6627,10 +6665,7 @@ fn add_agent_form(index: usize, placement: AddAgentPlacement, kind: AgentKind) -
                 label: "Model".to_string(),
                 value: String::new(),
             },
-            FormField::Text {
-                label: "Model provider".to_string(),
-                value: String::new(),
-            },
+            new_agent_provider_field(kind, app),
             FormField::Text {
                 label: "Effort".to_string(),
                 value: String::new(),
@@ -6659,11 +6694,39 @@ fn add_agent_form(index: usize, placement: AddAgentPlacement, kind: AgentKind) -
     }
 }
 
+/// Builds the provider field for the chosen agent type. Example: Claude -> `None`, `work`.
+fn new_agent_provider_field(kind: AgentKind, app: &GsdvGuiApp) -> FormField {
+    let label = "Model provider".to_owned();
+    match kind {
+        AgentKind::Claude => FormField::Choice {
+            label,
+            options: std::iter::once(i18n::text(app.app_language, "None").to_owned())
+                .chain(app.claude_provider_names.iter().cloned())
+                .collect(),
+            selected: 0,
+        },
+        AgentKind::Codex => FormField::Text {
+            label,
+            value: String::new(),
+        },
+    }
+}
+
 /// 复用完整 Agent 表单创建 Workflow Agent，并填入目标默认名。
 ///
 /// 适用场景：TUI Workflow 右键 Agent。例：Task build -> Name 默认 build。
-fn workflow_agent_form(index: usize, binding: WorkflowAgentBinding, kind: AgentKind) -> FormDialog {
-    let mut form = add_agent_form(index, AddAgentPlacement::Workflow(binding.clone()), kind);
+fn workflow_agent_form(
+    index: usize,
+    binding: WorkflowAgentBinding,
+    kind: AgentKind,
+    app: &GsdvGuiApp,
+) -> FormDialog {
+    let mut form = add_agent_form(
+        index,
+        AddAgentPlacement::Workflow(binding.clone()),
+        kind,
+        app,
+    );
     form.title = format!("Workflow Agent · {}", binding.label);
     if let Some(FormField::Text { value, .. }) = form.fields.first_mut() {
         *value = binding.label;
@@ -6745,7 +6808,7 @@ fn agent_text_menu(
 /// 调整当前 choice 字段。
 ///
 /// 适用场景：表单 Left/Right/Up/Down。示例：Default -> On。
-fn adjust_form_choice(form: &mut FormDialog, forward: bool) {
+fn adjust_form_choice(form: &mut FormDialog, app: &GsdvGuiApp, forward: bool) {
     let Some(FormField::Choice {
         options, selected, ..
     }) = form.fields.get_mut(form.active)
@@ -6760,6 +6823,11 @@ fn adjust_form_choice(form: &mut FormDialog, forward: bool) {
     } else {
         (*selected + options.len() - 1) % options.len()
     };
+    if form.active == 1 && matches!(form.submit, FormSubmit::AddAgent { .. }) {
+        let kind = AgentKind::all()[*selected];
+        // Provider selections are scoped to the agent type, so switching resets the field.
+        form.fields[3] = new_agent_provider_field(kind, app);
+    }
 }
 
 /// 创建新增 Workflow Project 表单。
@@ -6836,7 +6904,14 @@ fn submit_form(form: &FormDialog, app: &GsdvGuiApp) -> std::result::Result<TuiAp
                 name,
                 kind,
                 model: form_text(form, 2),
-                model_provider: form_text(form, 3),
+                model_provider: match kind {
+                    AgentKind::Claude => form_choice(form, 3)
+                        .checked_sub(1)
+                        .and_then(|index| app.claude_provider_names.get(index))
+                        .cloned()
+                        .unwrap_or_default(),
+                    AgentKind::Codex => form_text(form, 3),
+                },
                 effort: form_text(form, 4),
                 fast_mode: match form_choice(form, 5) {
                     1 => Some(true),

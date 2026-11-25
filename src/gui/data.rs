@@ -1409,12 +1409,12 @@ fn normalize_stored_agent_model(model: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-/// 返回清理后的 Codex model provider 覆盖值。
+/// 清理保存的 Agent Provider。例：Claude ` Some(" work ") ` -> `Some("work")`。
 fn normalize_stored_agent_model_provider(
     kind: AgentKind,
     provider: Option<String>,
 ) -> Option<String> {
-    if kind != AgentKind::Codex {
+    if !kind.supports_model_provider() {
         return None;
     }
     provider

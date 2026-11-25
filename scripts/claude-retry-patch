@@ -1,0 +1,231 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use Cwd qw(abs_path);
+use File::Basename qw(dirname);
+use File::Copy qw(copy);
+use File::Temp qw(tempfile);
+use Fcntl qw(LOCK_EX);
+use Getopt::Long qw(GetOptions);
+use IO::Handle;
+
+my $marker = '/* gsdv-claude-retry:v1 */';
+my $id = qr/[a-zA-Z_\$][a-zA-Z0-9_\$]*/;
+my $trailer = "\n---- Bun! ----\n";
+my $record_size = 52;
+my $retry_delay = '2e3';
+
+# Read a bounded binary slice. Example: read_at($fh, 0, 4) -> ELF magic.
+sub read_at {
+    my ($file, $offset, $length) = @_;
+    seek($file, $offset, 0) && read($file, my $bytes, $length) == $length
+        or die "Cannot read binary at $offset ($length bytes)\n";
+    return $bytes;
+}
+
+# Find the Bun section in ELF64. Example: .bun -> [offset, size].
+sub elf_bun_section {
+    my ($file, $file_size) = @_;
+    my $header = read_at($file, 0, 64);
+    die "Expected a little-endian ELF64 Claude executable\n"
+        unless substr($header, 0, 7) eq "\x7fELF\x02\x01\x01";
+    my $table = unpack 'Q<', substr($header, 40, 8);
+    my ($entry_size, $count, $names_index) = unpack 'v3', substr($header, 58, 6);
+    die "Unsupported ELF section table\n"
+        unless $entry_size == 64 && $names_index < $count && $table + $count * 64 <= $file_size;
+    my $sections = read_at($file, $table, $count * 64);
+    my ($names_at, $names_len) = unpack 'Q<2', substr($sections, $names_index * 64 + 24, 16);
+    die "Invalid ELF section names\n" unless $names_len && $names_at + $names_len <= $file_size;
+    my $names = read_at($file, $names_at, $names_len);
+    for my $index (0 .. $count - 1) {
+        my $row = substr($sections, $index * 64, 64);
+        my $name_at = unpack 'V', $row;
+        next unless $name_at + 5 <= length($names) && substr($names, $name_at, 5) eq ".bun\0";
+        my ($offset, $size) = unpack 'Q<2', substr($row, 24, 16);
+        die "Invalid Bun section bounds\n" unless $size >= 8 + 32 + length($trailer) && $offset + $size <= $file_size;
+        return ($offset, $size);
+    }
+    die "Bun executable section missing\n";
+}
+
+# Find the file-backed section in a native macOS binary. Example: __BUN,__bun -> [offset, size].
+sub macho_bun_section {
+    my ($file, $file_size) = @_;
+    my $header = read_at($file, 0, 32);
+    my ($count, $length) = unpack 'V2', substr($header, 16, 8);
+    die "Invalid Mach-O load command table\n" unless $count <= $length / 8 && 32 + $length <= $file_size;
+    my $commands = read_at($file, 32, $length);
+    my @sections;
+    my $position = 0;
+    for (1 .. $count) {
+        die "Truncated Mach-O load command\n" if $position + 8 > $length;
+        my ($command, $command_size) = unpack 'V2', substr($commands, $position, 8);
+        die "Invalid Mach-O load command\n" if $command_size < 8 || $position + $command_size > $length;
+        my $start = $position;
+        $position += $command_size;
+        next unless $command == 0x19; # LC_SEGMENT_64
+        die "Truncated Mach-O segment\n" if $command_size < 72;
+        my $segment = substr($commands, $start, $command_size);
+        my $section_count = unpack 'V', substr($segment, 64, 4);
+        die "Invalid Mach-O section table\n" if 72 + 80 * $section_count > $command_size;
+        for my $index (0 .. $section_count - 1) {
+            my $row = substr($segment, 72 + 80 * $index, 80);
+            my ($name, $owner) = unpack 'Z16Z16', $row;
+            next unless $owner eq '__BUN' && $name eq '__bun';
+            my ($size, $offset) = unpack 'Q<V', substr($row, 40, 12);
+            die "Invalid Mach-O Bun section bounds\n"
+                unless $size >= 8 + 32 + length($trailer) && $offset + $size <= $file_size;
+            push @sections, [$offset, $size];
+        }
+    }
+    die "Mach-O Bun executable section must match exactly once\n" unless @sections == 1;
+    return @{ $sections[0] };
+}
+
+# Resolve the embedded retry source using the module table. Example: source, source offset, cache offset.
+sub retry_module {
+    my ($file, $file_size, $is_macho) = @_;
+    my ($section, $size) = $is_macho ? macho_bun_section($file, $file_size) : elf_bun_section($file, $file_size);
+    my $base = $section + 8;
+    my $footer_length = 32 + length($trailer);
+    my $footer = read_at($file, $section + $size - $footer_length, $footer_length);
+    my ($byte_count, $table_offset, $table_length) = unpack 'Q<VV', $footer;
+    die "Unsupported Bun module table format\n"
+        unless substr($footer, 32) eq $trailer
+            && $byte_count == $size - 8 - $footer_length
+            && $table_length && $table_length % $record_size == 0
+            && $table_offset + $table_length <= $byte_count;
+    my $table = read_at($file, $base + $table_offset, $table_length);
+    my @matches;
+    for (my $record = 0; $record < $table_length; $record += $record_size) {
+        my ($name_offset, $name_length, $source_offset, $source_length, undef, undef, $cache_offset, $cache_length) =
+            unpack 'V8', substr($table, $record, $record_size);
+        die "Invalid Bun module bounds\n"
+            if $name_offset + $name_length > $table_offset || $source_offset + $source_length > $table_offset
+                || $cache_offset + $cache_length > $byte_count;
+        next if $source_length < 2048 || $name_length < 3;
+        my $name = read_at($file, $base + $name_offset, $name_length);
+        next unless $name =~ m{^/\$bunfs/root/.*\.js$};
+        my $source = read_at($file, $base + $source_offset, $source_length);
+        next unless index($source, '.modelCallRetries?.reconnectsLeft()') >= 0
+            && index($source, '.CLAUDE_CODE_OVERLOADED_RETRY_MAX_DELAY_MS') >= 0
+            && (index($source, '.CLAUDE_CODE_RETRY_WATCHDOG_MAX_WAIT_MS') >= 0 || index($source, $marker) >= 0);
+        push @matches, [$source, $base + $source_offset, $base + $table_offset + $record + 24, $cache_length];
+    }
+    die "Retry module must match exactly once\n" unless @matches == 1;
+    return @{ $matches[0] };
+}
+
+# Match current retry semantics after minifier renaming. Example: catch(w) -> the transient 5xx predicate receives w.
+sub patched_source {
+    my ($source) = @_;
+    my $length = length $source;
+    my @watchdogs = $source =~ /function ($id)\(\)\{return $id\.CLAUDE_CODE_RETRY_WATCHDOG&&$id\.CLAUDE_CODE_RETRY_WATCHDOG_SCOPE!=="capacity"\}/g;
+    my @server_errors = $source =~ /function ($id)\(($id)\)\{return \2 instanceof $id&&\2\.status!==void 0&&\2\.status>=500&&\2\.status<600&&\2\.status!==529\}/g;
+    my @caught_errors = $source =~ /let $id=$id\(($id)\),$id,$id=$id,$id=null;if\($id\)\{let $id=\($id\?\?$id\.CLAUDE_CODE_RETRY_WATCHDOG_MAX_WAIT_MS/g;
+    die "Retry predicates changed\n" unless @watchdogs == 1 && @server_errors == 2 && @caught_errors == 1;
+    my $transient = "$watchdogs[0]()&&$server_errors[0]($caught_errors[0])";
+
+    my $capacity = ($source =~ s/($id)=300000,($id)=21600000,($id)=30000/
+        "$1=$retry_delay,$2=21600000,$3=30000"/ge);
+    my $wait = ($source =~ s/($id)\?\?$id\.CLAUDE_CODE_RETRY_WATCHDOG_MAX_WAIT_MS\?\?1\/0/$1??1\/0/g);
+    my $budget = ($source =~ s/if\(($id)&&\(($id)\.modelCallRetries\?\.reconnectsLeft\(\)\?\?0\)>0\)($id)\+\+;/
+        "if($transient||$1&&($2.modelCallRetries?.reconnectsLeft()??0)>0)$3++;"/ge);
+    my $delay = ($source =~ s/($id)=($id\?$id\.CLAUDE_CODE_OVERLOADED_RETRY_MAX_DELAY_MS:void 0);/
+        "$1=$transient?$retry_delay:$2;"/ge);
+    die "Retry branches changed (capacity=$capacity, wait=$wait, budget=$budget, delay=$delay)\n"
+        unless $capacity == 1 && $wait == 2 && $budget == 1 && $delay == 1;
+
+    # Keep other Bun modules at the original offsets and invalidate only this module's cached code.
+    my $padding = $length - length($source) - length($marker) - 1;
+    die "Patch does not fit in the original JavaScript module\n" if $padding < 0;
+    return $source . "\n" . $marker . (' ' x $padding);
+}
+
+# Read the CLI version without invoking a shell. Example: 2.1.330 (Claude Code).
+sub version {
+    my ($path) = @_;
+    open my $output, '-|', $path, '--version' or die "Cannot start $path: $!\n";
+    my $version = <$output> // '';
+    close($output) && $version =~ /^\d+\.\d+\.\d+.*\(Claude Code\)\s*$/
+        or die "Claude version check failed for $path\n";
+    chomp $version;
+    return $version;
+}
+
+# Sign the staged Mach-O after its code signatures have been invalidated. Example: staged CLI -> ad-hoc signature.
+sub sign_macho {
+    my ($path) = @_;
+    # Retain launch entitlements while applying a local signature to the changed bytes.
+    system('/usr/bin/codesign', '--force', '--sign', '-', '--preserve-metadata=identifier,entitlements,flags,runtime', $path) == 0
+        or die "Cannot sign staged macOS binary\n";
+    system('/usr/bin/codesign', '--verify', '--strict', $path) == 0
+        or die "Cannot verify staged macOS signature\n";
+}
+
+my ($check, $help) = (0, 0);
+GetOptions('check' => \$check, 'help' => \$help) && @ARGV <= 1 or die "See --help\n";
+if ($help) {
+    print "Usage: claude-retry-patch [--check] [path-to-claude]\n";
+    exit 0;
+}
+
+my $command = shift @ARGV;
+if (!defined $command) {
+    for my $directory (split /:/, $ENV{PATH} // '') {
+        my $candidate = (length($directory) ? $directory : '.') . '/claude';
+        if (-f $candidate && -x $candidate) {
+            $command = $candidate;
+            last;
+        }
+    }
+}
+die "Claude is missing from PATH\n" unless defined $command;
+my $path = abs_path($command) or die "Cannot resolve $command: $!\n";
+open my $original, '<:raw', $path or die "Cannot open $path: $!\n";
+flock($original, LOCK_EX) or die "Cannot lock $path: $!\n";
+my @original_stat = stat $original;
+die "Expected an executable regular file\n" unless -f $original && -x $path;
+my $magic = read_at($original, 0, 4);
+my $is_macho = $magic eq "\xcf\xfa\xed\xfe";
+die "Expected native ELF64 or Mach-O 64-bit Claude executable\n" unless $is_macho || $magic eq "\x7fELF";
+my ($source, $source_at, $cache_at, $cache_len) = retry_module($original, $original_stat[7], $is_macho);
+if (index($source, $marker) >= 0) {
+    die "Patch marker found with active cached bytecode\n" if $cache_len;
+    print "Already patched: $path\n";
+    exit 0;
+}
+my $patched = patched_source($source);
+if ($check) {
+    if (($is_macho && $^O ne 'darwin') || (!$is_macho && $^O ne 'linux')) {
+        print "Compatible bundle structure (runtime untested): $path\n";
+    } else {
+        print "Compatible: ", version($path), " ($path)\n";
+    }
+    exit 0;
+}
+die "Patch Mach-O binaries on macOS where they can be signed and verified\n" if $is_macho && $^O ne 'darwin';
+die "Patch ELF binaries on Linux where they can be verified\n" if !$is_macho && $^O ne 'linux';
+
+my ($temporary, $staged) = tempfile('.claude-retry-XXXXXXXX', DIR => dirname($path), UNLINK => 1);
+binmode $temporary;
+seek($original, 0, 0) && copy($original, $temporary) or die "Cannot stage $path: $!\n";
+seek($temporary, $source_at, 0) && print($temporary $patched) or die "Cannot write retry module: $!\n";
+seek($temporary, $cache_at, 0) && print($temporary pack('V2', 0, 0)) or die "Cannot clear retry bytecode: $!\n";
+$temporary->flush && $temporary->sync && close($temporary) or die "Cannot flush staged binary: $!\n";
+chmod($original_stat[2] & 0777, $staged) or die "Cannot mark staged binary executable: $!\n";
+sign_macho($staged) if $is_macho;
+my $version = version($path);
+die "Patched binary reports a different version\n" unless version($staged) eq $version;
+my @current_stat = stat $path;
+die "Claude changed during patching\n"
+    unless (abs_path($command) // '') eq $path
+        && join(',', @original_stat[0, 1, 7, 9, 10]) eq join(',', @current_stat[0, 1, 7, 9, 10]);
+my $backup = "$path.retry-original";
+my $suffix = 0;
+while (-e $backup || -l $backup) {
+    $backup = "$path.retry-original." . ++$suffix;
+}
+link($path, $backup) or die "Cannot back up $path to $backup: $!\n";
+rename($staged, $path) or die "Cannot replace $path: $!\n";
+print "Patched $version at $path\nBackup: $backup\n";

@@ -54,9 +54,9 @@ impl AgentKind {
         matches!(self, Self::Codex)
     }
 
-    /// Returns whether this agent CLI supports model provider overrides.
+    /// Reports support for per-slot providers. Example: Claude settings profiles -> true.
     pub fn supports_model_provider(self) -> bool {
-        matches!(self, Self::Codex)
+        matches!(self, Self::Codex | Self::Claude)
     }
 
     pub fn all() -> [Self; 2] {
@@ -269,7 +269,7 @@ fn normalized_agent_model_arg(model: Option<&str>) -> Option<&str> {
 
 /// Returns a non-empty Codex model provider override suitable for CLI args.
 fn normalized_agent_model_provider_arg(kind: AgentKind, provider: Option<&str>) -> Option<&str> {
-    if !kind.supports_model_provider() {
+    if kind != AgentKind::Codex {
         return None;
     }
     provider.map(str::trim).filter(|value| !value.is_empty())

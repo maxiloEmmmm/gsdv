@@ -1175,6 +1175,9 @@ impl GsdvGuiApp {
             AppEvent::TuiAction(action) => {
                 self.apply_tui_action(ctx, action);
             }
+            AppEvent::SetAgentModelProvider { index, slot, value } => {
+                self.set_agent_slot_model_provider(ctx, index, slot, value);
+            }
             AppEvent::PomodoroInputDetected => {
                 self.process_pomodoro_input_detected(ctx);
             }

@@ -1215,9 +1215,8 @@ impl GsdvGuiApp {
                         if !agent_kind.supports_fast_mode() {
                             agent_fast_mode = None;
                         }
-                        if !agent_kind.supports_model_provider() {
-                            agent_model_provider.clear();
-                        }
+                        // A provider name has meaning only within the selected Agent type.
+                        agent_model_provider.clear();
                         next_dialog = Some(AppDialog::AddSubagent {
                             index,
                             column_id: column_id.clone(),
@@ -1266,12 +1265,17 @@ impl GsdvGuiApp {
                             "MODEL PROVIDER (OPTIONAL)",
                         )));
                         let provider_before = agent_model_provider.clone();
-                        codex_model_provider_picker(
+                        agent_model_provider_picker(
                             ui,
                             self.app_language,
                             ("add-subagent-model-provider", index),
+                            agent_kind,
                             &mut agent_model_provider,
-                            &model_providers,
+                            if agent_kind == AgentKind::Claude {
+                                &self.claude_provider_names
+                            } else {
+                                &model_providers
+                            },
                         );
                         if agent_model_provider != provider_before {
                             next_dialog = Some(AppDialog::AddSubagent {
@@ -1686,6 +1690,7 @@ impl GsdvGuiApp {
                     model_providers,
                 } => {
                     let workspace = self.agent_metadata_for_slot(index, &slot);
+                    let kind = workspace.as_ref().map_or(AgentKind::Codex, |item| item.agent_kind);
                     ui.label(
                         RichText::new(i18n::text(self.app_language, "Agent model provider"))
                             .strong(),
@@ -1703,10 +1708,11 @@ impl GsdvGuiApp {
                         "MODEL PROVIDER (OPTIONAL)",
                     )));
                     let provider_before = model_provider.clone();
-                    let response = codex_model_provider_picker(
+                    let response = agent_model_provider_picker(
                         ui,
                         self.app_language,
                         ("set-agent-model-provider", index),
+                        kind,
                         &mut model_provider,
                         &model_providers,
                     );
@@ -2364,8 +2370,8 @@ impl GsdvGuiApp {
         if let Some((index, slot, model)) = set_agent_model {
             self.set_agent_slot_model(ctx, index, slot, model);
         }
-        if let Some((index, slot, model_provider)) = set_agent_model_provider {
-            self.set_agent_slot_model_provider(ctx, index, slot, model_provider);
+        if let Some((index, slot, value)) = set_agent_model_provider {
+            self.queue_app_event(AppEvent::SetAgentModelProvider { index, slot, value });
         }
         if let Some((index, slot, work_dir)) = set_agent_work_dir {
             self.set_agent_slot_work_dir(ctx, index, slot, work_dir);
@@ -3491,54 +3497,54 @@ fn codex_auth_identity(info: &crate::ai::CodexAuthInfo) -> String {
         .unwrap_or_else(|| info.account_id.clone())
 }
 
-/// Draws a Codex model provider picker backed by ~/.codex/config.toml names.
-fn codex_model_provider_picker(
+/// Draws the per-kind provider picker. Example: Claude `work.json` -> `work` option.
+fn agent_model_provider_picker(
     ui: &mut Ui,
     language: AppLanguage,
     id: impl std::hash::Hash,
+    kind: AgentKind,
     model_provider: &mut String,
     model_providers: &[String],
 ) -> egui::Response {
-    let response = ui.add(
-        egui::TextEdit::singleline(model_provider)
-            .hint_text(i18n::text(language, "empty passes no -c model_provider"))
-            .desired_width(f32::INFINITY),
-    );
-    ui.add_space(8.0);
-    let mut selected = model_provider.trim().to_string();
-    ui.push_id(id, |ui| {
+    let codex = kind == AgentKind::Codex;
+    let response = codex.then(|| {
+        let response = ui.add(
+            egui::TextEdit::singleline(model_provider)
+                .hint_text(i18n::text(language, "empty passes no -c model_provider"))
+                .desired_width(f32::INFINITY),
+        );
+        ui.add_space(8.0);
+        response
+    });
+    let choices = ui.push_id(id, |ui| {
         ui.horizontal_wrapped(|ui| {
             if ui
-                .radio_value(&mut selected, String::new(), i18n::text(language, "None"))
+                .radio(
+                    model_provider.trim().is_empty(),
+                    i18n::text(language, "None"),
+                )
                 .clicked()
             {
                 model_provider.clear();
             }
-            if ui
-                .radio_value(
-                    &mut selected,
-                    data::CODEX_MODEL_PROVIDER_OPENAI.to_string(),
-                    data::CODEX_MODEL_PROVIDER_OPENAI,
-                )
-                .clicked()
-            {
-                *model_provider = data::CODEX_MODEL_PROVIDER_OPENAI.to_string();
-            }
-            for provider in model_providers {
-                let provider = provider.trim();
-                if provider.is_empty() || provider == data::CODEX_MODEL_PROVIDER_OPENAI {
-                    continue;
-                }
+            let openai = data::CODEX_MODEL_PROVIDER_OPENAI;
+            let providers = codex.then_some(openai).into_iter().chain(
+                model_providers
+                    .iter()
+                    .map(|provider| provider.trim())
+                    .filter(|provider| !provider.is_empty() && (!codex || *provider != openai)),
+            );
+            for provider in providers {
                 if ui
-                    .radio_value(&mut selected, provider.to_string(), provider)
+                    .radio(model_provider.trim() == provider, provider)
                     .clicked()
                 {
-                    *model_provider = provider.to_string();
+                    *model_provider = provider.to_owned();
                 }
             }
-        });
+        })
     });
-    response
+    response.unwrap_or(choices.inner.response)
 }
 
 /// 绘制运行时设置，适用于重绘、Agent 与番茄钟行为。

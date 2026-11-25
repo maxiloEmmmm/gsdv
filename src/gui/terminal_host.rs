@@ -1545,7 +1545,7 @@ impl GuiTerminalHost {
             session_id: workspace.session_id.clone(),
         }));
         let shell = terminal_command(workspace, kind);
-        let args = terminal_args(workspace, kind, id, agent_launch, agent_session_id);
+        let args = terminal_args(workspace, kind, id, agent_launch, agent_session_id)?;
         let env = terminal_env(workspace, kind, network_settings);
         let working_directory = terminal_working_directory(workspace, kind);
         let launch_command = command_display(&shell, &args);
@@ -5499,18 +5499,18 @@ fn non_empty_os_string(value: Option<OsString>) -> Option<OsString> {
     value.filter(|value| !value.as_os_str().is_empty())
 }
 
+/// Builds PTY command arguments. Example: Claude provider `work` -> `--settings …/work.json`.
 fn terminal_args(
     workspace: &TerminalWorkspaceMetadata,
     kind: TerminalSurfaceKind,
     _id: u64,
     agent_launch: &AgentLaunchConfig,
     agent_session_id: Option<&str>,
-) -> Vec<String> {
+) -> Result<Vec<String>> {
     match kind {
         TerminalSurfaceKind::Agent => {
-            let mut args = Vec::new();
             let resume_cwd = terminal_working_directory(workspace, kind);
-            args.extend(agent_launch.args_for(
+            let mut args = agent_launch.args_for(
                 workspace.agent_kind,
                 agent_session_id,
                 workspace.agent_model.as_deref(),
@@ -5518,11 +5518,16 @@ fn terminal_args(
                 workspace.agent_effort.as_deref(),
                 workspace.agent_fast_mode,
                 Some(resume_cwd.as_path()),
-            ));
-            args
+            );
+            if workspace.agent_kind == AgentKind::Claude
+                && let Some(provider) = workspace.agent_model_provider.as_deref()
+            {
+                let settings = super::claude_provider::settings_arg(provider)?;
+                args.extend(["--settings".to_owned(), settings]);
+            }
+            Ok(args)
         }
-        TerminalSurfaceKind::Workspace => Vec::new(),
-        TerminalSurfaceKind::Helix => Vec::new(),
+        TerminalSurfaceKind::Workspace | TerminalSurfaceKind::Helix => Ok(Vec::new()),
     }
 }
 

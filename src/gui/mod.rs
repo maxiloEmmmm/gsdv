@@ -1,6 +1,7 @@
 pub(crate) mod agent;
 pub(crate) mod agent_status_hook;
 mod app;
+mod claude_provider;
 mod data;
 mod diff_viewer;
 mod glow_gravity_lens;

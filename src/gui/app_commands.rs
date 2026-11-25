@@ -762,12 +762,16 @@ impl GsdvGuiApp {
                 slot,
                 model_provider,
             } => {
+                let model_providers = match self.agent_slot_kind(self.active_workspace, &slot) {
+                    Some(AgentKind::Claude) => self.claude_provider_names.clone(),
+                    _ => data::load_codex_model_provider_names(),
+                };
                 self.set_active_agent_slot(self.active_workspace, slot.clone());
                 self.set_active_app_dialog(Some(AppDialog::SetAgentModelProvider {
                     index: self.active_workspace,
                     slot,
                     model_provider,
-                    model_providers: data::load_codex_model_provider_names(),
+                    model_providers,
                 }));
             }
             AgentTabAction::SetEffort { slot, effort } => {

@@ -519,6 +519,8 @@ struct GsdvGuiApp {
     /// 用户设置的新 workspace 默认 agent。
     default_agent_kind: AgentKind,
     agent_launch: AgentLaunchConfig,
+    /// Local Claude profile titles loaded before rendering. Example: `work.json` -> `work`.
+    claude_provider_names: Vec<String>,
     fs_watcher: Arc<Mutex<FsWatcherService>>,
     fs_watch_dirty: FsWatchDirtyState,
     /// 上一次 UI pass 中 memo 文本变化的 workspace。
@@ -1027,6 +1029,7 @@ impl GsdvGuiApp {
             app_fullscreen: false,
             default_agent_kind: agent_launch.kind,
             agent_launch,
+            claude_provider_names: super::claude_provider::names(),
             fs_watcher: Arc::new(Mutex::new(FsWatcherService::new(
                 app_event_tx.clone(),
                 repaint_controller.clone(),
@@ -2003,6 +2006,15 @@ enum AppEvent {
     },
     /// TUI 输入解析后的业务动作。
     TuiAction(tui_runtime::TuiAppAction),
+    /// 应用 GUI 确认的 Agent Provider，并由事件阶段触发保存和重启。
+    SetAgentModelProvider {
+        /// Agent 所属的 workspace 索引。
+        index: usize,
+        /// 要重启的 Agent 槽位。
+        slot: AgentSlotId,
+        /// 选中的 Provider 名称，空字符串表示使用默认设置。
+        value: String,
+    },
     /// input runtime 检测到番茄钟相关输入。
     PomodoroInputDetected,
     /// 派发 settings 保存副作用。

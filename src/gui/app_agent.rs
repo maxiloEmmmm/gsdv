@@ -228,6 +228,10 @@ impl GsdvGuiApp {
         };
         match slot {
             AgentSlotId::Main => {
+                if workspace.agent_kind != next_kind {
+                    // Codex and Claude interpret provider names in separate namespaces.
+                    workspace.agent_model_provider = None;
+                }
                 workspace.agent_kind = next_kind;
                 if !workspace
                     .agent_effort
@@ -239,9 +243,6 @@ impl GsdvGuiApp {
                 if !next_kind.supports_fast_mode() {
                     workspace.agent_fast_mode = None;
                 }
-                if !next_kind.supports_model_provider() {
-                    workspace.agent_model_provider = None;
-                }
                 workspace.session_id = None;
                 workspace.activity = WorkspaceActivity::Unknown;
             }
@@ -251,6 +252,9 @@ impl GsdvGuiApp {
                     .iter_mut()
                     .find(|subagent| &subagent.id == id)
                 {
+                    if subagent.agent_kind != next_kind {
+                        subagent.agent_model_provider = None;
+                    }
                     subagent.agent_kind = next_kind;
                     if !subagent
                         .agent_effort
@@ -261,9 +265,6 @@ impl GsdvGuiApp {
                     }
                     if !next_kind.supports_fast_mode() {
                         subagent.agent_fast_mode = None;
-                    }
-                    if !next_kind.supports_model_provider() {
-                        subagent.agent_model_provider = None;
                     }
                     subagent.session_id = None;
                     subagent.activity = WorkspaceActivity::Unknown;
@@ -351,6 +352,11 @@ impl GsdvGuiApp {
             }
         }
         self.persist_agent_slot_change(index, &slot);
+        if let Some(dirty_at) = self.workspace_store_dirty_at.as_mut() {
+            // Provider changes are discrete. Let the existing async writer take this snapshot
+            // on the next pass so the persisted provider follows the restarted process promptly.
+            *dirty_at = Instant::now() - WORKSPACE_STORE_SAVE_DEBOUNCE;
+        }
         if let Some(hosts) = self.terminal_hosts.get_mut(index) {
             hosts.agents.remove(&slot);
         }
@@ -902,7 +908,7 @@ fn normalized_agent_model_value(model: &str) -> Option<String> {
     (!model.is_empty()).then(|| model.to_string())
 }
 
-/// Normalizes a Codex model provider override entered by the user.
+/// Normalizes a per-slot provider override. Example: `""` -> default provider.
 fn normalized_agent_model_provider_value(kind: AgentKind, provider: &str) -> Option<String> {
     if !kind.supports_model_provider() {
         return None;
